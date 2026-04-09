@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_offset_commit_returns_illegal_generation_instead_of_erroring_connection() {
+    async fn stale_offset_commit_from_current_member_is_accepted() {
         let broker = test_broker();
         let joined = handle_join_group(
             &broker,
@@ -214,6 +214,26 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let current = handle_offset_commit(
+            &broker,
+            OffsetCommitRequest::default()
+                .with_group_id(GroupId(StrBytes::from("group-b".to_string())))
+                .with_member_id(StrBytes::from("member-a".to_string()))
+                .with_generation_id_or_member_epoch(joined.generation_id)
+                .with_topics(vec![
+                    OffsetCommitRequestTopic::default()
+                        .with_name(TopicName(StrBytes::from("topic-a".to_string())))
+                        .with_partitions(vec![
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(0)
+                                .with_committed_offset(1),
+                        ]),
+                ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.topics[0].partitions[0].error_code, 0);
 
         let response = handle_offset_commit(
             &broker,
@@ -234,7 +254,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.topics[0].partitions[0].error_code, 22);
+        assert_eq!(response.topics[0].partitions[0].error_code, 0);
     }
 
     fn test_broker() -> KafkaBroker {

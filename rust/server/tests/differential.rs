@@ -2,10 +2,26 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::{Bytes, BytesMut};
 use kafkalite_server::{
     Config, FileStore, KafkaBroker,
     config::{BrokerConfig, StorageConfig},
+    protocol,
 };
+use kafka_protocol::messages::consumer_protocol_assignment::TopicPartition as AssignmentTopicPartition;
+use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+use kafka_protocol::messages::offset_commit_request::{
+    OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
+use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
+use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
+use kafka_protocol::messages::{
+    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId,
+    JoinGroupRequest, JoinGroupResponse, OffsetCommitRequest, OffsetCommitResponse,
+    OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader, SyncGroupRequest,
+    SyncGroupResponse, TopicName,
+};
+use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -39,6 +55,14 @@ struct ResumeSnapshot {
 #[derive(Debug, PartialEq, Eq)]
 struct InvalidPartitionSnapshot {
     error: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StaleCommitSnapshot {
+    stale_commit_error: i16,
+    offset_after_stale_commit: i64,
+    valid_commit_error: i16,
+    offset_after_valid_commit: i64,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -79,6 +103,11 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_invalid = invalid_partition_snapshot(&local_bootstrap, &invalid_partition_topic).await;
     assert_eq!(local_invalid, real_invalid);
 
+    let stale_commit_topic = format!("diff.stale-commit.{suffix}");
+    let real_stale_commit = stale_commit_after_handoff_snapshot(&real_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
+    let local_stale_commit = stale_commit_after_handoff_snapshot(&local_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
+    assert_eq!(local_stale_commit, real_stale_commit);
+
     handle.abort();
     let _ = handle.await;
 }
@@ -108,6 +137,62 @@ async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPart
 
     InvalidPartitionSnapshot {
         error: format!("{:?}", error.0),
+    }
+}
+
+async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group_id: &str) -> StaleCommitSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join_v1 = join_group(bootstrap, group_id, None, topic, b"v1");
+    let assignment = encode_assignment(topic);
+    let _sync_v1 = sync_group(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, &join_v1.member_id, &[(&join_v1.member_id, assignment.clone())]);
+    let initial_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 1);
+    assert_eq!(initial_commit.topics[0].partitions[0].error_code, 0);
+
+    let bootstrap_b = bootstrap.to_string();
+    let group_b = group_id.to_string();
+    let topic_b = topic.to_string();
+    let join_b_handle = std::thread::spawn(move || join_group(&bootstrap_b, &group_b, None, &topic_b, b"v2"));
+    std::thread::sleep(Duration::from_millis(50));
+    let join_a_v2 = join_group(bootstrap, group_id, Some(join_v1.member_id.as_ref()), topic, b"v1");
+    let join_b_v2 = join_b_handle.join().unwrap();
+
+    let generation = join_a_v2.generation_id;
+    let leader = if join_a_v2.leader == join_a_v2.member_id {
+        join_a_v2.member_id.clone()
+    } else {
+        join_b_v2.leader.clone()
+    };
+    let follower = if leader == join_a_v2.member_id {
+        join_b_v2.member_id.clone()
+    } else {
+        join_a_v2.member_id.clone()
+    };
+
+    let leader_assignments = vec![
+        (join_a_v2.member_id.as_ref(), encode_empty_assignment()),
+        (join_b_v2.member_id.as_ref(), encode_assignment(topic)),
+    ];
+    let _leader_sync = sync_group(bootstrap, group_id, generation, &leader, &leader, &leader_assignments);
+    let _follower_sync = sync_group(bootstrap, group_id, generation, &follower, &leader, &[]);
+
+    let stale_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 9);
+    let offset_after_stale = offset_fetch(bootstrap, group_id, topic);
+    let valid_commit = offset_commit(bootstrap, group_id, generation, &join_b_v2.member_id, topic, 2);
+    let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
+
+    StaleCommitSnapshot {
+        stale_commit_error: stale_commit.topics[0].partitions[0].error_code,
+        offset_after_stale_commit: offset_after_stale.topics[0].partitions[0].committed_offset,
+        valid_commit_error: valid_commit.topics[0].partitions[0].error_code,
+        offset_after_valid_commit: offset_after_valid.topics[0].partitions[0].committed_offset,
     }
 }
 
@@ -258,4 +343,169 @@ fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::
 fn bootstrap_available(bootstrap: &str) -> bool {
     let consumer = consumer(bootstrap, "bootstrap-probe");
     consumer.fetch_metadata(None, Duration::from_secs(2)).is_ok()
+}
+
+fn join_group(
+    bootstrap: &str,
+    group_id: &str,
+    member_id: Option<&str>,
+    topic: &str,
+    user_data: &[u8],
+) -> JoinGroupResponse {
+    send_request::<JoinGroupRequest, JoinGroupResponse>(
+        bootstrap,
+        ApiKey::JoinGroup,
+        protocol::JOIN_GROUP_VERSION,
+        JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_session_timeout_ms(5_000)
+            .with_rebalance_timeout_ms(5_000)
+            .with_member_id(StrBytes::from(member_id.unwrap_or("").to_string()))
+            .with_protocol_type(StrBytes::from("consumer".to_string()))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from("range".to_string()))
+                    .with_metadata(Bytes::from(encode_subscription(topic, user_data))),
+            ]),
+    )
+}
+
+fn sync_group(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+    leader_member_id: &str,
+    assignments: &[(&str, Vec<u8>)],
+) -> SyncGroupResponse {
+    send_request::<SyncGroupRequest, SyncGroupResponse>(
+        bootstrap,
+        ApiKey::SyncGroup,
+        protocol::SYNC_GROUP_VERSION,
+        SyncGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string()))
+            .with_protocol_name(Some(StrBytes::from("range".to_string())))
+            .with_assignments(
+                if member_id == leader_member_id {
+                    assignments
+                        .iter()
+                        .map(|(member, assignment)| {
+                            SyncGroupRequestAssignment::default()
+                                .with_member_id(StrBytes::from((*member).to_string()))
+                                .with_assignment(Bytes::from(assignment.clone()))
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                },
+            ),
+    )
+}
+
+fn offset_commit(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+    topic: &str,
+    next_offset: i64,
+) -> OffsetCommitResponse {
+    send_request::<OffsetCommitRequest, OffsetCommitResponse>(
+        bootstrap,
+        ApiKey::OffsetCommit,
+        protocol::OFFSET_COMMIT_VERSION,
+        OffsetCommitRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id_or_member_epoch(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string()))
+            .with_group_instance_id(None)
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(0)
+                            .with_committed_offset(next_offset),
+                    ]),
+            ]),
+    )
+}
+
+fn offset_fetch(bootstrap: &str, group_id: &str, topic: &str) -> OffsetFetchResponse {
+    send_request::<OffsetFetchRequest, OffsetFetchResponse>(
+        bootstrap,
+        ApiKey::OffsetFetch,
+        protocol::OFFSET_FETCH_VERSION,
+        OffsetFetchRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partition_indexes(vec![0]),
+            ])),
+    )
+}
+
+fn send_request<TReq: Encodable, TResp: Decodable>(
+    bootstrap: &str,
+    api_key: ApiKey,
+    api_version: i16,
+    request: TReq,
+) -> TResp {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(bootstrap).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    let mut payload = BytesMut::new();
+    RequestHeader::default()
+        .with_request_api_key(api_key as i16)
+        .with_request_api_version(api_version)
+        .with_correlation_id(1)
+        .with_client_id(Some(StrBytes::from("differential".to_string())))
+        .encode(&mut payload, api_key.request_header_version(api_version))
+        .unwrap();
+    request.encode(&mut payload, api_version).unwrap();
+
+    stream.write_all(&(payload.len() as i32).to_be_bytes()).unwrap();
+    stream.write_all(payload.as_ref()).unwrap();
+
+    let mut size = [0_u8; 4];
+    stream.read_exact(&mut size).unwrap();
+    let size = i32::from_be_bytes(size) as usize;
+    let mut body = vec![0_u8; size];
+    stream.read_exact(&mut body).unwrap();
+    let mut bytes = Bytes::from(body);
+    let _ = ResponseHeader::decode(&mut bytes, api_key.response_header_version(api_version)).unwrap();
+    TResp::decode(&mut bytes, api_version).unwrap()
+}
+
+fn encode_subscription(topic: &str, user_data: &[u8]) -> Vec<u8> {
+    let subscription = ConsumerProtocolSubscription::default()
+        .with_topics(vec![StrBytes::from(topic.to_string())])
+        .with_user_data(Some(Bytes::copy_from_slice(user_data)));
+    let mut bytes = BytesMut::new();
+    subscription.encode(&mut bytes, 3).unwrap();
+    bytes.to_vec()
+}
+
+fn encode_assignment(topic: &str) -> Vec<u8> {
+    let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(vec![
+        AssignmentTopicPartition::default()
+            .with_topic(TopicName(StrBytes::from(topic.to_string())))
+            .with_partitions(vec![0]),
+    ]);
+    let mut bytes = BytesMut::new();
+    assignment.encode(&mut bytes, 3).unwrap();
+    bytes.to_vec()
+}
+
+fn encode_empty_assignment() -> Vec<u8> {
+    let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(vec![]);
+    let mut bytes = BytesMut::new();
+    assignment.encode(&mut bytes, 3).unwrap();
+    bytes.to_vec()
 }

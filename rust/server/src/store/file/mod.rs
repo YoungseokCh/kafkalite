@@ -359,25 +359,27 @@ impl Storage for FileStore {
         now_ms: i64,
     ) -> Result<()> {
         let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        {
-            let group =
-                inner
-                    .groups
-                    .get_mut(group_id)
-                    .ok_or_else(|| StoreError::UnknownMember {
-                        group_id: group_id.to_string(),
-                        member_id: member_id.to_string(),
-                    })?;
-            ensure_generation(group, generation_id)?;
-            if !group.members.contains_key(member_id) {
-                return Err(StoreError::UnknownMember {
-                    group_id: group_id.to_string(),
-                    member_id: member_id.to_string(),
-                });
-            }
-            if let Some(member) = group.members.get_mut(member_id) {
-                member.updated_at_unix_ms = now_ms;
-            }
+        let group = inner
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.to_string(),
+            })?;
+        if !group.members.contains_key(member_id) {
+            return Err(StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.to_string(),
+            });
+        }
+        if generation_id > group.generation_id {
+            return Err(StoreError::StaleGeneration {
+                expected: group.generation_id,
+                actual: generation_id,
+            });
+        }
+        if let Some(member) = group.members.get_mut(member_id) {
+            member.updated_at_unix_ms = now_ms;
         }
         inner
             .offsets

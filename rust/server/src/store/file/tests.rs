@@ -87,7 +87,7 @@ fn assignment_respects_member_subscriptions() {
 }
 
 #[test]
-fn offset_commit_requires_current_member_generation() {
+fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_member() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     let joined = store
@@ -120,7 +120,16 @@ fn offset_commit_requires_current_member_generation() {
         2,
         300,
     );
-    assert!(matches!(stale, Err(StoreError::StaleGeneration { .. })));
+    assert!(stale.is_ok());
+    let future = store.commit_offset(
+        "group-b",
+        "member-a",
+        joined.generation_id + 1,
+        "topic-a",
+        3,
+        300,
+    );
+    assert!(matches!(future, Err(StoreError::StaleGeneration { .. })));
     let unknown = store.commit_offset(
         "group-b",
         "member-b",
