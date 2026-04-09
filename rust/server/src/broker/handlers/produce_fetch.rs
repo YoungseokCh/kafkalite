@@ -99,7 +99,11 @@ pub async fn handle_list_offsets(
             .partitions
             .into_iter()
             .map(|partition| {
-                let result = if partition.timestamp < 0 { latest.clone() } else { earliest.clone() };
+                let result = match partition.timestamp {
+                    -2 => earliest.clone(),
+                    -1 => latest.clone(),
+                    _ => earliest.clone(),
+                };
                 ListOffsetsPartitionResponse::default()
                     .with_partition_index(partition.partition_index)
                     .with_error_code(0)

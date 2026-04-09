@@ -26,6 +26,7 @@ pub async fn serve_connection(
                 let response = bootstrap::handle_api_versions();
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -35,11 +36,13 @@ pub async fn serve_connection(
             ApiKey::Metadata => {
                 let request = protocol::decode_body::<kafka_protocol::messages::MetadataRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = bootstrap::handle_metadata(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -49,10 +52,11 @@ pub async fn serve_connection(
             ApiKey::InitProducerId => {
                 let _request = protocol::decode_body::<
                     kafka_protocol::messages::InitProducerIdRequest,
-                >(&frame, header.request_api_version)?;
+                >(&frame, api_key, header.request_api_version)?;
                 let response = bootstrap::handle_init_producer_id(&broker).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -62,11 +66,13 @@ pub async fn serve_connection(
             ApiKey::ListOffsets => {
                 let request = protocol::decode_body::<kafka_protocol::messages::ListOffsetsRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = produce_fetch::handle_list_offsets(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -76,11 +82,13 @@ pub async fn serve_connection(
             ApiKey::Produce => {
                 let request = protocol::decode_body::<kafka_protocol::messages::ProduceRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = produce_fetch::handle_produce(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -90,11 +98,13 @@ pub async fn serve_connection(
             ApiKey::Fetch => {
                 let request = protocol::decode_body::<kafka_protocol::messages::FetchRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = produce_fetch::handle_fetch(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -104,10 +114,15 @@ pub async fn serve_connection(
             ApiKey::FindCoordinator => {
                 let request = protocol::decode_body::<
                     kafka_protocol::messages::FindCoordinatorRequest,
-                >(&frame, header.request_api_version)?;
-                let response = groups::handle_find_coordinator(&broker, request);
+                >(&frame, api_key, header.request_api_version)?;
+                let response = groups::handle_find_coordinator(
+                    &broker,
+                    request,
+                    header.request_api_version,
+                );
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -117,11 +132,13 @@ pub async fn serve_connection(
             ApiKey::JoinGroup => {
                 let request = protocol::decode_body::<kafka_protocol::messages::JoinGroupRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = groups::handle_join_group(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -131,11 +148,13 @@ pub async fn serve_connection(
             ApiKey::SyncGroup => {
                 let request = protocol::decode_body::<kafka_protocol::messages::SyncGroupRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = groups::handle_sync_group(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -145,11 +164,13 @@ pub async fn serve_connection(
             ApiKey::Heartbeat => {
                 let request = protocol::decode_body::<kafka_protocol::messages::HeartbeatRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = groups::handle_heartbeat(&broker, request).await;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -159,11 +180,13 @@ pub async fn serve_connection(
             ApiKey::LeaveGroup => {
                 let request = protocol::decode_body::<kafka_protocol::messages::LeaveGroupRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = groups::handle_leave_group(&broker, request).await;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -173,10 +196,11 @@ pub async fn serve_connection(
             ApiKey::OffsetCommit => {
                 let request = protocol::decode_body::<
                     kafka_protocol::messages::OffsetCommitRequest,
-                >(&frame, header.request_api_version)?;
+                >(&frame, api_key, header.request_api_version)?;
                 let response = groups::handle_offset_commit(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,
@@ -186,11 +210,13 @@ pub async fn serve_connection(
             ApiKey::OffsetFetch => {
                 let request = protocol::decode_body::<kafka_protocol::messages::OffsetFetchRequest>(
                     &frame,
+                    api_key,
                     header.request_api_version,
                 )?;
                 let response = groups::handle_offset_fetch(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
+                    api_key,
                     header.correlation_id,
                     header.request_api_version,
                     &response,

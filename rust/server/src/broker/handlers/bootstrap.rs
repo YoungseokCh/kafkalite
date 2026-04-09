@@ -15,19 +15,19 @@ use super::super::KafkaBroker;
 
 pub fn handle_api_versions() -> ApiVersionsResponse {
     let apis = vec![
-        api(ApiKey::ApiVersions, protocol::API_VERSIONS_VERSION),
-        api(ApiKey::Metadata, protocol::METADATA_VERSION),
-        api(ApiKey::InitProducerId, protocol::INIT_PRODUCER_ID_VERSION),
-        api(ApiKey::Produce, protocol::PRODUCE_VERSION),
-        api(ApiKey::Fetch, protocol::FETCH_VERSION),
-        api(ApiKey::ListOffsets, protocol::LIST_OFFSETS_VERSION),
-        api(ApiKey::FindCoordinator, protocol::FIND_COORDINATOR_VERSION),
-        api(ApiKey::JoinGroup, protocol::JOIN_GROUP_VERSION),
-        api(ApiKey::SyncGroup, protocol::SYNC_GROUP_VERSION),
-        api(ApiKey::Heartbeat, protocol::HEARTBEAT_VERSION),
-        api(ApiKey::LeaveGroup, protocol::LEAVE_GROUP_VERSION),
-        api(ApiKey::OffsetCommit, protocol::OFFSET_COMMIT_VERSION),
-        api(ApiKey::OffsetFetch, protocol::OFFSET_FETCH_VERSION),
+        api(ApiKey::ApiVersions, 0, protocol::API_VERSIONS_VERSION),
+        api(ApiKey::Metadata, 1, protocol::METADATA_VERSION),
+        api(ApiKey::InitProducerId, 0, protocol::INIT_PRODUCER_ID_VERSION),
+        api(ApiKey::Produce, 3, protocol::PRODUCE_VERSION),
+        api(ApiKey::Fetch, 4, protocol::FETCH_VERSION),
+        api(ApiKey::ListOffsets, 1, protocol::LIST_OFFSETS_VERSION),
+        api(ApiKey::FindCoordinator, 0, protocol::FIND_COORDINATOR_VERSION),
+        api(ApiKey::JoinGroup, 0, protocol::JOIN_GROUP_VERSION),
+        api(ApiKey::SyncGroup, 0, protocol::SYNC_GROUP_VERSION),
+        api(ApiKey::Heartbeat, 0, protocol::HEARTBEAT_VERSION),
+        api(ApiKey::LeaveGroup, 0, protocol::LEAVE_GROUP_VERSION),
+        api(ApiKey::OffsetCommit, 0, protocol::OFFSET_COMMIT_VERSION),
+        api(ApiKey::OffsetFetch, 1, protocol::OFFSET_FETCH_VERSION),
     ];
 
     ApiVersionsResponse::default()
@@ -93,9 +93,9 @@ pub async fn handle_init_producer_id(broker: &KafkaBroker) -> Result<InitProduce
         .with_producer_epoch(session.producer_epoch))
 }
 
-fn api(api_key: ApiKey, version: i16) -> ApiVersion {
+fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {
     ApiVersion::default()
         .with_api_key(api_key as i16)
-        .with_min_version(version)
-        .with_max_version(version)
+        .with_min_version(min_version)
+        .with_max_version(max_version)
 }

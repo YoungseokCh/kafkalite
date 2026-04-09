@@ -2,15 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
+use kafkalite_server::{Config, KafkaBroker, SqliteStore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod broker;
-mod config;
-mod protocol;
-mod store;
-
-use broker::KafkaBroker;
-use store::SqliteStore;
 
 #[derive(Parser, Debug)]
 #[command(name = "kafkalite", about = "Kafka-compatible broker")]
@@ -24,7 +17,7 @@ async fn main() {
     let args = Args::parse();
     init_tracing();
 
-    let config = config::Config::load(args.config.as_deref()).unwrap_or_else(|err| {
+    let config = Config::load(args.config.as_deref()).unwrap_or_else(|err| {
         eprintln!("Failed to load configuration: {err}");
         std::process::exit(1);
     });

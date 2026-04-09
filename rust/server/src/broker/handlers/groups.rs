@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
+use kafka_protocol::messages::find_coordinator_response::Coordinator;
 use kafka_protocol::messages::join_group_response::JoinGroupResponseMember;
 use kafka_protocol::messages::offset_commit_response::{
     OffsetCommitResponsePartition, OffsetCommitResponseTopic,
@@ -20,14 +21,40 @@ use crate::store::StoreError;
 
 pub fn handle_find_coordinator(
     broker: &KafkaBroker,
-    _request: FindCoordinatorRequest,
+    request: FindCoordinatorRequest,
+    api_version: i16,
 ) -> FindCoordinatorResponse {
-    FindCoordinatorResponse::default()
-        .with_throttle_time_ms(0)
+    let response = FindCoordinatorResponse::default().with_throttle_time_ms(0);
+    let node_id = BrokerId(broker.config().broker.broker_id);
+    let host = StrBytes::from(broker.config().broker.advertised_host.clone());
+    let port = i32::from(broker.config().broker.advertised_port);
+
+    if api_version >= 4 {
+        let keys = if request.coordinator_keys.is_empty() {
+            vec![request.key]
+        } else {
+            request.coordinator_keys
+        };
+        let coordinators = keys
+            .into_iter()
+            .map(|key| {
+                Coordinator::default()
+                    .with_key(key)
+                    .with_node_id(node_id)
+                    .with_host(host.clone())
+                    .with_port(port)
+                    .with_error_code(0)
+                    .with_error_message(None)
+            })
+            .collect();
+        return response.with_coordinators(coordinators);
+    }
+
+    response
         .with_error_code(0)
-        .with_node_id(BrokerId(broker.config().broker.broker_id))
-        .with_host(StrBytes::from(broker.config().broker.advertised_host.clone()))
-        .with_port(i32::from(broker.config().broker.advertised_port))
+        .with_node_id(node_id)
+        .with_host(host)
+        .with_port(port)
 }
 
 pub async fn handle_join_group(broker: &KafkaBroker, request: JoinGroupRequest) -> Result<JoinGroupResponse> {
