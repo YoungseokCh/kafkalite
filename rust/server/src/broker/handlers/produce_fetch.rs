@@ -223,3 +223,91 @@ fn encode_records(records: &[BrokerRecord]) -> Result<bytes::Bytes> {
     )?;
     Ok(encoded.freeze())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
+    use kafka_protocol::messages::{ProduceRequest, TopicName};
+    use tempfile::tempdir;
+
+    use crate::config::{BrokerConfig, Config, StorageConfig};
+    use crate::store::FileStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_retry_returns_same_base_offset() {
+        let broker = test_broker();
+        let session = broker.store().init_producer(0).unwrap();
+        let first = handle_produce(&broker, produce_request("retry.topic", session.producer_id, session.producer_epoch, 0)).await.unwrap();
+        let duplicate = handle_produce(&broker, produce_request("retry.topic", session.producer_id, session.producer_epoch, 0)).await.unwrap();
+
+        let first_partition = &first.responses[0].partition_responses[0];
+        let duplicate_partition = &duplicate.responses[0].partition_responses[0];
+        assert_eq!(first_partition.error_code, 0);
+        assert_eq!(duplicate_partition.error_code, 0);
+        assert_eq!(first_partition.base_offset, duplicate_partition.base_offset);
+        let fetched = broker.store().fetch_records("retry.topic", 0, 10).unwrap();
+        assert_eq!(fetched.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_maps_to_invalid_producer_epoch() {
+        let broker = test_broker();
+        let session = broker.store().init_producer(0).unwrap();
+        let _ = handle_produce(&broker, produce_request("epoch.topic", session.producer_id, session.producer_epoch + 1, 0)).await.unwrap();
+        let stale = handle_produce(&broker, produce_request("epoch.topic", session.producer_id, session.producer_epoch, 1)).await.unwrap();
+
+        let partition = &stale.responses[0].partition_responses[0];
+        assert_eq!(partition.error_code, INVALID_PRODUCER_EPOCH);
+        assert_eq!(partition.base_offset, -1);
+    }
+
+    fn test_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let config = Config {
+            broker: BrokerConfig::default(),
+            storage: StorageConfig { data_dir: dir.join("data") },
+        };
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store)
+    }
+
+    fn produce_request(topic: &str, producer_id: i64, producer_epoch: i16, sequence: i32) -> ProduceRequest {
+        let records = vec![Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id,
+            producer_epoch,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence,
+            timestamp: 100,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers: Default::default(),
+        }];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions { version: 2, compression: Compression::None },
+        ).unwrap();
+        ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ])
+    }
+}
