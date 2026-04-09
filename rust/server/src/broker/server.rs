@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::store::SqliteStore;
@@ -35,7 +35,11 @@ impl KafkaBroker {
             let broker = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = dispatcher::serve_connection(stream, peer, broker).await {
-                    error!(error = %err, remote = %peer, "connection failed");
+                    if is_expected_disconnect(&err) {
+                        debug!(error = %err, remote = %peer, "connection closed");
+                    } else {
+                        error!(error = %err, remote = %peer, "connection failed");
+                    }
                 }
             });
         }
@@ -48,4 +52,19 @@ impl KafkaBroker {
     pub fn store(&self) -> &Arc<SqliteStore> {
         &self.store
     }
+}
+
+fn is_expected_disconnect(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| {
+                matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                )
+            })
+    })
 }

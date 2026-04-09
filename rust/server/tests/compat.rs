@@ -213,6 +213,57 @@ async fn multiple_topics_keep_independent_offsets() {
     let _ = handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partition_assignment_moves_to_remaining_group_member() {
+    init_test_logging();
+    let (bootstrap, handle, _tempdir) = start_broker().await;
+    let producer = producer(&bootstrap);
+
+    producer
+        .send(
+            FutureRecord::to("handoff.events")
+                .payload("first-owner")
+                .key("handoff-key"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    let consumer_one = group_consumer(&bootstrap, "handoff-group");
+    consumer_one.subscribe(&["handoff.events"]).unwrap();
+    let first = poll_for_message(&consumer_one, Duration::from_secs(8));
+    assert_eq!(first.payload(), Some(&b"first-owner"[..]));
+    consumer_one
+        .commit_message(&first, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+    drop(first);
+
+    let consumer_two = group_consumer(&bootstrap, "handoff-group");
+    consumer_two.subscribe(&["handoff.events"]).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    drop(consumer_one);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    producer
+        .send(
+            FutureRecord::to("handoff.events")
+                .payload("second-owner")
+                .key("handoff-key"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    let second = poll_for_message(&consumer_two, Duration::from_secs(10));
+    assert_eq!(second.payload(), Some(&b"second-owner"[..]));
+
+    drop(second);
+    drop(consumer_two);
+    handle.abort();
+    let _ = handle.await;
+}
+
 fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
