@@ -324,14 +324,17 @@ impl Storage for FileStore {
                 group_id: group_id.to_string(),
                 member_id: member_id.to_string(),
             })?;
+        if !group.members.contains_key(member_id) {
+            return Err(StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.to_string(),
+            });
+        }
         ensure_generation(group, generation_id)?;
         let member = group
             .members
             .get_mut(member_id)
-            .ok_or_else(|| StoreError::UnknownMember {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
-            })?;
+            .expect("member checked above");
         member.last_heartbeat_unix_ms = now_ms;
         member.updated_at_unix_ms = now_ms;
         persist_all(&mut inner, &self.root)

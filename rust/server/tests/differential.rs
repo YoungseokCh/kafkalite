@@ -17,9 +17,9 @@ use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
     ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId,
-    JoinGroupRequest, JoinGroupResponse, OffsetCommitRequest, OffsetCommitResponse,
-    OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader, SyncGroupRequest,
-    SyncGroupResponse, TopicName,
+    HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
+    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
+    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use rdkafka::config::ClientConfig;
@@ -61,6 +61,13 @@ struct InvalidPartitionSnapshot {
 struct StaleCommitSnapshot {
     stale_commit_error: i16,
     offset_after_stale_commit: i64,
+    valid_commit_error: i16,
+    offset_after_valid_commit: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StaleHeartbeatSnapshot {
+    stale_heartbeat_error: i16,
     valid_commit_error: i16,
     offset_after_valid_commit: i64,
 }
@@ -107,6 +114,11 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let real_stale_commit = stale_commit_after_handoff_snapshot(&real_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
     let local_stale_commit = stale_commit_after_handoff_snapshot(&local_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
     assert_eq!(local_stale_commit, real_stale_commit);
+
+    let heartbeat_topic = format!("diff.stale-heartbeat.{suffix}");
+    let real_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(&real_bootstrap, &heartbeat_topic, &format!("group.heartbeat.{suffix}")).await;
+    let local_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(&local_bootstrap, &heartbeat_topic, &format!("group.heartbeat.{suffix}")).await;
+    assert_eq!(local_stale_heartbeat, real_stale_heartbeat);
 
     handle.abort();
     let _ = handle.await;
@@ -191,6 +203,53 @@ async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group
     StaleCommitSnapshot {
         stale_commit_error: stale_commit.topics[0].partitions[0].error_code,
         offset_after_stale_commit: offset_after_stale.topics[0].partitions[0].committed_offset,
+        valid_commit_error: valid_commit.topics[0].partitions[0].error_code,
+        offset_after_valid_commit: offset_after_valid.topics[0].partitions[0].committed_offset,
+    }
+}
+
+async fn stale_heartbeat_after_timeout_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+) -> StaleHeartbeatSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join_v1 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v1", 200);
+    let assignment = encode_assignment(topic);
+    let _sync_v1 = sync_group(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        &join_v1.member_id,
+        &[(&join_v1.member_id, assignment.clone())],
+    );
+
+    std::thread::sleep(Duration::from_millis(350));
+    let join_v2 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v2", 200);
+    let _sync_v2 = sync_group(
+        bootstrap,
+        group_id,
+        join_v2.generation_id,
+        &join_v2.member_id,
+        &join_v2.member_id,
+        &[(&join_v2.member_id, assignment)],
+    );
+
+    let stale_heartbeat = heartbeat(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id);
+    let valid_commit = offset_commit(bootstrap, group_id, join_v2.generation_id, &join_v2.member_id, topic, 2);
+    let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
+
+    StaleHeartbeatSnapshot {
+        stale_heartbeat_error: stale_heartbeat.error_code,
         valid_commit_error: valid_commit.topics[0].partitions[0].error_code,
         offset_after_valid_commit: offset_after_valid.topics[0].partitions[0].committed_offset,
     }
@@ -352,14 +411,25 @@ fn join_group(
     topic: &str,
     user_data: &[u8],
 ) -> JoinGroupResponse {
+    join_group_with_timeout(bootstrap, group_id, member_id, topic, user_data, 5_000)
+}
+
+fn join_group_with_timeout(
+    bootstrap: &str,
+    group_id: &str,
+    member_id: Option<&str>,
+    topic: &str,
+    user_data: &[u8],
+    timeout_ms: i32,
+) -> JoinGroupResponse {
     send_request::<JoinGroupRequest, JoinGroupResponse>(
         bootstrap,
         ApiKey::JoinGroup,
         protocol::JOIN_GROUP_VERSION,
         JoinGroupRequest::default()
             .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
-            .with_session_timeout_ms(5_000)
-            .with_rebalance_timeout_ms(5_000)
+            .with_session_timeout_ms(timeout_ms)
+            .with_rebalance_timeout_ms(timeout_ms)
             .with_member_id(StrBytes::from(member_id.unwrap_or("").to_string()))
             .with_protocol_type(StrBytes::from("consumer".to_string()))
             .with_protocols(vec![
@@ -367,6 +437,23 @@ fn join_group(
                     .with_name(StrBytes::from("range".to_string()))
                     .with_metadata(Bytes::from(encode_subscription(topic, user_data))),
             ]),
+    )
+}
+
+fn heartbeat(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+) -> HeartbeatResponse {
+    send_request::<HeartbeatRequest, HeartbeatResponse>(
+        bootstrap,
+        ApiKey::Heartbeat,
+        protocol::HEARTBEAT_VERSION,
+        HeartbeatRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string())),
     )
 }
 
