@@ -104,3 +104,25 @@ For reproducibility, rerun:
 ```bash
 make bench
 ```
+
+## Historical benchmark notes
+
+Reference SQLite-backed benchmark captured from commit `acaa3fe` and stored at:
+
+- `.benchmarks/runs/sqlite-acaa3fe/result.json`
+
+SQLite-backed snapshot (normalized to the same shape as the current benchmark snapshot):
+
+- git sha: `acaa3fe`
+- release binary size: `6,887,736` bytes
+- package size: `35,266` bytes
+- host: `linux/x86_64`
+
+| scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
+|---|---:|---:|---:|---:|---:|---|
+| `bench.produce.small` | 1,000 msgs × 100B | 47,634 ms | 20.99 msgs/s | 7,796 KB | 253,952 B | sqlite db 253,952 |
+| `bench.produce.medium` | 500 msgs × 1,024B | 23,954 ms | 20.87 msgs/s | 8,260 KB | 638,976 B | sqlite db 638,976 |
+| `bench.roundtrip` | 200 msgs × 512B | 10,442 ms | 19.15 msgs/s | 7,536 KB | 4,096 B | sqlite db 4,096 |
+| `bench.commit.resume` | 4 msgs × 256B | 1,593 ms | 2.51 msgs/s | 7,584 KB | 4,096 B | sqlite db 4,096 |
+
+This section is intended to be updated over time as new benchmark runs are captured.
