@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use kafka_protocol::messages::ApiKey;
 use tokio::net::TcpStream;
+use tracing::debug;
 
 use crate::protocol;
 
@@ -20,6 +21,7 @@ pub async fn serve_connection(
         let _ = peer;
         let api_key = ApiKey::try_from(header.request_api_key)
             .map_err(|_| anyhow::anyhow!("unknown api key {}", header.request_api_key))?;
+        debug!(api = ?api_key, version = header.request_api_version, correlation_id = header.correlation_id, remote = %peer, "handling request");
 
         match api_key {
             ApiKey::ApiVersions => {
@@ -69,7 +71,12 @@ pub async fn serve_connection(
                     api_key,
                     header.request_api_version,
                 )?;
-                let response = produce_fetch::handle_list_offsets(&broker, request).await?;
+                let response = produce_fetch::handle_list_offsets(
+                    &broker,
+                    request,
+                    header.request_api_version,
+                )
+                .await?;
                 protocol::write_response(
                     &mut stream,
                     api_key,

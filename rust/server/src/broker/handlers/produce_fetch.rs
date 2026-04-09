@@ -90,6 +90,7 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
 pub async fn handle_list_offsets(
     broker: &KafkaBroker,
     request: ListOffsetsRequest,
+    api_version: i16,
 ) -> Result<ListOffsetsResponse> {
     let mut topics = Vec::new();
     for topic in request.topics {
@@ -109,7 +110,7 @@ pub async fn handle_list_offsets(
                     .with_error_code(0)
                     .with_timestamp(result.timestamp_ms)
                     .with_offset(result.offset)
-                    .with_leader_epoch(0)
+                    .with_leader_epoch(if api_version >= 4 { 0 } else { -1 })
             })
             .collect();
         topics.push(
