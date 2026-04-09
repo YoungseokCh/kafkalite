@@ -19,6 +19,8 @@ use kafka_protocol::protocol::StrBytes;
 use super::super::KafkaBroker;
 use crate::store::StoreError;
 
+const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+
 pub fn handle_find_coordinator(
     broker: &KafkaBroker,
     request: FindCoordinatorRequest,
@@ -156,16 +158,27 @@ pub async fn handle_offset_commit(
     for topic in request.topics {
         let mut partitions = Vec::new();
         for partition in topic.partitions {
-            broker.store().commit_offset(
-                request.group_id.as_ref(),
-                topic.name.as_ref(),
-                partition.committed_offset,
-                now,
-            )?;
+            let error_code = if partition.partition_index != 0 {
+                UNKNOWN_TOPIC_OR_PARTITION
+            } else {
+                match broker.store().commit_offset(
+                    request.group_id.as_ref(),
+                    request.member_id.as_ref(),
+                    request.generation_id_or_member_epoch,
+                    topic.name.as_ref(),
+                    partition.committed_offset,
+                    now,
+                ) {
+                    Ok(()) => 0,
+                    Err(StoreError::UnknownMember { .. }) => 25,
+                    Err(StoreError::StaleGeneration { .. }) => 22,
+                    Err(err) => return Err(err.into()),
+                }
+            };
             partitions.push(
                 OffsetCommitResponsePartition::default()
                     .with_partition_index(partition.partition_index)
-                    .with_error_code(0),
+                    .with_error_code(error_code),
             );
         }
         topics.push(
@@ -188,16 +201,23 @@ pub async fn handle_offset_fetch(
         for topic in request_topics {
             let mut partitions = Vec::new();
             for partition in topic.partition_indexes {
-                let offset = broker
-                    .store()
-                    .fetch_offset(request.group_id.as_ref(), topic.name.as_ref())?
-                    .unwrap_or(-1);
+                let (offset, error_code) = if partition == 0 {
+                    (
+                        broker
+                            .store()
+                            .fetch_offset(request.group_id.as_ref(), topic.name.as_ref())?
+                            .unwrap_or(-1),
+                        0,
+                    )
+                } else {
+                    (-1, UNKNOWN_TOPIC_OR_PARTITION)
+                };
                 partitions.push(
                     OffsetFetchResponsePartition::default()
                         .with_partition_index(partition)
                         .with_committed_offset(offset)
                         .with_metadata(None)
-                        .with_error_code(0),
+                        .with_error_code(error_code),
                 );
             }
             topics.push(

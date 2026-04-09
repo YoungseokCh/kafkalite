@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -230,7 +230,8 @@ impl SqliteStore {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{group_id}-member-{}", now_ms.abs()));
-        upsert_group_member(
+        let pruned = prune_expired_members(&tx, group_id, now_ms)?;
+        let changed = upsert_group_member(
             &tx,
             group_id,
             &member_id,
@@ -241,7 +242,10 @@ impl SqliteStore {
             rebalance_timeout_ms,
             now_ms,
         )?;
-        let generation = bump_generation(&tx, group_id, protocol_type, protocol_name, now_ms)?;
+        let generation = match current_generation(&tx, group_id)? {
+            Some(current) if !pruned && !changed => current,
+            _ => bump_generation(&tx, group_id, protocol_type, protocol_name, now_ms)?,
+        };
         let leader = current_leader(&tx, group_id)?.unwrap_or_else(|| member_id.clone());
         let members = list_members(&tx, group_id)?;
         tx.commit()?;
@@ -332,18 +336,24 @@ impl SqliteStore {
     pub fn commit_offset(
         &self,
         group_id: &str,
+        member_id: &str,
+        generation_id: i32,
         topic: &str,
         next_offset: i64,
         now_ms: i64,
     ) -> Result<()> {
-        let connection = self.connection.lock().expect("sqlite mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("sqlite mutex poisoned");
+        let tx = connection.transaction()?;
+        ensure_generation(&tx, group_id, generation_id)?;
+        ensure_member(&tx, group_id, member_id, generation_id)?;
+        tx.execute(
             "INSERT INTO consumer_offsets (group_id, topic, partition, next_offset, updated_at_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(group_id, topic, partition)
              DO UPDATE SET next_offset = excluded.next_offset, updated_at_unix_ms = excluded.updated_at_unix_ms",
             params![group_id, topic, DEFAULT_PARTITION, next_offset, now_ms],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -511,7 +521,23 @@ fn upsert_group_member(
     session_timeout_ms: i32,
     rebalance_timeout_ms: i32,
     now_ms: i64,
-) -> Result<()> {
+) -> Result<bool> {
+    let previous = tx
+        .query_row(
+            "SELECT protocol_type, protocol_name, subscription_metadata, session_timeout_ms, rebalance_timeout_ms
+             FROM group_members WHERE group_id = ?1 AND member_id = ?2",
+            params![group_id, member_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i32>(3)?,
+                    row.get::<_, i32>(4)?,
+                ))
+            },
+        )
+        .optional()?;
     tx.execute(
         "INSERT INTO group_members (
             group_id, member_id, generation, protocol_type, protocol_name, subscription_metadata,
@@ -535,7 +561,16 @@ fn upsert_group_member(
             now_ms,
         ],
     )?;
-    Ok(())
+    Ok(match previous {
+        None => true,
+        Some((prev_type, prev_name, prev_metadata, prev_timeout, prev_rebalance)) => {
+            prev_type != protocol_type
+                || prev_name != protocol_name
+                || prev_metadata != metadata
+                || prev_timeout != session_timeout_ms
+                || prev_rebalance != rebalance_timeout_ms
+        }
+    })
 }
 
 fn bump_generation(
@@ -605,6 +640,16 @@ fn current_leader(tx: &Transaction<'_>, group_id: &str) -> Result<Option<String>
     .map_err(StoreError::from)
 }
 
+fn current_generation(tx: &Transaction<'_>, group_id: &str) -> Result<Option<i32>> {
+    tx.query_row(
+        "SELECT generation FROM consumer_groups WHERE group_id = ?1",
+        params![group_id],
+        |row| row.get::<_, i32>(0),
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
 fn list_members(tx: &Transaction<'_>, group_id: &str) -> Result<Vec<GroupMember>> {
     let mut statement = tx.prepare(
         "SELECT member_id, subscription_metadata FROM group_members WHERE group_id = ?1 ORDER BY member_id ASC",
@@ -637,6 +682,48 @@ fn ensure_generation(tx: &Transaction<'_>, group_id: &str, generation_id: i32) -
     Ok(())
 }
 
+fn prune_expired_members(tx: &Transaction<'_>, group_id: &str, now_ms: i64) -> Result<bool> {
+    let mut statement = tx.prepare(
+        "SELECT member_id FROM group_members
+         WHERE group_id = ?1 AND (?2 - last_heartbeat_unix_ms) > session_timeout_ms",
+    )?;
+    let expired = statement
+        .query_map(params![group_id, now_ms], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    for member_id in &expired {
+        tx.execute(
+            "DELETE FROM group_members WHERE group_id = ?1 AND member_id = ?2",
+            params![group_id, member_id],
+        )?;
+    }
+
+    Ok(!expired.is_empty())
+}
+
+fn ensure_member(
+    tx: &Transaction<'_>,
+    group_id: &str,
+    member_id: &str,
+    generation_id: i32,
+) -> Result<()> {
+    let exists = tx
+        .query_row(
+            "SELECT 1 FROM group_members WHERE group_id = ?1 AND member_id = ?2 AND generation = ?3",
+            params![group_id, member_id, generation_id],
+            |row| row.get::<_, i32>(0),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(StoreError::UnknownMember {
+            group_id: group_id.to_string(),
+            member_id: member_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn maybe_build_assignments(
     tx: &Transaction<'_>,
     group_id: &str,
@@ -660,15 +747,21 @@ fn maybe_build_assignments(
         return Ok(());
     }
 
+    let mut topic_subscribers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (member_id, topics) in &subscriptions {
+        let unique_topics = topics.iter().cloned().collect::<BTreeSet<_>>();
+        for topic in unique_topics {
+            topic_subscribers
+                .entry(topic)
+                .or_default()
+                .push(member_id.clone());
+        }
+    }
+
     let mut assignments: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (index, topic) in subscriptions
-        .iter()
-        .flat_map(|(_, topics)| topics.iter().cloned())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .enumerate()
-    {
-        let member_id = subscriptions[index % subscriptions.len()].0.clone();
+    for (topic_index, (topic, mut subscribers)) in topic_subscribers.into_iter().enumerate() {
+        subscribers.sort();
+        let member_id = subscribers[topic_index % subscribers.len()].clone();
         assignments.entry(member_id).or_default().push(topic);
     }
 
@@ -728,6 +821,9 @@ fn encode_assignment(topics: &[String]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+    use kafka_protocol::messages::{ConsumerProtocolAssignment, ConsumerProtocolSubscription};
+    use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
     use tempfile::tempdir;
 
     use super::*;
@@ -755,5 +851,220 @@ mod tests {
         assert_eq!(fetched.high_watermark, 1);
         assert_eq!(fetched.records.len(), 1);
         assert_eq!(fetched.records[0].offset, 0);
+    }
+
+    #[test]
+    fn assignment_respects_member_subscriptions() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("groups.db")).unwrap();
+
+        let member_a = store
+            .join_group(
+                "group-a",
+                Some("member-a"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                5_000,
+                5_000,
+                100,
+            )
+            .unwrap();
+        let member_b = store
+            .join_group(
+                "group-a",
+                Some("member-b"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-b", "topic-c"]),
+                5_000,
+                5_000,
+                200,
+            )
+            .unwrap();
+
+        let sync_a = store
+            .sync_group(
+                "group-a",
+                "member-a",
+                member_b.generation_id,
+                "range",
+                &[],
+                300,
+            )
+            .unwrap();
+        let sync_b = store
+            .sync_group(
+                "group-a",
+                "member-b",
+                member_b.generation_id,
+                "range",
+                &[],
+                300,
+            )
+            .unwrap();
+
+        assert_eq!(
+            decode_assignment_topics(&sync_a.assignment),
+            vec!["topic-a"]
+        );
+        assert_eq!(
+            decode_assignment_topics(&sync_b.assignment),
+            vec!["topic-b", "topic-c"]
+        );
+        assert!(member_a.generation_id < member_b.generation_id);
+    }
+
+    #[test]
+    fn offset_commit_requires_current_member_generation() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("offsets.db")).unwrap();
+
+        let joined = store
+            .join_group(
+                "group-b",
+                Some("member-a"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                5_000,
+                5_000,
+                100,
+            )
+            .unwrap();
+
+        store
+            .commit_offset(
+                "group-b",
+                "member-a",
+                joined.generation_id,
+                "topic-a",
+                1,
+                200,
+            )
+            .unwrap();
+
+        let stale = store.commit_offset(
+            "group-b",
+            "member-a",
+            joined.generation_id - 1,
+            "topic-a",
+            2,
+            300,
+        );
+        assert!(matches!(stale, Err(StoreError::StaleGeneration { .. })));
+
+        let unknown = store.commit_offset(
+            "group-b",
+            "member-b",
+            joined.generation_id,
+            "topic-a",
+            2,
+            300,
+        );
+        assert!(matches!(unknown, Err(StoreError::UnknownMember { .. })));
+    }
+
+    #[test]
+    fn no_op_rejoin_keeps_generation() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("rejoin.db")).unwrap();
+
+        let first = store
+            .join_group(
+                "group-c",
+                Some("member-a"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                5_000,
+                5_000,
+                100,
+            )
+            .unwrap();
+        let second = store
+            .join_group(
+                "group-c",
+                Some("member-a"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                5_000,
+                5_000,
+                200,
+            )
+            .unwrap();
+
+        assert_eq!(first.generation_id, second.generation_id);
+    }
+
+    #[test]
+    fn expired_member_is_pruned_on_next_join() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("expiry.db")).unwrap();
+
+        let first = store
+            .join_group(
+                "group-d",
+                Some("member-a"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                10,
+                10,
+                100,
+            )
+            .unwrap();
+
+        let second = store
+            .join_group(
+                "group-d",
+                Some("member-b"),
+                "consumer",
+                "range",
+                &encode_subscription(&["topic-a"]),
+                10,
+                10,
+                200,
+            )
+            .unwrap();
+        let sync = store
+            .sync_group(
+                "group-d",
+                "member-b",
+                second.generation_id,
+                "range",
+                &[],
+                210,
+            )
+            .unwrap();
+
+        assert!(second.generation_id > first.generation_id);
+        assert_eq!(decode_assignment_topics(&sync.assignment), vec!["topic-a"]);
+        assert!(store
+            .heartbeat("group-d", "member-a", second.generation_id, 220)
+            .is_err());
+    }
+
+    fn encode_subscription(topics: &[&str]) -> Vec<u8> {
+        let subscription = ConsumerProtocolSubscription::default().with_topics(
+            topics
+                .iter()
+                .map(|topic| StrBytes::from((*topic).to_string()))
+                .collect(),
+        );
+        let mut bytes = BytesMut::new();
+        subscription.encode(&mut bytes, 3).unwrap();
+        bytes.to_vec()
+    }
+
+    fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
+        let mut payload = bytes::Bytes::copy_from_slice(bytes);
+        let assignment = ConsumerProtocolAssignment::decode(&mut payload, 3).unwrap();
+        assignment
+            .assigned_partitions
+            .into_iter()
+            .map(|partition| partition.topic.to_string())
+            .collect()
     }
 }

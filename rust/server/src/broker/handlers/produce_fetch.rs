@@ -13,12 +13,27 @@ use crate::store::BrokerRecord;
 
 use super::super::KafkaBroker;
 
+const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+
 pub async fn handle_produce(broker: &KafkaBroker, request: ProduceRequest) -> Result<ProduceResponse> {
     let mut topics = Vec::new();
     for topic_data in request.topic_data {
         let topic_name = topic_data.name.to_string();
         let mut partitions = Vec::new();
         for partition_data in topic_data.partition_data {
+            if partition_data.index != 0 {
+                partitions.push(
+                    PartitionProduceResponse::default()
+                        .with_index(partition_data.index)
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                        .with_base_offset(-1)
+                        .with_log_append_time_ms(-1)
+                        .with_log_start_offset(-1)
+                        .with_record_errors(vec![])
+                        .with_error_message(None),
+                );
+                continue;
+            }
             let raw_records = partition_data.records.unwrap_or_default();
             let mut record_bytes = raw_records.clone();
             let decoded = RecordBatchDecoder::decode_all(&mut record_bytes)?;
@@ -58,6 +73,20 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
         let mut partitions = Vec::new();
         let topic_name = topic.topic.to_string();
         for partition in topic.partitions {
+            if partition.partition != 0 {
+                partitions.push(
+                    PartitionData::default()
+                        .with_partition_index(partition.partition)
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                        .with_high_watermark(-1)
+                        .with_last_stable_offset(-1)
+                        .with_log_start_offset(-1)
+                        .with_aborted_transactions(None)
+                        .with_preferred_read_replica(BrokerId(-1))
+                        .with_records(None),
+                );
+                continue;
+            }
             let fetched = broker
                 .store()
                 .fetch_records(&topic_name, partition.fetch_offset, 1_000)?;
@@ -100,6 +129,14 @@ pub async fn handle_list_offsets(
             .partitions
             .into_iter()
             .map(|partition| {
+                if partition.partition_index != 0 {
+                    return ListOffsetsPartitionResponse::default()
+                        .with_partition_index(partition.partition_index)
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                        .with_timestamp(-1)
+                        .with_offset(-1)
+                        .with_leader_epoch(-1);
+                }
                 let result = match partition.timestamp {
                     -2 => earliest.clone(),
                     -1 => latest.clone(),

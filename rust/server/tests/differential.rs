@@ -36,6 +36,11 @@ struct ResumeSnapshot {
     resumed_payload: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct InvalidPartitionSnapshot {
+    error: String,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
@@ -45,6 +50,12 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
 
     let (local_bootstrap, handle, _tempdir) = start_local_broker().await;
     let real_bootstrap = real_bootstrap.into_string().expect("bootstrap must be utf-8");
+    if !bootstrap_available(&real_bootstrap) {
+        eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
+        handle.abort();
+        let _ = handle.await;
+        return;
+    }
     let suffix = Uuid::new_v4().simple().to_string();
 
     let metadata_topic = format!("diff.metadata.{suffix}");
@@ -63,8 +74,41 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_resume = commit_resume_snapshot(&local_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
     assert_eq!(local_resume, real_resume);
 
+    let invalid_partition_topic = format!("diff.invalid-partition.{suffix}");
+    let real_invalid = invalid_partition_snapshot(&real_bootstrap, &invalid_partition_topic).await;
+    let local_invalid = invalid_partition_snapshot(&local_bootstrap, &invalid_partition_topic).await;
+    assert_eq!(local_invalid, real_invalid);
+
     handle.abort();
     let _ = handle.await;
+}
+
+async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPartitionSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("seed")
+                .key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let error = producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("bad")
+                .key("bad-key")
+                .partition(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect_err("partition 1 should fail");
+
+    InvalidPartitionSnapshot {
+        error: format!("{:?}", error.0),
+    }
 }
 
 async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataSnapshot {
@@ -209,4 +253,9 @@ fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::
         .iter()
         .find(|topic| topic.name() == name)
         .expect("topic metadata should exist")
+}
+
+fn bootstrap_available(bootstrap: &str) -> bool {
+    let consumer = consumer(bootstrap, "bootstrap-probe");
+    consumer.fetch_metadata(None, Duration::from_secs(2)).is_ok()
 }
