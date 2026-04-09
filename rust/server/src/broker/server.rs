@@ -5,18 +5,18 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::config::Config;
-use crate::store::SqliteStore;
+use crate::store::Storage;
 
 use super::dispatcher;
 
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: Config,
-    store: Arc<SqliteStore>,
+    store: Arc<dyn Storage>,
 }
 
 impl KafkaBroker {
-    pub fn new(config: Config, store: Arc<SqliteStore>) -> Self {
+    pub fn new(config: Config, store: Arc<dyn Storage>) -> Self {
         Self { config, store }
     }
 
@@ -26,7 +26,6 @@ impl KafkaBroker {
         info!(
             address = %addr,
             broker_id = self.config.broker.broker_id,
-            db_path = %self.store.db_path().display(),
             "kafkalite Kafka broker listening"
         );
 
@@ -49,7 +48,7 @@ impl KafkaBroker {
         &self.config
     }
 
-    pub fn store(&self) -> &Arc<SqliteStore> {
+    pub fn store(&self) -> &Arc<dyn Storage> {
         &self.store
     }
 }

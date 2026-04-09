@@ -5,4 +5,4 @@ pub mod store;
 
 pub use broker::KafkaBroker;
 pub use config::Config;
-pub use store::SqliteStore;
+pub use store::FileStore;

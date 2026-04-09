@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
-use kafkalite_server::{Config, KafkaBroker, SqliteStore};
+use kafkalite_server::{Config, FileStore, KafkaBroker};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -22,9 +22,9 @@ async fn main() {
         std::process::exit(1);
     });
 
-    ensure_parent_dir(&config.storage.db_path);
+    ensure_parent_dir(&config.storage.data_dir);
 
-    let store = Arc::new(SqliteStore::open(&config.storage.db_path).unwrap_or_else(|err| {
+    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap_or_else(|err| {
         eprintln!("Failed to open kafkalite storage: {err}");
         std::process::exit(1);
     }));

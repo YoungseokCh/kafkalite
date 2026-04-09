@@ -32,8 +32,8 @@ pub struct BrokerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    #[serde(default = "default_db_path")]
-    pub db_path: PathBuf,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
 }
 
 impl Default for BrokerConfig {
@@ -52,7 +52,7 @@ impl Default for BrokerConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            db_path: default_db_path(),
+            data_dir: default_data_dir(),
         }
     }
 }
@@ -81,8 +81,8 @@ fn default_cluster_id() -> String {
     "kafkalite-single-broker".to_string()
 }
 
-fn default_db_path() -> PathBuf {
-    PathBuf::from("./data/kafkalite.db")
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
 }
 
 impl Config {
@@ -124,7 +124,7 @@ mod tests {
         let path = temp_config_path("kafkalite-config.toml");
         std::fs::write(
             &path,
-            "[kafkalite.broker]\nbroker_id = 7\nhost = \"0.0.0.0\"\nport = 19092\nadvertised_host = \"broker.local\"\nadvertised_port = 29092\ncluster_id = \"cluster-a\"\n[kafkalite.storage]\ndb_path = \"/tmp/test-kafkalite.db\"\n",
+            "[kafkalite.broker]\nbroker_id = 7\nhost = \"0.0.0.0\"\nport = 19092\nadvertised_host = \"broker.local\"\nadvertised_port = 29092\ncluster_id = \"cluster-a\"\n[kafkalite.storage]\ndata_dir = \"/tmp/test-kafkalite-data\"\n",
         )
         .unwrap();
 
@@ -137,8 +137,8 @@ mod tests {
         assert_eq!(config.broker.advertised_port, 29092);
         assert_eq!(config.broker.cluster_id, "cluster-a");
         assert_eq!(
-            config.storage.db_path,
-            PathBuf::from("/tmp/test-kafkalite.db")
+            config.storage.data_dir,
+            PathBuf::from("/tmp/test-kafkalite-data")
         );
 
         std::fs::remove_file(path).unwrap();

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kafkalite_server::{
-    Config, KafkaBroker, SqliteStore,
+    Config, FileStore, KafkaBroker,
     config::{BrokerConfig, StorageConfig},
 };
 use rdkafka::config::ClientConfig;
@@ -191,10 +191,10 @@ async fn start_local_broker() -> (String, tokio::task::JoinHandle<anyhow::Result
             ..BrokerConfig::default()
         },
         storage: StorageConfig {
-            db_path: tempdir.path().join("kafkalite.db"),
+            data_dir: tempdir.path().join("kafkalite-data"),
         },
     };
-    let store = Arc::new(SqliteStore::open(&config.storage.db_path).unwrap());
+    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store);
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;

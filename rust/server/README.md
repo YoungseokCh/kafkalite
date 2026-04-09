@@ -1,6 +1,6 @@
 # kafkalite-server
 
-SQLite-backed Kafka wire-protocol server.
+Broker-owned file-log Kafka wire-protocol server.
 
 ## Current scope
 
@@ -47,7 +47,7 @@ advertised_port = 9092
 cluster_id = "kafkalite-single-broker"
 
 [kafkalite.storage]
-db_path = "./data/kafkalite.db"
+data_dir = "./data"
 ```
 
 ## Validation commands
