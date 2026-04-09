@@ -31,7 +31,13 @@ Broker-owned file-log Kafka wire-protocol server.
 - only partition `0` is supported; any other partition is rejected
 - metadata requests can auto-create topics when the request enables auto topic creation
 - produce requests also create topics on first successful write
-- idempotent producer support covers the validated happy path, but advanced retry/epoch semantics are still intentionally narrow
+- idempotent producer support covers validated duplicate retry replay, stale epoch rejection, and unknown producer id rejection for the current single-broker flow
+- producer transactions and full multi-broker EOS semantics are out of scope
+
+## Migration note
+
+- storage configuration now uses `data_dir`
+- older `db_path`-based configs are obsolete and should be migrated to the directory-based layout
 
 ## Configuration
 

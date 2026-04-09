@@ -101,19 +101,33 @@ pub async fn handle_sync_group(broker: &KafkaBroker, request: SyncGroupRequest) 
         .into_iter()
         .map(|assignment| (assignment.member_id.to_string(), assignment.assignment.to_vec()))
         .collect::<Vec<_>>();
-    let result = broker.store().sync_group(
+    let protocol_name = request.protocol_name.as_ref().map(|value| value.as_ref()).unwrap_or("range");
+    let response = match broker.store().sync_group(
         request.group_id.as_ref(),
         request.member_id.as_ref(),
         request.generation_id,
-        request.protocol_name.as_ref().map(|value| value.as_ref()).unwrap_or("range"),
+        protocol_name,
         &assignments,
         chrono::Utc::now().timestamp_millis(),
-    )?;
-    Ok(SyncGroupResponse::default()
-        .with_throttle_time_ms(0)
-        .with_error_code(0)
-        .with_protocol_name(Some(StrBytes::from(result.protocol_name)))
-        .with_assignment(Bytes::from(result.assignment)))
+    ) {
+        Ok(result) => SyncGroupResponse::default()
+            .with_throttle_time_ms(0)
+            .with_error_code(0)
+            .with_protocol_name(Some(StrBytes::from(result.protocol_name)))
+            .with_assignment(Bytes::from(result.assignment)),
+        Err(StoreError::UnknownMember { .. }) => SyncGroupResponse::default()
+            .with_throttle_time_ms(0)
+            .with_error_code(25)
+            .with_protocol_name(Some(StrBytes::from(protocol_name.to_string())))
+            .with_assignment(Bytes::new()),
+        Err(StoreError::StaleGeneration { .. }) => SyncGroupResponse::default()
+            .with_throttle_time_ms(0)
+            .with_error_code(22)
+            .with_protocol_name(Some(StrBytes::from(protocol_name.to_string())))
+            .with_assignment(Bytes::new()),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(response)
 }
 
 pub async fn handle_heartbeat(broker: &KafkaBroker, request: HeartbeatRequest) -> HeartbeatResponse {
@@ -131,6 +145,107 @@ pub async fn handle_heartbeat(broker: &KafkaBroker, request: HeartbeatRequest) -
     HeartbeatResponse::default()
         .with_throttle_time_ms(0)
         .with_error_code(error_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+    use kafka_protocol::messages::offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
+    use kafka_protocol::messages::{GroupId, JoinGroupRequest, OffsetCommitRequest, SyncGroupRequest};
+    use tempfile::tempdir;
+
+    use crate::config::{BrokerConfig, Config, StorageConfig};
+    use crate::store::FileStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_sync_group_returns_illegal_generation_instead_of_erroring_connection() {
+        let broker = test_broker();
+        let joined = handle_join_group(
+            &broker,
+            JoinGroupRequest::default()
+                .with_group_id(GroupId(StrBytes::from("group-a".to_string())))
+                .with_member_id(StrBytes::from("member-a".to_string()))
+                .with_protocol_type(StrBytes::from("consumer".to_string()))
+                .with_session_timeout_ms(5_000)
+                .with_rebalance_timeout_ms(5_000)
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from("range".to_string()))
+                        .with_metadata(Bytes::new()),
+                ]),
+        )
+        .await
+        .unwrap();
+
+        let response = handle_sync_group(
+            &broker,
+            SyncGroupRequest::default()
+                .with_group_id(GroupId(StrBytes::from("group-a".to_string())))
+                .with_member_id(StrBytes::from("member-a".to_string()))
+                .with_generation_id(joined.generation_id - 1)
+                .with_protocol_name(Some(StrBytes::from("range".to_string()))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.error_code, 22);
+    }
+
+    #[tokio::test]
+    async fn stale_offset_commit_returns_illegal_generation_instead_of_erroring_connection() {
+        let broker = test_broker();
+        let joined = handle_join_group(
+            &broker,
+            JoinGroupRequest::default()
+                .with_group_id(GroupId(StrBytes::from("group-b".to_string())))
+                .with_member_id(StrBytes::from("member-a".to_string()))
+                .with_protocol_type(StrBytes::from("consumer".to_string()))
+                .with_session_timeout_ms(5_000)
+                .with_rebalance_timeout_ms(5_000)
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from("range".to_string()))
+                        .with_metadata(Bytes::new()),
+                ]),
+        )
+        .await
+        .unwrap();
+
+        let response = handle_offset_commit(
+            &broker,
+            OffsetCommitRequest::default()
+                .with_group_id(GroupId(StrBytes::from("group-b".to_string())))
+                .with_member_id(StrBytes::from("member-a".to_string()))
+                .with_generation_id_or_member_epoch(joined.generation_id - 1)
+                .with_topics(vec![
+                    OffsetCommitRequestTopic::default()
+                        .with_name(TopicName(StrBytes::from("topic-a".to_string())))
+                        .with_partitions(vec![
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(0)
+                                .with_committed_offset(1),
+                        ]),
+                ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.topics[0].partitions[0].error_code, 22);
+    }
+
+    fn test_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let config = Config {
+            broker: BrokerConfig::default(),
+            storage: StorageConfig { data_dir: dir.join("data") },
+        };
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store)
+    }
 }
 
 pub async fn handle_leave_group(broker: &KafkaBroker, request: LeaveGroupRequest) -> LeaveGroupResponse {
