@@ -9,11 +9,14 @@ use kafka_protocol::messages::{BrokerId, FetchRequest, FetchResponse, ListOffset
 use kafka_protocol::protocol::StrBytes;
 use kafka_protocol::records::{Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
 
-use crate::store::BrokerRecord;
+use crate::store::{BrokerRecord, StoreError};
 
 use super::super::KafkaBroker;
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
+const INVALID_PRODUCER_EPOCH: i16 = 47;
+const UNKNOWN_PRODUCER_ID: i16 = 59;
 
 pub async fn handle_produce(broker: &KafkaBroker, request: ProduceRequest) -> Result<ProduceResponse> {
     let mut topics = Vec::new();
@@ -43,11 +46,20 @@ pub async fn handle_produce(broker: &KafkaBroker, request: ProduceRequest) -> Re
                 .map(to_broker_record)
                 .collect::<Vec<_>>();
             let now = chrono::Utc::now().timestamp_millis();
-            let (base_offset, _) = broker.store().append_records(&topic_name, &flattened, now)?;
+            let produce_result = broker.store().append_records(&topic_name, &flattened, now);
+            let (error_code, base_offset) = match produce_result {
+                Ok((base_offset, _)) => (0, base_offset),
+                Err(StoreError::InvalidProducerSequence { .. }) => {
+                    (OUT_OF_ORDER_SEQUENCE_NUMBER, -1)
+                }
+                Err(StoreError::StaleProducerEpoch { .. }) => (INVALID_PRODUCER_EPOCH, -1),
+                Err(StoreError::UnknownProducerId { .. }) => (UNKNOWN_PRODUCER_ID, -1),
+                Err(err) => return Err(err.into()),
+            };
             partitions.push(
                 PartitionProduceResponse::default()
                     .with_index(partition_data.index)
-                    .with_error_code(0)
+                    .with_error_code(error_code)
                     .with_base_offset(base_offset)
                     .with_log_append_time_ms(-1)
                     .with_log_start_offset(0)

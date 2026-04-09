@@ -20,6 +20,14 @@ pub enum StoreError {
         expected: i32,
         actual: i32,
     },
+    #[error("stale producer epoch for producer {producer_id}: expected at least {expected}, got {actual}")]
+    StaleProducerEpoch {
+        producer_id: i64,
+        expected: i16,
+        actual: i16,
+    },
+    #[error("unknown producer id {producer_id}")]
+    UnknownProducerId { producer_id: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

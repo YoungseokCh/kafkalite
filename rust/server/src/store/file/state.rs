@@ -39,7 +39,9 @@ pub struct ProducerState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerSequenceState {
     pub producer_epoch: i16,
+    pub first_sequence: i32,
     pub last_sequence: i32,
+    pub base_offset: i64,
     pub last_offset: i64,
 }
 

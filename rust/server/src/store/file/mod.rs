@@ -115,10 +115,16 @@ impl Storage for FileStore {
         now_ms: i64,
     ) -> Result<(i64, i64)> {
         let mut inner = self.inner.lock().expect("file store mutex poisoned");
+        let batch_info = ProducerBatchInfo::from_records(records);
+        if let Some(batch) = batch_info.as_ref() {
+            validate_producer_state(&inner.producers, topic, batch)?;
+            if let Some(duplicate) = duplicate_append_result(&inner.producers, topic, batch) {
+                return Ok(duplicate);
+            }
+        }
         let base_offset = ensure_topic_state(&mut inner, topic, now_ms)?.next_offset;
         let mut appended = Vec::new();
         for (index, record) in records.iter().enumerate() {
-            validate_sequence(&inner.producers, topic, record)?;
             let offset = base_offset + index as i64;
             appended.push(BrokerRecord {
                 offset,
@@ -146,7 +152,12 @@ impl Storage for FileStore {
                 producer_key(record.producer_id, topic),
                 ProducerSequenceState {
                     producer_epoch: record.producer_epoch,
+                    first_sequence: appended
+                        .first()
+                        .map(|value| value.sequence)
+                        .unwrap_or(record.sequence),
                     last_sequence: record.sequence,
+                    base_offset,
                     last_offset: record.offset,
                 },
             );
@@ -413,28 +424,65 @@ fn persist_all(inner: &mut FileStoreInner, root: &Path) -> Result<()> {
     inner.journal.clear(root)
 }
 
-fn validate_sequence(producers: &ProducerState, topic: &str, record: &BrokerRecord) -> Result<()> {
+fn validate_producer_state(
+    producers: &ProducerState,
+    topic: &str,
+    batch: &ProducerBatchInfo,
+) -> Result<()> {
+    if batch.producer_id < 0 {
+        return Ok(());
+    }
+    if batch.producer_id >= producers.next_producer_id {
+        return Err(StoreError::UnknownProducerId {
+            producer_id: batch.producer_id,
+        });
+    }
     if let Some(sequence) = producers
         .sequences
-        .get(&producer_key(record.producer_id, topic))
+        .get(&producer_key(batch.producer_id, topic))
     {
-        if sequence.producer_epoch > record.producer_epoch {
-            return Err(StoreError::InvalidProducerSequence {
-                producer_id: record.producer_id,
-                expected: sequence.last_sequence,
-                actual: record.sequence,
+        if batch.producer_epoch < sequence.producer_epoch {
+            return Err(StoreError::StaleProducerEpoch {
+                producer_id: batch.producer_id,
+                expected: sequence.producer_epoch,
+                actual: batch.producer_epoch,
             });
         }
-        let expected = sequence.last_sequence + 1;
-        if expected != record.sequence {
-            return Err(StoreError::InvalidProducerSequence {
-                producer_id: record.producer_id,
-                expected,
-                actual: record.sequence,
-            });
+        if batch.producer_epoch == sequence.producer_epoch {
+            if batch.first_sequence == sequence.first_sequence
+                && batch.last_sequence == sequence.last_sequence
+            {
+                return Ok(());
+            }
+            let expected = sequence.last_sequence + 1;
+            if batch.first_sequence != expected {
+                return Err(StoreError::InvalidProducerSequence {
+                    producer_id: batch.producer_id,
+                    expected,
+                    actual: batch.first_sequence,
+                });
+            }
         }
     }
     Ok(())
+}
+
+fn duplicate_append_result(
+    producers: &ProducerState,
+    topic: &str,
+    batch: &ProducerBatchInfo,
+) -> Option<(i64, i64)> {
+    let state = producers
+        .sequences
+        .get(&producer_key(batch.producer_id, topic))?;
+    if batch.producer_epoch == state.producer_epoch
+        && batch.first_sequence == state.first_sequence
+        && batch.last_sequence == state.last_sequence
+    {
+        Some((state.base_offset, state.last_offset))
+    } else {
+        None
+    }
 }
 
 fn prune_expired_members(group: &mut GroupState, now_ms: i64) -> bool {
@@ -562,6 +610,26 @@ fn encode_assignment(topics: &[String]) -> Result<Vec<u8>> {
 
 fn producer_key(producer_id: i64, topic: &str) -> String {
     format!("{producer_id}:{topic}")
+}
+
+struct ProducerBatchInfo {
+    producer_id: i64,
+    producer_epoch: i16,
+    first_sequence: i32,
+    last_sequence: i32,
+}
+
+impl ProducerBatchInfo {
+    fn from_records(records: &[BrokerRecord]) -> Option<Self> {
+        let first = records.first()?;
+        let last = records.last()?;
+        Some(Self {
+            producer_id: first.producer_id,
+            producer_epoch: first.producer_epoch,
+            first_sequence: first.sequence,
+            last_sequence: last.sequence,
+        })
+    }
 }
 
 fn offset_key(group_id: &str, topic: &str) -> String {

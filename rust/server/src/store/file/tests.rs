@@ -241,6 +241,62 @@ fn truncated_tail_is_recovered_on_restart() {
     assert_eq!(fetched.records[0].value.as_deref(), Some(&b"value"[..]));
 }
 
+#[test]
+fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let first = store.append_records("retry.events", &records, 10).unwrap();
+    let duplicate = store.append_records("retry.events", &records, 20).unwrap();
+    let fetched = store.fetch_records("retry.events", 0, 10).unwrap();
+
+    assert_eq!(first, duplicate);
+    assert_eq!(fetched.records.len(), 1);
+}
+
+#[test]
+fn stale_producer_epoch_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let first = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch + 1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store.append_records("epoch.events", &first, 10).unwrap();
+
+    let stale = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 20,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 1,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value2")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let result = store.append_records("epoch.events", &stale, 20);
+    assert!(matches!(result, Err(StoreError::StaleProducerEpoch { .. })));
+}
+
 fn encode_subscription(topics: &[&str]) -> Vec<u8> {
     let subscription = ConsumerProtocolSubscription::default().with_topics(
         topics
