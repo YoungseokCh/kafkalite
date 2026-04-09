@@ -10,6 +10,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::metadata::Metadata;
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use tempfile::tempdir;
 
@@ -165,6 +166,53 @@ async fn committed_offsets_survive_broker_restart() {
     let _ = handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_auto_creates_requested_topics() {
+    init_test_logging();
+    let (bootstrap, handle, _tempdir) = start_broker().await;
+    let consumer = base_consumer(&bootstrap, "metadata-check");
+
+    let metadata = consumer
+        .fetch_metadata(Some("dynamic.events.project.processor"), Duration::from_secs(5))
+        .unwrap();
+    let topic = find_topic(&metadata, "dynamic.events.project.processor");
+    assert_eq!(topic.partitions().len(), 1);
+    assert_eq!(topic.partitions()[0].id(), 0);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_topics_keep_independent_offsets() {
+    init_test_logging();
+    let (bootstrap, handle, _tempdir) = start_broker().await;
+    let producer = producer(&bootstrap);
+
+    for (topic, payload) in [("events.alpha", "alpha-1"), ("events.beta", "beta-1")] {
+        let (_partition, offset) = producer
+            .send(
+                FutureRecord::to(topic).payload(payload).key(topic),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    for (topic, expected) in [("events.alpha", b"alpha-1".as_slice()), ("events.beta", b"beta-1".as_slice())] {
+        let consumer = base_consumer(&bootstrap, topic);
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset(topic, 0, Offset::Beginning).unwrap();
+        consumer.assign(&tpl).unwrap();
+        let message = poll_for_message(&consumer, Duration::from_secs(5));
+        assert_eq!(message.payload(), Some(expected));
+    }
+
+    handle.abort();
+    let _ = handle.await;
+}
+
 fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
@@ -205,6 +253,15 @@ fn producer(bootstrap: &str) -> FutureProducer {
         .unwrap()
 }
 
+fn base_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group_id)
+        .set("auto.offset.reset", "earliest")
+        .create()
+        .unwrap()
+}
+
 fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
@@ -232,4 +289,12 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::MetadataTopic {
+    metadata
+        .topics()
+        .iter()
+        .find(|topic| topic.name() == name)
+        .expect("topic metadata should exist")
 }
