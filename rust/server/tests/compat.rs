@@ -167,10 +167,27 @@ async fn committed_offsets_survive_broker_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn metadata_auto_creates_requested_topics() {
+async fn metadata_reports_unknown_topic_until_first_produce() {
     init_test_logging();
     let (bootstrap, handle, _tempdir) = start_broker().await;
     let consumer = base_consumer(&bootstrap, "metadata-check");
+    let producer = producer(&bootstrap);
+
+    let metadata = consumer
+        .fetch_metadata(Some("dynamic.events.project.processor"), Duration::from_secs(5))
+        .unwrap();
+    let topic = find_topic(&metadata, "dynamic.events.project.processor");
+    assert_eq!(topic.partitions().len(), 0);
+
+    producer
+        .send(
+            FutureRecord::to("dynamic.events.project.processor")
+                .payload("created")
+                .key("dynamic"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
 
     let metadata = consumer
         .fetch_metadata(Some("dynamic.events.project.processor"), Duration::from_secs(5))

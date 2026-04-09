@@ -33,17 +33,22 @@ impl SqliteStore {
     pub fn topic_metadata(
         &self,
         topics: Option<&[String]>,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<Vec<TopicMetadata>> {
         let connection = self.connection.lock().expect("sqlite mutex poisoned");
         if let Some(topics) = topics {
+            let mut statement = connection
+                .prepare("SELECT topic FROM topics WHERE topic = ?1 ORDER BY topic ASC")?;
+            let mut metadata = Vec::new();
             for topic in topics {
-                ensure_topic_row(&connection, topic, now_ms)?;
+                if let Some(name) = statement
+                    .query_row(params![topic], |row| row.get::<_, String>(0))
+                    .optional()?
+                {
+                    metadata.push(TopicMetadata { name });
+                }
             }
-            return Ok(topics
-                .iter()
-                .map(|name| TopicMetadata { name: name.clone() })
-                .collect());
+            return Ok(metadata);
         }
 
         let mut statement = connection.prepare("SELECT topic FROM topics ORDER BY topic ASC")?;
@@ -53,6 +58,11 @@ impl SqliteStore {
             metadata.push(TopicMetadata { name: row? });
         }
         Ok(metadata)
+    }
+
+    pub fn ensure_topic(&self, topic: &str, now_ms: i64) -> Result<()> {
+        let connection = self.connection.lock().expect("sqlite mutex poisoned");
+        ensure_topic_row(&connection, topic, now_ms)
     }
 
     pub fn init_producer(&self, now_ms: i64) -> Result<ProducerSession> {

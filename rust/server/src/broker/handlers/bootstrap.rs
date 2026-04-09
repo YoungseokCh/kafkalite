@@ -43,9 +43,21 @@ pub async fn handle_metadata(broker: &KafkaBroker, request: MetadataRequest) -> 
             .filter_map(|topic| topic.name.map(|name| name.to_string()))
             .collect::<Vec<_>>()
     });
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if request.allow_auto_topic_creation {
+        if let Some(requested) = names.as_ref() {
+            for topic in requested {
+                broker.store().ensure_topic(topic, now_ms)?;
+            }
+        }
+    }
     let metadata = broker
         .store()
-        .topic_metadata(names.as_deref(), chrono::Utc::now().timestamp_millis())?;
+        .topic_metadata(names.as_deref(), now_ms)?;
+    let known_topics = metadata
+        .into_iter()
+        .map(|topic| (topic.name.clone(), topic))
+        .collect::<std::collections::BTreeMap<_, _>>();
 
     let node_id = BrokerId(broker.config().broker.broker_id);
     let partition = MetadataResponsePartition::default()
@@ -57,16 +69,34 @@ pub async fn handle_metadata(broker: &KafkaBroker, request: MetadataRequest) -> 
         .with_isr_nodes(vec![node_id])
         .with_offline_replicas(vec![]);
 
-    let topics = metadata
-        .into_iter()
-        .map(|topic| {
-            MetadataResponseTopic::default()
-                .with_error_code(0)
-                .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
-                .with_is_internal(false)
-                .with_partitions(vec![partition.clone()])
-        })
-        .collect();
+    let topics = if let Some(requested) = names {
+        requested
+            .into_iter()
+            .map(|name| match known_topics.get(&name) {
+                Some(topic) => MetadataResponseTopic::default()
+                    .with_error_code(0)
+                    .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
+                    .with_is_internal(false)
+                    .with_partitions(vec![partition.clone()]),
+                None => MetadataResponseTopic::default()
+                    .with_error_code(3)
+                    .with_name(Some(TopicName(StrBytes::from(name))))
+                    .with_is_internal(false)
+                    .with_partitions(vec![]),
+            })
+            .collect()
+    } else {
+        known_topics
+            .into_values()
+            .map(|topic| {
+                MetadataResponseTopic::default()
+                    .with_error_code(0)
+                    .with_name(Some(TopicName(StrBytes::from(topic.name))))
+                    .with_is_internal(false)
+                    .with_partitions(vec![partition.clone()])
+            })
+            .collect()
+    };
 
     let broker_node = MetadataResponseBroker::default()
         .with_node_id(node_id)
