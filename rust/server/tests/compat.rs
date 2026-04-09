@@ -123,6 +123,48 @@ async fn records_survive_broker_restart() {
     let _ = handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_offsets_survive_broker_restart() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
+    let producer = producer(&bootstrap);
+
+    for payload in ["first", "second"] {
+        producer
+            .send(
+                FutureRecord::to("resume.events")
+                    .payload(payload)
+                    .key("resume-key"),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+    }
+
+    let consumer = group_consumer(&bootstrap, "resume-group");
+    consumer.subscribe(&["resume.events"]).unwrap();
+    let message = poll_for_message(&consumer, Duration::from_secs(8));
+    assert_eq!(message.payload(), Some(&b"first"[..]));
+    consumer
+        .commit_message(&message, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+    drop(message);
+    drop(consumer);
+
+    handle.abort();
+    let _ = handle.await;
+
+    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
+    let consumer = group_consumer(&bootstrap, "resume-group");
+    consumer.subscribe(&["resume.events"]).unwrap();
+    let message = poll_for_message(&consumer, Duration::from_secs(8));
+    assert_eq!(message.payload(), Some(&b"second"[..]));
+
+    handle.abort();
+    let _ = handle.await;
+}
+
 fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
@@ -159,6 +201,17 @@ fn producer(bootstrap: &str) -> FutureProducer {
         .set("bootstrap.servers", bootstrap)
         .set("message.timeout.ms", "3000")
         .set("enable.idempotence", "true")
+        .create()
+        .unwrap()
+}
+
+fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group_id)
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .set("debug", "protocol,broker,cgrp,fetch")
         .create()
         .unwrap()
 }
