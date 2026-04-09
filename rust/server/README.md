@@ -82,3 +82,25 @@ make bench-compare
 - benchmark outputs are written under `.benchmarks/`
 - `make bench-baseline` promotes the latest run to the comparison baseline
 - `make bench-compare` compares the current baseline and latest benchmark JSON reports
+
+## Current benchmark snapshot
+
+Latest full benchmark run recorded from `.benchmarks/latest/result.json`:
+
+- git sha: `0638556`
+- release binary size: `5,165,720` bytes
+- package size: `37,755` bytes
+- host: `linux/x86_64`
+
+| scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
+|---|---:|---:|---:|---:|---:|---|
+| `bench.produce.small` | 1,000 msgs × 100B | 59,275 ms | 16.87 msgs/s | 5,704 KB | 678,250 B | log 538,560 / index 68,570 / timeindex 70,680 / state 440 |
+| `bench.produce.medium` | 500 msgs × 1,024B | 29,815 ms | 16.77 msgs/s | 5,760 KB | 1,725,990 B | log 1,655,060 / index 34,939 / timeindex 35,549 / state 442 |
+| `bench.roundtrip` | 200 msgs × 512B | 12,995 ms | 15.39 msgs/s | 5,708 KB | 382,725 B | log 354,560 / index 13,714 / timeindex 14,024 / state 427 |
+| `bench.commit.resume` | 4 msgs × 256B | 1,603 ms | 2.49 msgs/s | 5,804 KB | 6,796 B | log 3,996 / index 248 / timeindex 264 / state 2,288 |
+
+For reproducibility, rerun:
+
+```bash
+make bench
+```
