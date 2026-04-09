@@ -1,15 +1,11 @@
 SERVER_DIR := rust/server
-CLIENT_DIR := rust/client
 
-.PHONY: test test-server test-client test-python test-differential bench bench-quick bench-size bench-runtime bench-memory bench-storage bench-baseline bench-compare
+.PHONY: test test-server test-python test-differential bench bench-quick bench-size bench-runtime bench-memory bench-storage bench-baseline bench-compare
 
-test: test-server test-client
+test: test-server
 
 test-server:
 	cargo test --manifest-path $(SERVER_DIR)/Cargo.toml
-
-test-client:
-	cargo test --manifest-path $(CLIENT_DIR)/Cargo.toml
 
 test-python:
 	bash scripts/run-python-compat.sh
