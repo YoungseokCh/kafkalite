@@ -7,7 +7,7 @@ Broker-owned file-log Kafka wire-protocol server.
 - single broker
 - many topics
 - exactly one partition per topic (`0`)
-- SQLite persistence
+- file-log persistence
 - narrow Kafka API surface
 
 ## Supported Kafka APIs
@@ -63,3 +63,22 @@ make test-differential
 - `make test` runs the Rust server/client suites
 - `make test-python` provisions a temporary virtualenv and runs the Python compatibility smoke test
 - `make test-differential` starts a temporary single-node Kafka container and compares supported roundtrips against the local broker
+
+## Benchmark commands
+
+From the repository root:
+
+```bash
+make bench
+make bench-quick
+make bench-size
+make bench-runtime
+make bench-memory
+make bench-storage
+make bench-baseline
+make bench-compare
+```
+
+- benchmark outputs are written under `.benchmarks/`
+- `make bench-baseline` promotes the latest run to the comparison baseline
+- `make bench-compare` compares the current baseline and latest benchmark JSON reports
