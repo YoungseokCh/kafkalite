@@ -8,7 +8,7 @@ fn main() {
     }
 
     tonic_build::configure()
-        .build_server(true)
+        .build_server(false)
         .build_client(false)
         .compile_protos(&[proto_file], &["proto"])
         .expect("failed to compile kafkalite protobufs");
