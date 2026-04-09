@@ -162,7 +162,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn stale_sync_group_returns_illegal_generation_instead_of_erroring_connection() {
+    async fn stale_sync_group_returns_unknown_member_instead_of_erroring_connection() {
         let broker = test_broker();
         let joined = handle_join_group(
             &broker,
@@ -192,7 +192,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.error_code, 22);
+        assert_eq!(response.error_code, 25);
     }
 
     #[tokio::test]

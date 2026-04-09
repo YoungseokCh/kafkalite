@@ -286,6 +286,19 @@ impl Storage for FileStore {
                 expected: 0,
                 actual: generation_id,
             })?;
+        let _ = prune_expired_members(group, now_ms);
+        if !group.members.contains_key(member_id) {
+            return Err(StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.to_string(),
+            });
+        }
+        if generation_id < group.generation_id {
+            return Err(StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.to_string(),
+            });
+        }
         ensure_generation(group, generation_id)?;
         if !assignments.is_empty() {
             for (assigned_member, assignment) in assignments {

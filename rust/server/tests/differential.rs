@@ -72,6 +72,12 @@ struct StaleHeartbeatSnapshot {
     offset_after_valid_commit: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StaleSyncSnapshot {
+    stale_sync_error: i16,
+    stale_sync_assignment_len: usize,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
@@ -120,6 +126,11 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(&local_bootstrap, &heartbeat_topic, &format!("group.heartbeat.{suffix}")).await;
     assert_eq!(local_stale_heartbeat, real_stale_heartbeat);
 
+    let stale_sync_topic = format!("diff.stale-sync.{suffix}");
+    let real_stale_sync = stale_sync_after_handoff_snapshot(&real_bootstrap, &stale_sync_topic, &format!("group.sync.{suffix}")).await;
+    let local_stale_sync = stale_sync_after_handoff_snapshot(&local_bootstrap, &stale_sync_topic, &format!("group.sync.{suffix}")).await;
+    assert_eq!(local_stale_sync, real_stale_sync);
+
     handle.abort();
     let _ = handle.await;
 }
@@ -162,7 +173,7 @@ async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group
         .await
         .unwrap();
 
-    let join_v1 = join_group(bootstrap, group_id, None, topic, b"v1");
+    let join_v1 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v1", 100);
     let assignment = encode_assignment(topic);
     let _sync_v1 = sync_group(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, &join_v1.member_id, &[(&join_v1.member_id, assignment.clone())]);
     let initial_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 1);
@@ -182,18 +193,11 @@ async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group
     } else {
         join_b_v2.leader.clone()
     };
-    let follower = if leader == join_a_v2.member_id {
-        join_b_v2.member_id.clone()
-    } else {
-        join_a_v2.member_id.clone()
-    };
-
     let leader_assignments = vec![
         (join_a_v2.member_id.as_ref(), encode_empty_assignment()),
         (join_b_v2.member_id.as_ref(), encode_assignment(topic)),
     ];
     let _leader_sync = sync_group(bootstrap, group_id, generation, &leader, &leader, &leader_assignments);
-    let _follower_sync = sync_group(bootstrap, group_id, generation, &follower, &leader, &[]);
 
     let stale_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 9);
     let offset_after_stale = offset_fetch(bootstrap, group_id, topic);
@@ -222,7 +226,7 @@ async fn stale_heartbeat_after_timeout_snapshot(
         .await
         .unwrap();
 
-    let join_v1 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v1", 200);
+    let join_v1 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v1", 100);
     let assignment = encode_assignment(topic);
     let _sync_v1 = sync_group(
         bootstrap,
@@ -233,8 +237,8 @@ async fn stale_heartbeat_after_timeout_snapshot(
         &[(&join_v1.member_id, assignment.clone())],
     );
 
-    std::thread::sleep(Duration::from_millis(350));
-    let join_v2 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v2", 200);
+    std::thread::sleep(Duration::from_millis(1_000));
+    let join_v2 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v2", 100);
     let _sync_v2 = sync_group(
         bootstrap,
         group_id,
@@ -252,6 +256,53 @@ async fn stale_heartbeat_after_timeout_snapshot(
         stale_heartbeat_error: stale_heartbeat.error_code,
         valid_commit_error: valid_commit.topics[0].partitions[0].error_code,
         offset_after_valid_commit: offset_after_valid.topics[0].partitions[0].committed_offset,
+    }
+}
+
+async fn stale_sync_after_handoff_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+) -> StaleSyncSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join_v1 = join_group(bootstrap, group_id, None, topic, b"v1");
+    let initial_assignment = encode_assignment(topic);
+    let _sync_v1 = sync_group(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        &join_v1.member_id,
+        &[(&join_v1.member_id, initial_assignment)],
+    );
+
+    std::thread::sleep(Duration::from_millis(1_000));
+    let join_v2 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v2", 100);
+
+    let generation = join_v2.generation_id;
+    let leader = join_v2.leader.clone();
+    let assignments = vec![(join_v2.member_id.as_ref(), encode_assignment(topic))];
+    let _leader_sync = sync_group(bootstrap, group_id, generation, &leader, &leader, &assignments);
+
+    let stale_sync = sync_group(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        &leader,
+        &[],
+    );
+    StaleSyncSnapshot {
+        stale_sync_error: stale_sync.error_code,
+        stale_sync_assignment_len: stale_sync.assignment.len(),
     }
 }
 
@@ -473,6 +524,7 @@ fn sync_group(
             .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
             .with_generation_id(generation_id)
             .with_member_id(StrBytes::from(member_id.to_string()))
+            .with_protocol_type(Some(StrBytes::from("consumer".to_string())))
             .with_protocol_name(Some(StrBytes::from("range".to_string())))
             .with_assignments(
                 if member_id == leader_member_id {
