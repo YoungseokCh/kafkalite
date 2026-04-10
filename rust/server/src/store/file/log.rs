@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::store::{BrokerRecord, Result, StoreError};
 
 const BATCH_MAGIC: &[u8; 4] = b"KFLG";
+const LOG_SYNC_INTERVAL: u64 = 64;
 
 #[derive(Debug)]
 pub struct RecordLog {
     root: PathBuf,
+    append_count: std::sync::atomic::AtomicU64,
 }
 
 impl RecordLog {
@@ -19,6 +21,7 @@ impl RecordLog {
         fs::create_dir_all(root.join("broker"))?;
         let log = Self {
             root: root.to_path_buf(),
+            append_count: std::sync::atomic::AtomicU64::new(0),
         };
         log.recover()?;
         Ok(log)
@@ -48,7 +51,13 @@ impl RecordLog {
         let payload = batch.encode_binary()?;
         segment.write_all(&(payload.len() as u32).to_le_bytes())?;
         segment.write_all(&payload)?;
-        segment.sync_data()?;
+        let append_number = self
+            .append_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if append_number % LOG_SYNC_INTERVAL == 0 {
+            segment.sync_data()?;
+        }
 
         let mut index = OpenOptions::new()
             .append(true)
