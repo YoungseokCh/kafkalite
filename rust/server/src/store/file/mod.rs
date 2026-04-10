@@ -19,15 +19,15 @@ use state::{
 
 pub struct FileStore {
     root: PathBuf,
-    inner: Mutex<FileStoreInner>,
+    logs: RecordLog,
+    state: Mutex<FileStoreState>,
 }
 
-struct FileStoreInner {
+struct FileStoreState {
     topics: BTreeMap<String, TopicState>,
     producers: ProducerState,
     groups: BTreeMap<String, GroupState>,
     offsets: BTreeMap<String, i64>,
-    logs: RecordLog,
     journal: StateJournal,
 }
 
@@ -40,12 +40,12 @@ impl FileStore {
         journal.replay(&mut snapshots)?;
         Ok(Self {
             root,
-            inner: Mutex::new(FileStoreInner {
+            logs,
+            state: Mutex::new(FileStoreState {
                 topics: snapshots.topics,
                 producers: snapshots.producers,
                 groups: snapshots.groups,
                 offsets: snapshots.offsets,
-                logs,
                 journal,
             }),
         })
@@ -62,17 +62,17 @@ impl Storage for FileStore {
         topics: Option<&[String]>,
         _now_ms: i64,
     ) -> Result<Vec<TopicMetadata>> {
-        let inner = self.inner.lock().expect("file store mutex poisoned");
+        let state = self.state.lock().expect("file store mutex poisoned");
         if let Some(requested) = topics {
             return Ok(requested
                 .iter()
-                .filter(|topic| inner.topics.contains_key(*topic))
+                .filter(|topic| state.topics.contains_key(*topic))
                 .map(|topic| TopicMetadata {
                     name: topic.clone(),
                 })
                 .collect());
         }
-        Ok(inner
+        Ok(state
             .topics
             .keys()
             .cloned()
@@ -81,20 +81,21 @@ impl Storage for FileStore {
     }
 
     fn ensure_topic(&self, topic: &str, now_ms: i64) -> Result<()> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        ensure_topic_state(&mut inner, topic, now_ms)?;
-        persist_topics(&mut inner)
+        self.logs.ensure_topic(topic)?;
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        ensure_topic_state(&mut state, topic, now_ms)?;
+        persist_topics(&mut state)
     }
 
     fn init_producer(&self, now_ms: i64) -> Result<ProducerSession> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
+        let mut state = self.state.lock().expect("file store mutex poisoned");
         let session = ProducerSession {
-            producer_id: inner.producers.next_producer_id,
+            producer_id: state.producers.next_producer_id,
             producer_epoch: 0,
         };
-        inner.producers.next_producer_id += 1;
-        let producers = inner.producers.clone();
-        inner.journal.append_producer_state(&producers, now_ms)?;
+        state.producers.next_producer_id += 1;
+        let producers = state.producers.clone();
+        state.journal.append_producer_state(&producers, now_ms)?;
         Ok(session)
     }
 
@@ -104,15 +105,16 @@ impl Storage for FileStore {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<(i64, i64)> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
+        let mut state = self.state.lock().expect("file store mutex poisoned");
         let batch_info = ProducerBatchInfo::from_records(records);
         if let Some(batch) = batch_info.as_ref() {
-            validate_producer_state(&inner.producers, topic, batch)?;
-            if let Some(duplicate) = duplicate_append_result(&inner.producers, topic, batch) {
+            validate_producer_state(&state.producers, topic, batch)?;
+            if let Some(duplicate) = duplicate_append_result(&state.producers, topic, batch) {
                 return Ok(duplicate);
             }
         }
-        let base_offset = ensure_topic_state(&mut inner, topic, now_ms)?.next_offset;
+        self.logs.ensure_topic(topic)?;
+        let base_offset = ensure_topic_state(&mut state, topic, now_ms)?.next_offset;
         let mut appended = Vec::new();
         for (index, record) in records.iter().enumerate() {
             let offset = base_offset + index as i64;
@@ -131,14 +133,15 @@ impl Storage for FileStore {
             .last()
             .map(|record| record.offset)
             .unwrap_or(base_offset);
-        inner
-            .logs
+        drop(state);
+        self.logs
             .append_batch(topic, &StoredBatch::from_records(&appended))?;
-        let topic_state = inner.topics.get_mut(topic).expect("topic inserted");
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        let topic_state = state.topics.get_mut(topic).expect("topic inserted");
         topic_state.next_offset = last_offset + 1;
         topic_state.updated_at_unix_ms = now_ms;
         for record in &appended {
-            inner.producers.sequences.insert(
+            state.producers.sequences.insert(
                 producer_key(record.producer_id, topic),
                 ProducerSequenceState {
                     producer_epoch: record.producer_epoch,
@@ -152,19 +155,21 @@ impl Storage for FileStore {
                 },
             );
         }
-        persist_topics(&mut inner)?;
-        persist_producers(&mut inner)?;
+        persist_topics(&mut state)?;
+        persist_producers(&mut state)?;
         Ok((base_offset, last_offset))
     }
 
     fn fetch_records(&self, topic: &str, start_offset: i64, limit: usize) -> Result<FetchResult> {
-        let inner = self.inner.lock().expect("file store mutex poisoned");
-        let records = inner.logs.read_records(topic, start_offset, limit)?;
-        let high_watermark = inner
+        let high_watermark = self
+            .state
+            .lock()
+            .expect("file store mutex poisoned")
             .topics
             .get(topic)
             .map(|topic| topic.next_offset)
             .unwrap_or(0);
+        let records = self.logs.read_records(topic, start_offset, limit)?;
         Ok(FetchResult {
             high_watermark,
             records,
@@ -172,9 +177,11 @@ impl Storage for FileStore {
     }
 
     fn list_offsets(&self, topic: &str) -> Result<(ListOffsetResult, ListOffsetResult)> {
-        let inner = self.inner.lock().expect("file store mutex poisoned");
-        let earliest = inner.logs.earliest_offset(topic)?.unwrap_or((0, 0));
-        let latest = inner
+        let earliest = self.logs.earliest_offset(topic)?.unwrap_or((0, 0));
+        let latest = self
+            .state
+            .lock()
+            .expect("file store mutex poisoned")
             .topics
             .get(topic)
             .map(|topic| topic.next_offset)
@@ -202,13 +209,13 @@ impl Storage for FileStore {
         rebalance_timeout_ms: i32,
         now_ms: i64,
     ) -> Result<GroupJoinResult> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
+        let mut state = self.state.lock().expect("file store mutex poisoned");
         let member_id = member_id
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{group_id}-member-{now_ms}"));
         let (generation_id, protocol_name_result, leader, members) = {
-            let group = inner
+            let group = state
                 .groups
                 .entry(group_id.to_string())
                 .or_insert_with(|| GroupState::new(protocol_type, protocol_name, now_ms));
@@ -250,7 +257,7 @@ impl Storage for FileStore {
                     .collect::<Vec<_>>(),
             )
         };
-        persist_groups(&mut inner)?;
+        persist_groups(&mut state)?;
         Ok(GroupJoinResult {
             generation_id,
             protocol_name: protocol_name_result,
@@ -269,8 +276,8 @@ impl Storage for FileStore {
         assignments: &[(String, Vec<u8>)],
         now_ms: i64,
     ) -> Result<SyncGroupResult> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        let group = inner
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        let group = state
             .groups
             .get_mut(group_id)
             .ok_or_else(|| StoreError::StaleGeneration {
@@ -306,7 +313,7 @@ impl Storage for FileStore {
             .get(member_id)
             .map(|member| member.assignment.clone())
             .unwrap_or_default();
-        persist_groups(&mut inner)?;
+        persist_groups(&mut state)?;
         Ok(SyncGroupResult {
             protocol_name: protocol_name.to_string(),
             assignment,
@@ -320,8 +327,8 @@ impl Storage for FileStore {
         generation_id: i32,
         now_ms: i64,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        let group = inner
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        let group = state
             .groups
             .get_mut(group_id)
             .ok_or_else(|| StoreError::UnknownMember {
@@ -341,19 +348,19 @@ impl Storage for FileStore {
             .expect("member checked above");
         member.last_heartbeat_unix_ms = now_ms;
         member.updated_at_unix_ms = now_ms;
-        persist_groups(&mut inner)
+        persist_groups(&mut state)
     }
 
     fn leave_group(&self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        if let Some(group) = inner.groups.get_mut(group_id) {
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        if let Some(group) = state.groups.get_mut(group_id) {
             if group.members.remove(member_id).is_some() {
                 group.generation_id += 1;
                 group.leader_member_id = group.members.keys().next().cloned();
                 group.updated_at_unix_ms = now_ms;
             }
         }
-        persist_groups(&mut inner)
+        persist_groups(&mut state)
     }
 
     fn commit_offset(
@@ -365,8 +372,8 @@ impl Storage for FileStore {
         next_offset: i64,
         now_ms: i64,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().expect("file store mutex poisoned");
-        let group = inner
+        let mut state = self.state.lock().expect("file store mutex poisoned");
+        let group = state
             .groups
             .get_mut(group_id)
             .ok_or_else(|| StoreError::UnknownMember {
@@ -388,49 +395,48 @@ impl Storage for FileStore {
         if let Some(member) = group.members.get_mut(member_id) {
             member.updated_at_unix_ms = now_ms;
         }
-        inner
+        state
             .offsets
             .insert(offset_key(group_id, topic), next_offset);
-        persist_groups(&mut inner)?;
-        persist_offsets(&mut inner)
+        persist_groups(&mut state)?;
+        persist_offsets(&mut state)
     }
 
     fn fetch_offset(&self, group_id: &str, topic: &str) -> Result<Option<i64>> {
-        let inner = self.inner.lock().expect("file store mutex poisoned");
-        Ok(inner.offsets.get(&offset_key(group_id, topic)).copied())
+        let state = self.state.lock().expect("file store mutex poisoned");
+        Ok(state.offsets.get(&offset_key(group_id, topic)).copied())
     }
 }
 
 fn ensure_topic_state<'a>(
-    inner: &'a mut FileStoreInner,
+    state: &'a mut FileStoreState,
     topic: &str,
     now_ms: i64,
 ) -> Result<&'a mut TopicState> {
-    if !inner.topics.contains_key(topic) {
-        inner.logs.ensure_topic(topic)?;
-        inner
+    if !state.topics.contains_key(topic) {
+        state
             .topics
             .insert(topic.to_string(), TopicState::new(topic, now_ms));
     }
-    Ok(inner.topics.get_mut(topic).expect("topic inserted"))
+    Ok(state.topics.get_mut(topic).expect("topic inserted"))
 }
 
-fn persist_topics(inner: &mut FileStoreInner) -> Result<()> {
-    inner.journal.append_topics(&inner.topics)
+fn persist_topics(state: &mut FileStoreState) -> Result<()> {
+    state.journal.append_topics(&state.topics)
 }
 
-fn persist_producers(inner: &mut FileStoreInner) -> Result<()> {
-    inner
+fn persist_producers(state: &mut FileStoreState) -> Result<()> {
+    state
         .journal
-        .append_producer_state(&inner.producers, chrono::Utc::now().timestamp_millis())
+        .append_producer_state(&state.producers, chrono::Utc::now().timestamp_millis())
 }
 
-fn persist_groups(inner: &mut FileStoreInner) -> Result<()> {
-    inner.journal.append_groups(&inner.groups)
+fn persist_groups(state: &mut FileStoreState) -> Result<()> {
+    state.journal.append_groups(&state.groups)
 }
 
-fn persist_offsets(inner: &mut FileStoreInner) -> Result<()> {
-    inner.journal.append_offsets(&inner.offsets)
+fn persist_offsets(state: &mut FileStoreState) -> Result<()> {
+    state.journal.append_offsets(&state.offsets)
 }
 
 fn validate_producer_state(
