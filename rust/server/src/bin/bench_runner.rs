@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
 use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
-use kafkalite_server::bench::scenarios::{run_commit_resume, run_produce_only, run_roundtrip, ScenarioSpec};
+use kafkalite_server::bench::scenarios::{run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip, ScenarioSpec};
 
 #[derive(Clone, Debug, ValueEnum)]
 enum BenchMode {
@@ -63,11 +63,13 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
         BenchMode::Runtime => vec![
             ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
             ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
+            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
             ScenarioSpec { name: "bench.commit.resume", messages: 4, payload_bytes: 256 },
         ],
         BenchMode::Memory => vec![
             ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
             ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
+            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
         ],
         BenchMode::Storage => vec![
             ScenarioSpec { name: "bench.produce.medium", messages: 500, payload_bytes: 1024 },
@@ -76,6 +78,7 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
             ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
             ScenarioSpec { name: "bench.produce.medium", messages: 500, payload_bytes: 1024 },
             ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
+            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
             ScenarioSpec { name: "bench.commit.resume", messages: 4, payload_bytes: 256 },
         ],
     };
@@ -83,7 +86,9 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
     let mut reports = Vec::new();
     for spec in specs {
         let scenario_root = args.output_dir.join(format!("scenario-{}", spec.name.replace('.', "-")));
-        let report = if spec.name.contains("roundtrip") {
+        let report = if spec.name.contains("fetch.tail") {
+            run_fetch_tail(&scenario_root, &args.broker_bin, &spec).await?
+        } else if spec.name.contains("roundtrip") {
             run_roundtrip(&scenario_root, &args.broker_bin, &spec).await?
         } else if spec.name.contains("commit.resume") {
             run_commit_resume(&scenario_root, &args.broker_bin, &spec).await?

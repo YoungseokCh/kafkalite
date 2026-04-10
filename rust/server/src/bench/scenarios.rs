@@ -71,6 +71,36 @@ pub async fn run_roundtrip(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) 
     Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
 }
 
+pub async fn run_fetch_tail(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
+    let broker = BrokerProcess::start(broker_bin, root)?;
+    let producer = producer(&broker.bootstrap)?;
+    let payload = vec![b'd'; spec.payload_bytes as usize];
+    for _ in 0..spec.messages {
+        producer
+            .send(
+                FutureRecord::to(spec.name)
+                    .payload(&payload)
+                    .key("bench")
+                    .partition(0),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|(err, _)| anyhow::anyhow!(err.to_string()))?;
+    }
+    let consumer = consumer(&broker.bootstrap, "bench-fetch-tail")?;
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(spec.name, 0, Offset::Offset((spec.messages.saturating_sub(10)) as i64))?;
+    consumer.assign(&tpl)?;
+    let started = Instant::now();
+    let mut latencies = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let fetch_started = Instant::now();
+        let _ = poll_for_message(&consumer, Duration::from_secs(10))?;
+        latencies.push(fetch_started.elapsed());
+    }
+    Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
+}
+
 pub async fn run_commit_resume(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
     let broker = BrokerProcess::start(broker_bin, root)?;
     let producer = producer(&broker.bootstrap)?;

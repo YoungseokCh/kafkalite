@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,10 @@ impl RecordLog {
         if !self.segment_path(topic).exists() {
             return Ok(Vec::new());
         }
-        let mut reader = BufReader::new(File::open(self.segment_path(topic))?);
+        let start_position = self.lookup_position(topic, start_offset)?;
+        let mut file = File::open(self.segment_path(topic))?;
+        file.seek(SeekFrom::Start(start_position))?;
+        let mut reader = BufReader::new(file);
         let mut records = Vec::new();
         loop {
             let mut len = [0_u8; 4];
@@ -114,6 +117,34 @@ impl RecordLog {
             .into_iter()
             .next()
             .map(|record| (record.offset, record.timestamp_ms)))
+    }
+
+    fn lookup_position(&self, topic: &str, start_offset: i64) -> Result<u64> {
+        let mut candidate = 0_u64;
+        for entry in self.read_index_entries(topic)? {
+            if entry.base_offset <= start_offset {
+                candidate = entry.position;
+            } else {
+                break;
+            }
+        }
+        Ok(candidate)
+    }
+
+    fn read_index_entries(&self, topic: &str) -> Result<Vec<IndexEntry>> {
+        if !self.index_path(topic).exists() {
+            return Ok(Vec::new());
+        }
+        let reader = BufReader::new(File::open(self.index_path(topic))?);
+        let mut entries = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            entries.push(serde_json::from_str::<IndexEntry>(&line)?);
+        }
+        Ok(entries)
     }
 
     fn recover(&self) -> Result<()> {
@@ -249,7 +280,7 @@ impl StoredBatch {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct IndexEntry {
     base_offset: i64,
     position: u64,

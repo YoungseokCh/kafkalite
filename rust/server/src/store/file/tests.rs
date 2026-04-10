@@ -29,6 +29,31 @@ fn appends_and_fetches_records() {
 }
 
 #[test]
+fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = (0..5)
+        .map(|sequence| BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10 + i64::from(sequence),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from(vec![b'a' + sequence as u8])),
+            headers_json: b"[]".to_vec(),
+        })
+        .collect::<Vec<_>>();
+    store.append_records("tail.events", &records, 10).unwrap();
+
+    let fetched = store.fetch_records("tail.events", 3, 10).unwrap();
+    assert_eq!(fetched.records.len(), 2);
+    assert_eq!(fetched.records[0].offset, 3);
+    assert_eq!(fetched.records[1].offset, 4);
+}
+
+#[test]
 fn assignment_respects_member_subscriptions() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
