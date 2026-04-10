@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ impl RecordLog {
         let mut index = OpenOptions::new()
             .append(true)
             .open(self.index_path(topic))?;
-        serde_json::to_writer(
+        write_index_entry(
             &mut index,
             &IndexEntry {
                 base_offset: batch.base_offset,
@@ -62,12 +62,11 @@ impl RecordLog {
                 last_offset: batch.last_offset,
             },
         )?;
-        index.write_all(b"\n")?;
 
         let mut time_index = OpenOptions::new()
             .append(true)
             .open(self.time_index_path(topic))?;
-        serde_json::to_writer(
+        write_time_index_entry(
             &mut time_index,
             &TimeIndexEntry {
                 max_timestamp_ms: batch.max_timestamp_ms,
@@ -75,7 +74,6 @@ impl RecordLog {
                 position,
             },
         )?;
-        time_index.write_all(b"\n")?;
         Ok(())
     }
 
@@ -137,21 +135,13 @@ impl RecordLog {
         if !self.index_path(topic).exists() {
             return Ok(Vec::new());
         }
-        let reader = File::open(self.index_path(topic))?;
-        let reader = std::io::BufReader::new(reader);
+        let mut reader = File::open(self.index_path(topic))?;
         let mut entries = Vec::new();
-        let mut line = String::new();
-        let mut reader = reader;
         loop {
-            line.clear();
-            if reader.read_line(&mut line)? == 0 {
-                break;
+            match read_index_entry(&mut reader)? {
+                Some(entry) => entries.push(entry),
+                None => break,
             }
-            let line = line.trim_end();
-            if line.is_empty() {
-                continue;
-            }
-            entries.push(serde_json::from_str::<IndexEntry>(&line)?);
         }
         Ok(entries)
     }
@@ -217,7 +207,7 @@ impl RecordLog {
             let mut payload = vec![0_u8; payload_len];
             reader.read_exact(&mut payload)?;
             let batch = StoredBatch::decode_binary(&payload)?;
-            serde_json::to_writer(
+            write_index_entry(
                 &mut index,
                 &IndexEntry {
                     base_offset: batch.base_offset,
@@ -226,8 +216,7 @@ impl RecordLog {
                     last_offset: batch.last_offset,
                 },
             )?;
-            index.write_all(b"\n")?;
-            serde_json::to_writer(
+            write_time_index_entry(
                 &mut time_index,
                 &TimeIndexEntry {
                     max_timestamp_ms: batch.max_timestamp_ms,
@@ -235,7 +224,6 @@ impl RecordLog {
                     position,
                 },
             )?;
-            time_index.write_all(b"\n")?;
             position += 4 + payload_len as u64;
         }
         index.sync_all()?;
@@ -351,7 +339,7 @@ impl StoredBatch {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 struct IndexEntry {
     base_offset: i64,
     position: u64,
@@ -359,11 +347,45 @@ struct IndexEntry {
     last_offset: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy)]
 struct TimeIndexEntry {
     max_timestamp_ms: i64,
     base_offset: i64,
     position: u64,
+}
+
+fn write_index_entry(writer: &mut File, entry: &IndexEntry) -> Result<()> {
+    writer.write_all(&entry.base_offset.to_le_bytes())?;
+    writer.write_all(&entry.position.to_le_bytes())?;
+    writer.write_all(&entry.length.to_le_bytes())?;
+    writer.write_all(&entry.last_offset.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_index_entry(reader: &mut File) -> Result<Option<IndexEntry>> {
+    let mut base_offset = [0_u8; 8];
+    if reader.read_exact(&mut base_offset).is_err() {
+        return Ok(None);
+    }
+    let mut position = [0_u8; 8];
+    let mut length = [0_u8; 4];
+    let mut last_offset = [0_u8; 8];
+    reader.read_exact(&mut position)?;
+    reader.read_exact(&mut length)?;
+    reader.read_exact(&mut last_offset)?;
+    Ok(Some(IndexEntry {
+        base_offset: i64::from_le_bytes(base_offset),
+        position: u64::from_le_bytes(position),
+        length: u32::from_le_bytes(length),
+        last_offset: i64::from_le_bytes(last_offset),
+    }))
+}
+
+fn write_time_index_entry(writer: &mut File, entry: &TimeIndexEntry) -> Result<()> {
+    writer.write_all(&entry.max_timestamp_ms.to_le_bytes())?;
+    writer.write_all(&entry.base_offset.to_le_bytes())?;
+    writer.write_all(&entry.position.to_le_bytes())?;
+    Ok(())
 }
 
 fn write_bytes(out: &mut Vec<u8>, bytes: Option<&[u8]>) {

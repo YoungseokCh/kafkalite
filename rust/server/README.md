@@ -93,18 +93,18 @@ make bench-compare
 
 Latest full benchmark run recorded from `.benchmarks/latest/result.json`:
 
-- git sha: `cca4d90`
-- release binary size: `5,103,552` bytes
-- package size: `43,675` bytes
+- git sha: `51e96e6`
+- release binary size: `5,094,312` bytes
+- package size: `43,986` bytes
 - host: `linux/x86_64`
 
 | scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
 |---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 52,654 ms | 18.99 msgs/s | 5,672 KB | 702,171 B | log 185,000 / index 68,176 / timeindex 70,286 / state journal 378,709 |
-| `bench.produce.medium` | 500 msgs × 1,024B | 25,622 ms | 19.51 msgs/s | 5,812 KB | 815,172 B | log 554,500 / index 34,676 / timeindex 35,286 / state journal 190,710 |
-| `bench.roundtrip` | 200 msgs × 512B | 11,145 ms | 17.94 msgs/s | 5,952 KB | 219,792 B | log 119,400 / index 13,391 / timeindex 13,901 / state journal 73,100 |
-| `bench.fetch.tail` | 500 msgs × 512B | 85 ms | 5854.54 msgs/s | 5,864 KB | 552,494 B | log 298,500 / index 34,091 / timeindex 35,201 / state journal 184,702 |
-| `bench.commit.resume` | 4 msgs × 256B | 1,509 ms | 2.65 msgs/s | 5,856 KB | 8,956 B | log 1,364 / index 247 / timeindex 263 / state journal 7,082 |
+| `bench.produce.small` | 1,000 msgs × 100B | 50,878 ms | 19.65 msgs/s | 5,668 KB | 615,709 B | log 185,000 / index 28,000 / timeindex 24,000 / state journal 378,709 |
+| `bench.produce.medium` | 500 msgs × 1,024B | 25,675 ms | 19.47 msgs/s | 5,532 KB | 771,210 B | log 554,500 / index 14,000 / timeindex 12,000 / state journal 190,710 |
+| `bench.roundtrip` | 200 msgs × 512B | 11,156 ms | 17.93 msgs/s | 5,816 KB | 202,900 B | log 119,400 / index 5,600 / timeindex 4,800 / state journal 73,100 |
+| `bench.fetch.tail` | 500 msgs × 512B | 95 ms | 5242.47 msgs/s | 5,796 KB | 509,202 B | log 298,500 / index 14,000 / timeindex 12,000 / state journal 184,702 |
+| `bench.commit.resume` | 4 msgs × 256B | 1,513 ms | 2.64 msgs/s | 5,828 KB | 8,654 B | log 1,364 / index 112 / timeindex 96 / state journal 7,082 |
 
 For reproducibility, rerun:
 
