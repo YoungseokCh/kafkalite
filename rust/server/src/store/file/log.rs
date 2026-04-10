@@ -8,6 +8,7 @@ use crate::store::{BrokerRecord, Result, StoreError};
 
 const BATCH_MAGIC: &[u8; 4] = b"KFLG";
 const LOG_SYNC_INTERVAL: u64 = 64;
+const INDEX_STRIDE: i64 = 16;
 
 #[derive(Debug)]
 pub struct RecordLog {
@@ -59,30 +60,32 @@ impl RecordLog {
             segment.sync_data()?;
         }
 
-        let mut index = OpenOptions::new()
-            .append(true)
-            .open(self.index_path(topic))?;
-        write_index_entry(
-            &mut index,
-            &IndexEntry {
-                base_offset: batch.base_offset,
-                position,
-                length: payload.len() as u32,
-                last_offset: batch.last_offset,
-            },
-        )?;
+        if should_index_batch(batch) {
+            let mut index = OpenOptions::new()
+                .append(true)
+                .open(self.index_path(topic))?;
+            write_index_entry(
+                &mut index,
+                &IndexEntry {
+                    base_offset: batch.base_offset,
+                    position,
+                    length: payload.len() as u32,
+                    last_offset: batch.last_offset,
+                },
+            )?;
 
-        let mut time_index = OpenOptions::new()
-            .append(true)
-            .open(self.time_index_path(topic))?;
-        write_time_index_entry(
-            &mut time_index,
-            &TimeIndexEntry {
-                max_timestamp_ms: batch.max_timestamp_ms,
-                base_offset: batch.base_offset,
-                position,
-            },
-        )?;
+            let mut time_index = OpenOptions::new()
+                .append(true)
+                .open(self.time_index_path(topic))?;
+            write_time_index_entry(
+                &mut time_index,
+                &TimeIndexEntry {
+                    max_timestamp_ms: batch.max_timestamp_ms,
+                    base_offset: batch.base_offset,
+                    position,
+                },
+            )?;
+        }
         Ok(())
     }
 
@@ -369,6 +372,10 @@ fn write_index_entry(writer: &mut File, entry: &IndexEntry) -> Result<()> {
     writer.write_all(&entry.length.to_le_bytes())?;
     writer.write_all(&entry.last_offset.to_le_bytes())?;
     Ok(())
+}
+
+fn should_index_batch(batch: &StoredBatch) -> bool {
+    batch.base_offset == 0 || batch.base_offset % INDEX_STRIDE == 0
 }
 
 fn read_index_entry(reader: &mut File) -> Result<Option<IndexEntry>> {

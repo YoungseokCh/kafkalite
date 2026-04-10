@@ -93,18 +93,18 @@ make bench-compare
 
 Latest full benchmark run recorded from `.benchmarks/latest/result.json`:
 
-- git sha: `51e96e6`
-- release binary size: `5,094,312` bytes
-- package size: `43,986` bytes
+- git sha: `c1eb749`
+- release binary size: `5,092,704` bytes
+- package size: `44,131` bytes
 - host: `linux/x86_64`
 
 | scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
 |---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 50,878 ms | 19.65 msgs/s | 5,668 KB | 615,709 B | log 185,000 / index 28,000 / timeindex 24,000 / state journal 378,709 |
-| `bench.produce.medium` | 500 msgs × 1,024B | 25,675 ms | 19.47 msgs/s | 5,532 KB | 771,210 B | log 554,500 / index 14,000 / timeindex 12,000 / state journal 190,710 |
-| `bench.roundtrip` | 200 msgs × 512B | 11,156 ms | 17.93 msgs/s | 5,816 KB | 202,900 B | log 119,400 / index 5,600 / timeindex 4,800 / state journal 73,100 |
-| `bench.fetch.tail` | 500 msgs × 512B | 95 ms | 5242.47 msgs/s | 5,796 KB | 509,202 B | log 298,500 / index 14,000 / timeindex 12,000 / state journal 184,702 |
-| `bench.commit.resume` | 4 msgs × 256B | 1,513 ms | 2.64 msgs/s | 5,828 KB | 8,654 B | log 1,364 / index 112 / timeindex 96 / state journal 7,082 |
+| `bench.produce.small` | 1,000 msgs × 100B | 47,904 ms | 20.88 msgs/s | 5,792 KB | 580,999 B | log 185,000 / index 1,764 / timeindex 1,512 / state journal 392,723 |
+| `bench.produce.medium` | 500 msgs × 1,024B | 24,155 ms | 20.70 msgs/s | 5,812 KB | 753,888 B | log 554,500 / index 896 / timeindex 768 / state journal 197,724 |
+| `bench.roundtrip` | 200 msgs × 512B | 11,499 ms | 17.39 msgs/s | 5,724 KB | 195,990 B | log 119,400 / index 364 / timeindex 312 / state journal 75,914 |
+| `bench.fetch.tail` | 500 msgs × 512B | 85 ms | 5853.46 msgs/s | 5,816 KB | 491,880 B | log 298,500 / index 896 / timeindex 768 / state journal 191,716 |
+| `bench.commit.resume` | 4 msgs × 256B | 1,498 ms | 2.67 msgs/s | 5,816 KB | 8,631 B | log 1,364 / index 28 / timeindex 24 / state journal 7,215 |
 
 For reproducibility, rerun:
 

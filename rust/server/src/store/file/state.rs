@@ -137,25 +137,27 @@ impl StateJournal {
     }
 
     pub fn append_topics(&mut self, topics: &BTreeMap<String, TopicState>) -> Result<()> {
-        self.append(JournalEntry::Topics(topics.clone()))
+        self.append(JournalEntry::Topics(topics.clone()), false)
     }
 
     pub fn append_producer_state(&mut self, producers: &ProducerState, _now_ms: i64) -> Result<()> {
-        self.append(JournalEntry::Producers(producers.clone()))
+        self.append(JournalEntry::Producers(producers.clone()), false)
     }
 
     pub fn append_groups(&mut self, groups: &BTreeMap<String, GroupState>) -> Result<()> {
-        self.append(JournalEntry::Groups(groups.clone()))
+        self.append(JournalEntry::Groups(groups.clone()), false)
     }
 
     pub fn append_offsets(&mut self, offsets: &BTreeMap<String, i64>) -> Result<()> {
-        self.append(JournalEntry::Offsets(offsets.clone()))
+        self.append(JournalEntry::Offsets(offsets.clone()), true)
     }
 
-    fn append(&mut self, entry: JournalEntry) -> Result<()> {
+    fn append(&mut self, entry: JournalEntry, sync: bool) -> Result<()> {
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         write_journal_entry(&mut file, &entry)?;
-        file.sync_all()?;
+        if sync {
+            file.sync_all()?;
+        }
         Ok(())
     }
 }
