@@ -93,17 +93,17 @@ make bench-compare
 
 Latest full benchmark run recorded from `.benchmarks/latest/result.json`:
 
-- git sha: `0638556`
-- release binary size: `5,165,720` bytes
-- package size: `37,755` bytes
+- git sha: `9455b75`
+- release binary size: `5,140,832` bytes
+- package size: `42,777` bytes
 - host: `linux/x86_64`
 
 | scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
 |---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 59,275 ms | 16.87 msgs/s | 5,704 KB | 678,250 B | log 538,560 / index 68,570 / timeindex 70,680 / state 440 |
-| `bench.produce.medium` | 500 msgs × 1,024B | 29,815 ms | 16.77 msgs/s | 5,760 KB | 1,725,990 B | log 1,655,060 / index 34,939 / timeindex 35,549 / state 442 |
-| `bench.roundtrip` | 200 msgs × 512B | 12,995 ms | 15.39 msgs/s | 5,708 KB | 382,725 B | log 354,560 / index 13,714 / timeindex 14,024 / state 427 |
-| `bench.commit.resume` | 4 msgs × 256B | 1,603 ms | 2.49 msgs/s | 5,804 KB | 6,796 B | log 3,996 / index 248 / timeindex 264 / state 2,288 |
+| `bench.produce.small` | 1,000 msgs × 100B | 50,741 ms | 19.71 msgs/s | 5,852 KB | 1,056,519 B | log 538,560 / index 68,570 / timeindex 70,680 / state journal 378,709 |
+| `bench.produce.medium` | 500 msgs × 1,024B | 25,591 ms | 19.54 msgs/s | 5,832 KB | 1,916,258 B | log 1,655,060 / index 34,939 / timeindex 35,549 / state journal 190,710 |
+| `bench.roundtrip` | 200 msgs × 512B | 11,111 ms | 18.00 msgs/s | 6,104 KB | 455,398 B | log 354,560 / index 13,714 / timeindex 14,024 / state journal 73,100 |
+| `bench.commit.resume` | 4 msgs × 256B | 1,516 ms | 2.64 msgs/s | 5,852 KB | 11,590 B | log 3,996 / index 248 / timeindex 264 / state journal 7,082 |
 
 For reproducibility, rerun:
 

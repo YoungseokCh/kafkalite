@@ -83,7 +83,7 @@ impl Storage for FileStore {
     fn ensure_topic(&self, topic: &str, now_ms: i64) -> Result<()> {
         let mut inner = self.inner.lock().expect("file store mutex poisoned");
         ensure_topic_state(&mut inner, topic, now_ms)?;
-        persist_all(&mut inner, &self.root)
+        persist_topics(&mut inner)
     }
 
     fn init_producer(&self, now_ms: i64) -> Result<ProducerSession> {
@@ -94,17 +94,7 @@ impl Storage for FileStore {
         };
         inner.producers.next_producer_id += 1;
         let producers = inner.producers.clone();
-        inner
-            .journal
-            .append_producer_state(&self.root, &producers, now_ms)?;
-        SnapshotSet::write(
-            &self.root,
-            &inner.topics,
-            &inner.producers,
-            &inner.groups,
-            &inner.offsets,
-        )?;
-        inner.journal.clear(&self.root)?;
+        inner.journal.append_producer_state(&producers, now_ms)?;
         Ok(session)
     }
 
@@ -162,7 +152,8 @@ impl Storage for FileStore {
                 },
             );
         }
-        persist_all(&mut inner, &self.root)?;
+        persist_topics(&mut inner)?;
+        persist_producers(&mut inner)?;
         Ok((base_offset, last_offset))
     }
 
@@ -259,7 +250,7 @@ impl Storage for FileStore {
                     .collect::<Vec<_>>(),
             )
         };
-        persist_all(&mut inner, &self.root)?;
+        persist_groups(&mut inner)?;
         Ok(GroupJoinResult {
             generation_id,
             protocol_name: protocol_name_result,
@@ -315,7 +306,7 @@ impl Storage for FileStore {
             .get(member_id)
             .map(|member| member.assignment.clone())
             .unwrap_or_default();
-        persist_all(&mut inner, &self.root)?;
+        persist_groups(&mut inner)?;
         Ok(SyncGroupResult {
             protocol_name: protocol_name.to_string(),
             assignment,
@@ -350,7 +341,7 @@ impl Storage for FileStore {
             .expect("member checked above");
         member.last_heartbeat_unix_ms = now_ms;
         member.updated_at_unix_ms = now_ms;
-        persist_all(&mut inner, &self.root)
+        persist_groups(&mut inner)
     }
 
     fn leave_group(&self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()> {
@@ -362,7 +353,7 @@ impl Storage for FileStore {
                 group.updated_at_unix_ms = now_ms;
             }
         }
-        persist_all(&mut inner, &self.root)
+        persist_groups(&mut inner)
     }
 
     fn commit_offset(
@@ -400,7 +391,8 @@ impl Storage for FileStore {
         inner
             .offsets
             .insert(offset_key(group_id, topic), next_offset);
-        persist_all(&mut inner, &self.root)
+        persist_groups(&mut inner)?;
+        persist_offsets(&mut inner)
     }
 
     fn fetch_offset(&self, group_id: &str, topic: &str) -> Result<Option<i64>> {
@@ -423,23 +415,22 @@ fn ensure_topic_state<'a>(
     Ok(inner.topics.get_mut(topic).expect("topic inserted"))
 }
 
-fn persist_all(inner: &mut FileStoreInner, root: &Path) -> Result<()> {
-    inner.journal.append_topics(root, &inner.topics)?;
-    inner.journal.append_producer_state(
-        root,
-        &inner.producers,
-        chrono::Utc::now().timestamp_millis(),
-    )?;
-    inner.journal.append_groups(root, &inner.groups)?;
-    inner.journal.append_offsets(root, &inner.offsets)?;
-    SnapshotSet::write(
-        root,
-        &inner.topics,
-        &inner.producers,
-        &inner.groups,
-        &inner.offsets,
-    )?;
-    inner.journal.clear(root)
+fn persist_topics(inner: &mut FileStoreInner) -> Result<()> {
+    inner.journal.append_topics(&inner.topics)
+}
+
+fn persist_producers(inner: &mut FileStoreInner) -> Result<()> {
+    inner
+        .journal
+        .append_producer_state(&inner.producers, chrono::Utc::now().timestamp_millis())
+}
+
+fn persist_groups(inner: &mut FileStoreInner) -> Result<()> {
+    inner.journal.append_groups(&inner.groups)
+}
+
+fn persist_offsets(inner: &mut FileStoreInner) -> Result<()> {
+    inner.journal.append_offsets(&inner.offsets)
 }
 
 fn validate_producer_state(

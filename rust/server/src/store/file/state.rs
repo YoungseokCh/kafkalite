@@ -102,24 +102,6 @@ impl SnapshotSet {
             offsets: read_json(root.join("state/offsets.snapshot"))?.unwrap_or_default(),
         })
     }
-
-    pub fn write(
-        root: &Path,
-        topics: &BTreeMap<String, TopicState>,
-        producers: &ProducerState,
-        groups: &BTreeMap<String, GroupState>,
-        offsets: &BTreeMap<String, i64>,
-    ) -> Result<()> {
-        fs::create_dir_all(root.join("state"))?;
-        write_json(root.join("state/topics.snapshot"), topics)?;
-        write_json(root.join("state/producers.snapshot"), producers)?;
-        write_json(root.join("state/groups.snapshot"), groups)?;
-        write_json(root.join("state/offsets.snapshot"), offsets)?;
-        write_json(
-            root.join("state/checkpoints.json"),
-            &serde_json::json!({"journal_entries": 0}),
-        )
-    }
 }
 
 pub struct StateJournal {
@@ -153,52 +135,28 @@ impl StateJournal {
         Ok(())
     }
 
-    pub fn append_topics(
-        &mut self,
-        root: &Path,
-        topics: &BTreeMap<String, TopicState>,
-    ) -> Result<()> {
-        self.append(root, JournalEntry::Topics(topics.clone()))
+    pub fn append_topics(&mut self, topics: &BTreeMap<String, TopicState>) -> Result<()> {
+        self.append(JournalEntry::Topics(topics.clone()))
     }
 
-    pub fn append_producer_state(
-        &mut self,
-        root: &Path,
-        producers: &ProducerState,
-        _now_ms: i64,
-    ) -> Result<()> {
-        self.append(root, JournalEntry::Producers(producers.clone()))
+    pub fn append_producer_state(&mut self, producers: &ProducerState, _now_ms: i64) -> Result<()> {
+        self.append(JournalEntry::Producers(producers.clone()))
     }
 
-    pub fn append_groups(
-        &mut self,
-        root: &Path,
-        groups: &BTreeMap<String, GroupState>,
-    ) -> Result<()> {
-        self.append(root, JournalEntry::Groups(groups.clone()))
+    pub fn append_groups(&mut self, groups: &BTreeMap<String, GroupState>) -> Result<()> {
+        self.append(JournalEntry::Groups(groups.clone()))
     }
 
-    pub fn append_offsets(&mut self, root: &Path, offsets: &BTreeMap<String, i64>) -> Result<()> {
-        self.append(root, JournalEntry::Offsets(offsets.clone()))
+    pub fn append_offsets(&mut self, offsets: &BTreeMap<String, i64>) -> Result<()> {
+        self.append(JournalEntry::Offsets(offsets.clone()))
     }
 
-    pub fn clear(&mut self, root: &Path) -> Result<()> {
-        File::create(&self.path)?.sync_all()?;
-        write_json(
-            root.join("state/checkpoints.json"),
-            &serde_json::json!({"journal_entries": 0}),
-        )
-    }
-
-    fn append(&mut self, root: &Path, entry: JournalEntry) -> Result<()> {
+    fn append(&mut self, entry: JournalEntry) -> Result<()> {
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         serde_json::to_writer(&mut file, &entry)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        write_json(
-            root.join("state/checkpoints.json"),
-            &serde_json::json!({"journal_entries": 1}),
-        )
+        Ok(())
     }
 }
 
@@ -215,17 +173,4 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<Option<T>> {
         return Ok(None);
     }
     Ok(Some(serde_json::from_reader(File::open(path)?)?))
-}
-
-fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let mut file = File::create(&tmp)?;
-    serde_json::to_writer_pretty(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::rename(tmp, path)?;
-    Ok(())
 }

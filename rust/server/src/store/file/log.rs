@@ -46,7 +46,7 @@ impl RecordLog {
         let payload = serde_json::to_vec(batch)?;
         segment.write_all(&(payload.len() as u32).to_le_bytes())?;
         segment.write_all(&payload)?;
-        segment.sync_all()?;
+        segment.sync_data()?;
 
         let mut index = OpenOptions::new()
             .append(true)
@@ -61,7 +61,6 @@ impl RecordLog {
             },
         )?;
         index.write_all(b"\n")?;
-        index.sync_all()?;
 
         let mut time_index = OpenOptions::new()
             .append(true)
@@ -75,7 +74,6 @@ impl RecordLog {
             },
         )?;
         time_index.write_all(b"\n")?;
-        time_index.sync_all()?;
         Ok(())
     }
 
