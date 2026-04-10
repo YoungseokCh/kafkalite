@@ -5,6 +5,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use super::*;
+use crate::store::StoreError;
 
 #[test]
 fn appends_and_fetches_records() {
