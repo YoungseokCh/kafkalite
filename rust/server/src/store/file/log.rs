@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::{BrokerRecord, Result};
+use crate::store::{BrokerRecord, Result, StoreError};
+
+const BATCH_MAGIC: &[u8; 4] = b"KFLG";
 
 #[derive(Debug)]
 pub struct RecordLog {
@@ -43,7 +45,7 @@ impl RecordLog {
             .read(true)
             .open(self.segment_path(topic))?;
         let position = segment.seek(SeekFrom::End(0))?;
-        let payload = serde_json::to_vec(batch)?;
+        let payload = batch.encode_binary()?;
         segment.write_all(&(payload.len() as u32).to_le_bytes())?;
         segment.write_all(&payload)?;
         segment.sync_data()?;
@@ -98,7 +100,7 @@ impl RecordLog {
             }
             let mut payload = vec![0_u8; u32::from_le_bytes(len) as usize];
             reader.read_exact(&mut payload)?;
-            let batch: StoredBatch = serde_json::from_slice(&payload)?;
+            let batch = StoredBatch::decode_binary(&payload)?;
             for record in batch.records {
                 if record.offset >= start_offset {
                     records.push(record);
@@ -135,10 +137,17 @@ impl RecordLog {
         if !self.index_path(topic).exists() {
             return Ok(Vec::new());
         }
-        let reader = BufReader::new(File::open(self.index_path(topic))?);
+        let reader = File::open(self.index_path(topic))?;
+        let reader = std::io::BufReader::new(reader);
         let mut entries = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
+        let mut line = String::new();
+        let mut reader = reader;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let line = line.trim_end();
             if line.is_empty() {
                 continue;
             }
@@ -177,7 +186,7 @@ impl RecordLog {
             let payload_len = u32::from_le_bytes(len) as u64;
             let mut payload = vec![0_u8; payload_len as usize];
             if file.read_exact(&mut payload).is_err()
-                || serde_json::from_slice::<StoredBatch>(&payload).is_err()
+                || StoredBatch::decode_binary(&payload).is_err()
             {
                 break;
             }
@@ -207,7 +216,7 @@ impl RecordLog {
             let payload_len = u32::from_le_bytes(len) as usize;
             let mut payload = vec![0_u8; payload_len];
             reader.read_exact(&mut payload)?;
-            let batch: StoredBatch = serde_json::from_slice(&payload)?;
+            let batch = StoredBatch::decode_binary(&payload)?;
             serde_json::to_writer(
                 &mut index,
                 &IndexEntry {
@@ -278,6 +287,68 @@ impl StoredBatch {
             records: records.to_vec(),
         }
     }
+
+    pub fn encode_binary(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(BATCH_MAGIC);
+        out.extend_from_slice(&self.base_offset.to_le_bytes());
+        out.extend_from_slice(&self.last_offset.to_le_bytes());
+        out.extend_from_slice(&self.max_timestamp_ms.to_le_bytes());
+        out.extend_from_slice(&(self.records.len() as u32).to_le_bytes());
+        for record in &self.records {
+            out.extend_from_slice(&record.offset.to_le_bytes());
+            out.extend_from_slice(&record.timestamp_ms.to_le_bytes());
+            out.extend_from_slice(&record.producer_id.to_le_bytes());
+            out.extend_from_slice(&record.producer_epoch.to_le_bytes());
+            out.extend_from_slice(&record.sequence.to_le_bytes());
+            write_bytes(&mut out, record.key.as_ref().map(|value| value.as_ref()));
+            write_bytes(&mut out, record.value.as_ref().map(|value| value.as_ref()));
+            write_bytes(&mut out, Some(record.headers_json.as_slice()));
+        }
+        Ok(out)
+    }
+
+    pub fn decode_binary(payload: &[u8]) -> Result<Self> {
+        let mut cursor = std::io::Cursor::new(payload);
+        let mut magic = [0_u8; 4];
+        cursor.read_exact(&mut magic)?;
+        if &magic != BATCH_MAGIC {
+            return Err(StoreError::Protocol("invalid batch magic".to_string()));
+        }
+        let base_offset = read_i64(&mut cursor)?;
+        let last_offset = read_i64(&mut cursor)?;
+        let max_timestamp_ms = read_i64(&mut cursor)?;
+        let mut count_bytes = [0_u8; 4];
+        cursor.read_exact(&mut count_bytes)?;
+        let count = u32::from_le_bytes(count_bytes);
+        let mut records = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let offset = read_i64(&mut cursor)?;
+            let timestamp_ms = read_i64(&mut cursor)?;
+            let producer_id = read_i64(&mut cursor)?;
+            let producer_epoch = read_i16(&mut cursor)?;
+            let sequence = read_i32(&mut cursor)?;
+            let key = read_bytes(&mut cursor)?.map(bytes::Bytes::from);
+            let value = read_bytes(&mut cursor)?.map(bytes::Bytes::from);
+            let headers_json = read_bytes(&mut cursor)?.unwrap_or_default();
+            records.push(BrokerRecord {
+                offset,
+                timestamp_ms,
+                producer_id,
+                producer_epoch,
+                sequence,
+                key,
+                value,
+                headers_json,
+            });
+        }
+        Ok(Self {
+            base_offset,
+            last_offset,
+            max_timestamp_ms,
+            records,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,4 +364,44 @@ struct TimeIndexEntry {
     max_timestamp_ms: i64,
     base_offset: i64,
     position: u64,
+}
+
+fn write_bytes(out: &mut Vec<u8>, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        None => out.extend_from_slice(&u32::MAX.to_le_bytes()),
+    }
+}
+
+fn read_bytes(reader: &mut std::io::Cursor<&[u8]>) -> Result<Option<Vec<u8>>> {
+    let mut len = [0_u8; 4];
+    reader.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len);
+    if len == u32::MAX {
+        return Ok(None);
+    }
+    let mut bytes = vec![0_u8; len as usize];
+    reader.read_exact(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn read_i64(reader: &mut std::io::Cursor<&[u8]>) -> Result<i64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+fn read_i32(reader: &mut std::io::Cursor<&[u8]>) -> Result<i32> {
+    let mut bytes = [0_u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn read_i16(reader: &mut std::io::Cursor<&[u8]>) -> Result<i16> {
+    let mut bytes = [0_u8; 2];
+    reader.read_exact(&mut bytes)?;
+    Ok(i16::from_le_bytes(bytes))
 }
