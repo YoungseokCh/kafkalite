@@ -5,9 +5,14 @@ use kafka_protocol::messages::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsTopicResponse,
 };
 use kafka_protocol::messages::produce_response::{PartitionProduceResponse, TopicProduceResponse};
-use kafka_protocol::messages::{BrokerId, FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, ProduceRequest, ProduceResponse, TopicName};
+use kafka_protocol::messages::{
+    BrokerId, FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, ProduceRequest,
+    ProduceResponse, TopicName,
+};
 use kafka_protocol::protocol::StrBytes;
-use kafka_protocol::records::{Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
+use kafka_protocol::records::{
+    Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+};
 
 use crate::store::{BrokerRecord, StoreError};
 
@@ -18,7 +23,10 @@ const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const UNKNOWN_PRODUCER_ID: i16 = 59;
 
-pub async fn handle_produce(broker: &KafkaBroker, request: ProduceRequest) -> Result<ProduceResponse> {
+pub async fn handle_produce(
+    broker: &KafkaBroker,
+    request: ProduceRequest,
+) -> Result<ProduceResponse> {
     let mut topics = Vec::new();
     for topic_data in request.topic_data {
         let topic_name = topic_data.name.to_string();
@@ -99,9 +107,10 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
                 );
                 continue;
             }
-            let fetched = broker
-                .store()
-                .fetch_records(&topic_name, partition.fetch_offset, 1_000)?;
+            let fetched =
+                broker
+                    .store()
+                    .fetch_records(&topic_name, partition.fetch_offset, 1_000)?;
             let records = encode_records(&fetched.records)?;
             partitions.push(
                 PartitionData::default()
@@ -242,8 +251,28 @@ mod tests {
     async fn duplicate_retry_returns_same_base_offset() {
         let broker = test_broker();
         let session = broker.store().init_producer(0).unwrap();
-        let first = handle_produce(&broker, produce_request("retry.topic", session.producer_id, session.producer_epoch, 0)).await.unwrap();
-        let duplicate = handle_produce(&broker, produce_request("retry.topic", session.producer_id, session.producer_epoch, 0)).await.unwrap();
+        let first = handle_produce(
+            &broker,
+            produce_request(
+                "retry.topic",
+                session.producer_id,
+                session.producer_epoch,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+        let duplicate = handle_produce(
+            &broker,
+            produce_request(
+                "retry.topic",
+                session.producer_id,
+                session.producer_epoch,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
 
         let first_partition = &first.responses[0].partition_responses[0];
         let duplicate_partition = &duplicate.responses[0].partition_responses[0];
@@ -258,8 +287,28 @@ mod tests {
     async fn stale_epoch_maps_to_invalid_producer_epoch() {
         let broker = test_broker();
         let session = broker.store().init_producer(0).unwrap();
-        let _ = handle_produce(&broker, produce_request("epoch.topic", session.producer_id, session.producer_epoch + 1, 0)).await.unwrap();
-        let stale = handle_produce(&broker, produce_request("epoch.topic", session.producer_id, session.producer_epoch, 1)).await.unwrap();
+        let _ = handle_produce(
+            &broker,
+            produce_request(
+                "epoch.topic",
+                session.producer_id,
+                session.producer_epoch + 1,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+        let stale = handle_produce(
+            &broker,
+            produce_request(
+                "epoch.topic",
+                session.producer_id,
+                session.producer_epoch,
+                1,
+            ),
+        )
+        .await
+        .unwrap();
 
         let partition = &stale.responses[0].partition_responses[0];
         assert_eq!(partition.error_code, INVALID_PRODUCER_EPOCH);
@@ -270,13 +319,20 @@ mod tests {
         let dir = tempdir().unwrap().keep();
         let config = Config {
             broker: BrokerConfig::default(),
-            storage: StorageConfig { data_dir: dir.join("data") },
+            storage: StorageConfig {
+                data_dir: dir.join("data"),
+            },
         };
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
         KafkaBroker::new(config, store)
     }
 
-    fn produce_request(topic: &str, producer_id: i64, producer_epoch: i16, sequence: i32) -> ProduceRequest {
+    fn produce_request(
+        topic: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        sequence: i32,
+    ) -> ProduceRequest {
         let records = vec![Record {
             transactional: false,
             control: false,
@@ -295,8 +351,12 @@ mod tests {
         RecordBatchEncoder::encode(
             &mut encoded,
             &records,
-            &RecordEncodeOptions { version: 2, compression: Compression::None },
-        ).unwrap();
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
         ProduceRequest::default()
             .with_acks(1)
             .with_timeout_ms(5_000)

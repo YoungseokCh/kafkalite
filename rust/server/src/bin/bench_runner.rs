@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
 use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
-use kafkalite_server::bench::scenarios::{run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip, ScenarioSpec};
+use kafkalite_server::bench::scenarios::{
+    ScenarioSpec, run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
+};
 
 #[derive(Clone, Debug, ValueEnum)]
 enum BenchMode {
@@ -45,8 +47,16 @@ async fn main() -> anyhow::Result<()> {
         run_id: chrono::Utc::now().to_rfc3339(),
         git_sha: args.git_sha,
         dirty: args.dirty,
-        host: HostInfo { os: std::env::consts::OS.to_string(), arch: std::env::consts::ARCH.to_string() },
-        build: BuildMetrics { profile: "release".to_string(), binary_bytes: args.binary_bytes, package_bytes: args.package_bytes, stripped_binary_bytes: args.stripped_binary_bytes },
+        host: HostInfo {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        },
+        build: BuildMetrics {
+            profile: "release".to_string(),
+            binary_bytes: args.binary_bytes,
+            package_bytes: args.package_bytes,
+            stripped_binary_bytes: args.stripped_binary_bytes,
+        },
         scenarios,
     };
     let json = serde_json::to_string_pretty(&report)?;
@@ -58,34 +68,90 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
     let specs = match args.mode {
-        BenchMode::Quick => vec![ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 }],
+        BenchMode::Quick => vec![ScenarioSpec {
+            name: "bench.produce.small",
+            messages: 1_000,
+            payload_bytes: 100,
+        }],
         BenchMode::Size => Vec::new(),
         BenchMode::Runtime => vec![
-            ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
-            ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
-            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
-            ScenarioSpec { name: "bench.commit.resume", messages: 4, payload_bytes: 256 },
+            ScenarioSpec {
+                name: "bench.produce.small",
+                messages: 1_000,
+                payload_bytes: 100,
+            },
+            ScenarioSpec {
+                name: "bench.roundtrip",
+                messages: 200,
+                payload_bytes: 512,
+            },
+            ScenarioSpec {
+                name: "bench.fetch.tail",
+                messages: 500,
+                payload_bytes: 512,
+            },
+            ScenarioSpec {
+                name: "bench.commit.resume",
+                messages: 4,
+                payload_bytes: 256,
+            },
         ],
         BenchMode::Memory => vec![
-            ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
-            ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
-            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
+            ScenarioSpec {
+                name: "bench.produce.small",
+                messages: 1_000,
+                payload_bytes: 100,
+            },
+            ScenarioSpec {
+                name: "bench.roundtrip",
+                messages: 200,
+                payload_bytes: 512,
+            },
+            ScenarioSpec {
+                name: "bench.fetch.tail",
+                messages: 500,
+                payload_bytes: 512,
+            },
         ],
-        BenchMode::Storage => vec![
-            ScenarioSpec { name: "bench.produce.medium", messages: 500, payload_bytes: 1024 },
-        ],
+        BenchMode::Storage => vec![ScenarioSpec {
+            name: "bench.produce.medium",
+            messages: 500,
+            payload_bytes: 1024,
+        }],
         BenchMode::Full => vec![
-            ScenarioSpec { name: "bench.produce.small", messages: 1_000, payload_bytes: 100 },
-            ScenarioSpec { name: "bench.produce.medium", messages: 500, payload_bytes: 1024 },
-            ScenarioSpec { name: "bench.roundtrip", messages: 200, payload_bytes: 512 },
-            ScenarioSpec { name: "bench.fetch.tail", messages: 500, payload_bytes: 512 },
-            ScenarioSpec { name: "bench.commit.resume", messages: 4, payload_bytes: 256 },
+            ScenarioSpec {
+                name: "bench.produce.small",
+                messages: 1_000,
+                payload_bytes: 100,
+            },
+            ScenarioSpec {
+                name: "bench.produce.medium",
+                messages: 500,
+                payload_bytes: 1024,
+            },
+            ScenarioSpec {
+                name: "bench.roundtrip",
+                messages: 200,
+                payload_bytes: 512,
+            },
+            ScenarioSpec {
+                name: "bench.fetch.tail",
+                messages: 500,
+                payload_bytes: 512,
+            },
+            ScenarioSpec {
+                name: "bench.commit.resume",
+                messages: 4,
+                payload_bytes: 256,
+            },
         ],
     };
 
     let mut reports = Vec::new();
     for spec in specs {
-        let scenario_root = args.output_dir.join(format!("scenario-{}", spec.name.replace('.', "-")));
+        let scenario_root = args
+            .output_dir
+            .join(format!("scenario-{}", spec.name.replace('.', "-")));
         let report = if spec.name.contains("fetch.tail") {
             run_fetch_tail(&scenario_root, &args.broker_bin, &spec).await?
         } else if spec.name.contains("roundtrip") {
@@ -129,10 +195,20 @@ fn to_csv(report: &BenchmarkReport) -> String {
 
 fn to_markdown(report: &BenchmarkReport) -> String {
     let mut out = String::from("# Benchmark Summary\n\n");
-    out.push_str(&format!("- git_sha: `{}`\n- dirty: `{}`\n- binary_bytes: `{}`\n- package_bytes: `{}`\n\n", report.git_sha, report.dirty, report.build.binary_bytes, report.build.package_bytes));
+    out.push_str(&format!(
+        "- git_sha: `{}`\n- dirty: `{}`\n- binary_bytes: `{}`\n- package_bytes: `{}`\n\n",
+        report.git_sha, report.dirty, report.build.binary_bytes, report.build.package_bytes
+    ));
     out.push_str("| scenario | elapsed_ms | msgs/sec | peak_rss_kb | total_bytes |\n|---|---:|---:|---:|---:|\n");
     for scenario in &report.scenarios {
-        out.push_str(&format!("| {} | {:.2} | {:.2} | {} | {} |\n", scenario.name, scenario.runtime.elapsed_ms, scenario.runtime.throughput_msgs_per_sec, scenario.memory.peak_rss_kb, scenario.storage.total_bytes));
+        out.push_str(&format!(
+            "| {} | {:.2} | {:.2} | {} | {} |\n",
+            scenario.name,
+            scenario.runtime.elapsed_ms,
+            scenario.runtime.throughput_msgs_per_sec,
+            scenario.memory.peak_rss_kb,
+            scenario.storage.total_bytes
+        ));
     }
     out
 }

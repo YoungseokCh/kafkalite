@@ -9,8 +9,8 @@ use kafkalite_server::{
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
-use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::metadata::Metadata;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use tempfile::tempdir;
 
@@ -22,7 +22,9 @@ async fn rdkafka_producer_and_consumer_smoke() {
 
     let (partition, offset) = producer
         .send(
-            FutureRecord::to("compat.events").payload("hello").key("key"),
+            FutureRecord::to("compat.events")
+                .payload("hello")
+                .key("key"),
             Duration::from_secs(3),
         )
         .await
@@ -80,7 +82,9 @@ async fn rdkafka_group_consumer_commit_smoke() {
 
     let message = poll_for_message(&consumer, Duration::from_secs(8));
     assert_eq!(message.payload(), Some(&b"payload"[..]));
-    consumer.commit_message(&message, rdkafka::consumer::CommitMode::Sync).unwrap();
+    consumer
+        .commit_message(&message, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
 
     handle.abort();
     let _ = handle.await;
@@ -174,7 +178,10 @@ async fn metadata_reports_unknown_topic_until_first_produce() {
     let producer = producer(&bootstrap);
 
     let metadata = consumer
-        .fetch_metadata(Some("dynamic.events.project.processor"), Duration::from_secs(5))
+        .fetch_metadata(
+            Some("dynamic.events.project.processor"),
+            Duration::from_secs(5),
+        )
         .unwrap();
     let topic = find_topic(&metadata, "dynamic.events.project.processor");
     assert_eq!(topic.partitions().len(), 0);
@@ -190,7 +197,10 @@ async fn metadata_reports_unknown_topic_until_first_produce() {
         .unwrap();
 
     let metadata = consumer
-        .fetch_metadata(Some("dynamic.events.project.processor"), Duration::from_secs(5))
+        .fetch_metadata(
+            Some("dynamic.events.project.processor"),
+            Duration::from_secs(5),
+        )
         .unwrap();
     let topic = find_topic(&metadata, "dynamic.events.project.processor");
     assert_eq!(topic.partitions().len(), 1);
@@ -217,10 +227,14 @@ async fn multiple_topics_keep_independent_offsets() {
         assert_eq!(offset, 0);
     }
 
-    for (topic, expected) in [("events.alpha", b"alpha-1".as_slice()), ("events.beta", b"beta-1".as_slice())] {
+    for (topic, expected) in [
+        ("events.alpha", b"alpha-1".as_slice()),
+        ("events.beta", b"beta-1".as_slice()),
+    ] {
         let consumer = base_consumer(&bootstrap, topic);
         let mut tpl = TopicPartitionList::new();
-        tpl.add_partition_offset(topic, 0, Offset::Beginning).unwrap();
+        tpl.add_partition_offset(topic, 0, Offset::Beginning)
+            .unwrap();
         consumer.assign(&tpl).unwrap();
         let message = poll_for_message(&consumer, Duration::from_secs(5));
         assert_eq!(message.payload(), Some(expected));
@@ -285,7 +299,11 @@ fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-async fn start_broker() -> (String, tokio::task::JoinHandle<anyhow::Result<()>>, tempfile::TempDir) {
+async fn start_broker() -> (
+    String,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
     let tempdir = tempdir().unwrap();
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
     (bootstrap, handle, tempdir)
@@ -341,7 +359,10 @@ fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
         .unwrap()
 }
 
-fn poll_for_message(consumer: &BaseConsumer, timeout: Duration) -> rdkafka::message::BorrowedMessage<'_> {
+fn poll_for_message(
+    consumer: &BaseConsumer,
+    timeout: Duration,
+) -> rdkafka::message::BorrowedMessage<'_> {
     let started = std::time::Instant::now();
     while started.elapsed() < timeout {
         if let Some(result) = consumer.poll(Duration::from_millis(250)) {

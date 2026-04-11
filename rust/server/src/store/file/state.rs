@@ -104,7 +104,11 @@ impl SnapshotSet {
                 next_producer_id: 1,
                 sequences: BTreeMap::new(),
             }),
-            groups: read_json(root.join("state/groups.snapshot"))?.unwrap_or_default(),
+            groups: if DEFAULT_POLICY.persist_group_membership {
+                read_json(root.join("state/groups.snapshot"))?.unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            },
             offsets: read_json(root.join("state/offsets.snapshot"))?.unwrap_or_default(),
         })
     }
@@ -134,7 +138,11 @@ impl StateJournal {
             match entry {
                 JournalEntry::Topics(topics) => snapshots.topics = topics,
                 JournalEntry::Producers(producers) => snapshots.producers = producers,
-                JournalEntry::Groups(groups) => snapshots.groups = groups,
+                JournalEntry::Groups(groups) => {
+                    if DEFAULT_POLICY.persist_group_membership {
+                        snapshots.groups = groups;
+                    }
+                }
                 JournalEntry::Offsets(offsets) => snapshots.offsets = offsets,
             }
         }
@@ -142,15 +150,17 @@ impl StateJournal {
     }
 
     pub fn append_topics(&self, topics: &BTreeMap<String, TopicState>) -> Result<()> {
-        self.append(JournalEntry::Topics(topics.clone()), false)
+        self.append(
+            JournalEntry::Topics(topics.clone()),
+            DEFAULT_POLICY.sync_topic_journal,
+        )
     }
 
     pub fn append_producer_state(&self, producers: &ProducerState, _now_ms: i64) -> Result<()> {
-        self.append(JournalEntry::Producers(producers.clone()), false)
-    }
-
-    pub fn append_groups(&self, groups: &BTreeMap<String, GroupState>) -> Result<()> {
-        self.append(JournalEntry::Groups(groups.clone()), false)
+        self.append(
+            JournalEntry::Producers(producers.clone()),
+            DEFAULT_POLICY.sync_producer_journal,
+        )
     }
 
     pub fn append_offsets(&self, offsets: &BTreeMap<String, i64>) -> Result<()> {

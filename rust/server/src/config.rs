@@ -1,6 +1,6 @@
 use figment::{
-    providers::{Format, Toml},
     Figment,
+    providers::{Format, Toml},
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;

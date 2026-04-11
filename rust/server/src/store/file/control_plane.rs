@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use bytes::Bytes;
 
 use crate::store::{
-    GroupJoinResult, GroupMember, Result, StoreError, SyncGroupResult, DEFAULT_PARTITION,
+    DEFAULT_PARTITION, GroupJoinRequest, GroupJoinResult, GroupMember, Result, StoreError,
+    SyncGroupResult,
 };
 
 use super::state::{GroupMemberState, GroupState, StateJournal};
@@ -30,41 +31,26 @@ impl ControlPlaneState {
         }
     }
 
-    pub fn join_group(
-        &mut self,
-        group_id: &str,
-        member_id: Option<&str>,
-        protocol_type: &str,
-        protocol_name: &str,
-        metadata: &[u8],
-        session_timeout_ms: i32,
-        rebalance_timeout_ms: i32,
-        now_ms: i64,
-    ) -> Result<GroupJoinResult> {
-        let member_id = member_id
+    pub fn join_group(&mut self, request: GroupJoinRequest<'_>) -> Result<GroupJoinResult> {
+        let member_id = request
+            .member_id
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("{group_id}-member-{now_ms}"));
+            .unwrap_or_else(|| format!("{}-member-{}", request.group_id, request.now_ms));
         let (generation_id, protocol_name_result, leader, members) = {
             let group = self
                 .groups
-                .entry(group_id.to_string())
-                .or_insert_with(|| GroupState::new(protocol_type, protocol_name, now_ms));
-            let pruned = prune_expired_members(group, now_ms);
-            let changed = upsert_group_member(
-                group,
-                &member_id,
-                protocol_type,
-                protocol_name,
-                metadata,
-                session_timeout_ms,
-                rebalance_timeout_ms,
-                now_ms,
-            );
+                .entry(request.group_id.to_string())
+                .or_insert_with(|| {
+                    GroupState::new(request.protocol_type, request.protocol_name, request.now_ms)
+                });
+            let pruned = prune_expired_members(group, request.now_ms);
+            let changed =
+                upsert_group_member(group, &member_id, MemberRegistration::from_request(request));
             if pruned || changed || group.generation_id == 0 {
                 group.generation_id += 1;
-                group.protocol_type = protocol_type.to_string();
-                group.protocol_name = protocol_name.to_string();
+                group.protocol_type = request.protocol_type.to_string();
+                group.protocol_name = request.protocol_name.to_string();
                 for member in group.members.values_mut() {
                     member.generation_id = group.generation_id;
                     member.assignment = Vec::new();
@@ -88,7 +74,6 @@ impl ControlPlaneState {
                     .collect::<Vec<_>>(),
             )
         };
-        self.persist_groups()?;
         Ok(GroupJoinResult {
             generation_id,
             protocol_name: protocol_name_result,
@@ -110,7 +95,7 @@ impl ControlPlaneState {
         let group = self
             .groups
             .get_mut(group_id)
-            .ok_or_else(|| StoreError::StaleGeneration {
+            .ok_or(StoreError::StaleGeneration {
                 expected: 0,
                 actual: generation_id,
             })?;
@@ -143,7 +128,6 @@ impl ControlPlaneState {
             .get(member_id)
             .map(|member| member.assignment.clone())
             .unwrap_or_default();
-        self.persist_groups()?;
         Ok(SyncGroupResult {
             protocol_name: protocol_name.to_string(),
             assignment,
@@ -177,18 +161,18 @@ impl ControlPlaneState {
             .expect("member checked above");
         member.last_heartbeat_unix_ms = now_ms;
         member.updated_at_unix_ms = now_ms;
-        self.persist_groups()
+        Ok(())
     }
 
     pub fn leave_group(&mut self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()> {
-        if let Some(group) = self.groups.get_mut(group_id) {
-            if group.members.remove(member_id).is_some() {
-                group.generation_id += 1;
-                group.leader_member_id = group.members.keys().next().cloned();
-                group.updated_at_unix_ms = now_ms;
-            }
+        if let Some(group) = self.groups.get_mut(group_id)
+            && group.members.remove(member_id).is_some()
+        {
+            group.generation_id += 1;
+            group.leader_member_id = group.members.keys().next().cloned();
+            group.updated_at_unix_ms = now_ms;
         }
-        self.persist_groups()
+        Ok(())
     }
 
     pub fn commit_offset(
@@ -226,7 +210,6 @@ impl ControlPlaneState {
             OffsetKey::new(group_id, topic, DEFAULT_PARTITION),
             next_offset,
         );
-        self.persist_groups()?;
         self.persist_offsets()
     }
 
@@ -242,10 +225,6 @@ impl ControlPlaneState {
 
     pub fn committed_offset_count(&self) -> usize {
         self.offsets.len()
-    }
-
-    fn persist_groups(&self) -> Result<()> {
-        self.journal.append_groups(&self.groups)
     }
 
     fn persist_offsets(&self) -> Result<()> {
@@ -294,6 +273,28 @@ impl OffsetKey {
     }
 }
 
+struct MemberRegistration<'a> {
+    protocol_type: &'a str,
+    protocol_name: &'a str,
+    metadata: &'a [u8],
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+    now_ms: i64,
+}
+
+impl<'a> MemberRegistration<'a> {
+    fn from_request(request: GroupJoinRequest<'a>) -> Self {
+        Self {
+            protocol_type: request.protocol_type,
+            protocol_name: request.protocol_name,
+            metadata: request.metadata,
+            session_timeout_ms: request.session_timeout_ms,
+            rebalance_timeout_ms: request.rebalance_timeout_ms,
+            now_ms: request.now_ms,
+        }
+    }
+}
+
 fn prune_expired_members(group: &mut GroupState, now_ms: i64) -> bool {
     let before = group.members.len();
     group.members.retain(|_, member| {
@@ -305,24 +306,19 @@ fn prune_expired_members(group: &mut GroupState, now_ms: i64) -> bool {
 fn upsert_group_member(
     group: &mut GroupState,
     member_id: &str,
-    protocol_type: &str,
-    protocol_name: &str,
-    metadata: &[u8],
-    session_timeout_ms: i32,
-    rebalance_timeout_ms: i32,
-    now_ms: i64,
+    registration: MemberRegistration<'_>,
 ) -> bool {
     let next = GroupMemberState {
         member_id: member_id.to_string(),
         generation_id: group.generation_id,
-        protocol_type: protocol_type.to_string(),
-        protocol_name: protocol_name.to_string(),
-        subscription_metadata: metadata.to_vec(),
+        protocol_type: registration.protocol_type.to_string(),
+        protocol_name: registration.protocol_name.to_string(),
+        subscription_metadata: registration.metadata.to_vec(),
         assignment: Vec::new(),
-        session_timeout_ms,
-        rebalance_timeout_ms,
-        last_heartbeat_unix_ms: now_ms,
-        updated_at_unix_ms: now_ms,
+        session_timeout_ms: registration.session_timeout_ms,
+        rebalance_timeout_ms: registration.rebalance_timeout_ms,
+        last_heartbeat_unix_ms: registration.now_ms,
+        updated_at_unix_ms: registration.now_ms,
     };
     match group.members.insert(member_id.to_string(), next.clone()) {
         None => true,

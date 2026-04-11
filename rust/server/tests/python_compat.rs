@@ -17,7 +17,9 @@ async fn aiokafka_smoke_script() {
         .with_env_filter("kafkalite=debug")
         .try_init();
     let Some(python) = std::env::var_os("AIOKAFKA_PYTHON") else {
-        eprintln!("skipping aiokafka smoke: set AIOKAFKA_PYTHON to a python interpreter with aiokafka installed");
+        eprintln!(
+            "skipping aiokafka smoke: set AIOKAFKA_PYTHON to a python interpreter with aiokafka installed"
+        );
         return;
     };
 

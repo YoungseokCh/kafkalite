@@ -17,7 +17,11 @@ pub struct ScenarioSpec {
     pub payload_bytes: u32,
 }
 
-pub async fn run_produce_only(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
+pub async fn run_produce_only(
+    root: &Path,
+    broker_bin: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
     let broker = BrokerProcess::start(broker_bin, root)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'a'; spec.payload_bytes as usize];
@@ -38,10 +42,22 @@ pub async fn run_produce_only(root: &Path, broker_bin: &Path, spec: &ScenarioSpe
         latencies.push(send_started.elapsed());
         let _ = index;
     }
-    Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
+    Ok(build_report(
+        spec,
+        started.elapsed(),
+        &latencies,
+        &broker,
+        root,
+        spec.messages,
+        spec.payload_bytes,
+    ))
 }
 
-pub async fn run_roundtrip(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
+pub async fn run_roundtrip(
+    root: &Path,
+    broker_bin: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
     let broker = BrokerProcess::start(broker_bin, root)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'b'; spec.payload_bytes as usize];
@@ -68,10 +84,22 @@ pub async fn run_roundtrip(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) 
     for _ in 0..spec.messages {
         let _ = poll_for_message(&consumer, Duration::from_secs(10))?;
     }
-    Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
+    Ok(build_report(
+        spec,
+        started.elapsed(),
+        &latencies,
+        &broker,
+        root,
+        spec.messages,
+        spec.payload_bytes,
+    ))
 }
 
-pub async fn run_fetch_tail(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
+pub async fn run_fetch_tail(
+    root: &Path,
+    broker_bin: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
     let broker = BrokerProcess::start(broker_bin, root)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'd'; spec.payload_bytes as usize];
@@ -89,7 +117,11 @@ pub async fn run_fetch_tail(root: &Path, broker_bin: &Path, spec: &ScenarioSpec)
     }
     let consumer = consumer(&broker.bootstrap, "bench-fetch-tail")?;
     let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(spec.name, 0, Offset::Offset((spec.messages.saturating_sub(10)) as i64))?;
+    tpl.add_partition_offset(
+        spec.name,
+        0,
+        Offset::Offset((spec.messages.saturating_sub(10)) as i64),
+    )?;
     consumer.assign(&tpl)?;
     let started = Instant::now();
     let mut latencies = Vec::with_capacity(10);
@@ -98,10 +130,22 @@ pub async fn run_fetch_tail(root: &Path, broker_bin: &Path, spec: &ScenarioSpec)
         let _ = poll_for_message(&consumer, Duration::from_secs(10))?;
         latencies.push(fetch_started.elapsed());
     }
-    Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
+    Ok(build_report(
+        spec,
+        started.elapsed(),
+        &latencies,
+        &broker,
+        root,
+        spec.messages,
+        spec.payload_bytes,
+    ))
 }
 
-pub async fn run_commit_resume(root: &Path, broker_bin: &Path, spec: &ScenarioSpec) -> Result<ScenarioReport> {
+pub async fn run_commit_resume(
+    root: &Path,
+    broker_bin: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
     let broker = BrokerProcess::start(broker_bin, root)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'c'; spec.payload_bytes as usize];
@@ -130,7 +174,15 @@ pub async fn run_commit_resume(root: &Path, broker_bin: &Path, spec: &ScenarioSp
     let consumer = group_consumer(&broker.bootstrap, "bench-resume")?;
     consumer.subscribe(&[spec.name])?;
     let _ = poll_for_message(&consumer, Duration::from_secs(10))?;
-    Ok(build_report(spec, started.elapsed(), &latencies, &broker, root, spec.messages, spec.payload_bytes))
+    Ok(build_report(
+        spec,
+        started.elapsed(),
+        &latencies,
+        &broker,
+        root,
+        spec.messages,
+        spec.payload_bytes,
+    ))
 }
 
 fn build_report(
@@ -144,15 +196,36 @@ fn build_report(
 ) -> ScenarioReport {
     let runtime = runtime_metrics(elapsed, latencies, messages, payload_bytes);
     let storage = storage_metrics(root.join("data"), messages, payload_bytes);
-    let memory = MemoryMetrics { peak_rss_kb: broker.peak_rss_kb(), final_rss_kb: broker.final_rss_kb() };
-    ScenarioReport { name: spec.name.to_string(), iterations: 1, warmups: 0, messages, payload_bytes, runtime, memory, storage }
+    let memory = MemoryMetrics {
+        peak_rss_kb: broker.peak_rss_kb(),
+        final_rss_kb: broker.final_rss_kb(),
+    };
+    ScenarioReport {
+        name: spec.name.to_string(),
+        iterations: 1,
+        warmups: 0,
+        messages,
+        payload_bytes,
+        runtime,
+        memory,
+        storage,
+    }
 }
 
-fn runtime_metrics(elapsed: Duration, latencies: &[Duration], messages: u32, payload_bytes: u32) -> RuntimeMetrics {
+fn runtime_metrics(
+    elapsed: Duration,
+    latencies: &[Duration],
+    messages: u32,
+    payload_bytes: u32,
+) -> RuntimeMetrics {
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
     let throughput_msgs = messages as f64 / elapsed.as_secs_f64().max(0.001);
-    let throughput_bytes = (messages as f64 * payload_bytes as f64) / elapsed.as_secs_f64().max(0.001);
-    let mut millis = latencies.iter().map(|d| d.as_secs_f64() * 1000.0).collect::<Vec<_>>();
+    let throughput_bytes =
+        (messages as f64 * payload_bytes as f64) / elapsed.as_secs_f64().max(0.001);
+    let mut millis = latencies
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .collect::<Vec<_>>();
     millis.sort_by(|a, b| a.partial_cmp(b).unwrap());
     RuntimeMetrics {
         elapsed_ms,
@@ -164,7 +237,11 @@ fn runtime_metrics(elapsed: Duration, latencies: &[Duration], messages: u32, pay
     }
 }
 
-fn storage_metrics(data_dir: impl AsRef<Path>, messages: u32, payload_bytes: u32) -> StorageMetrics {
+fn storage_metrics(
+    data_dir: impl AsRef<Path>,
+    messages: u32,
+    payload_bytes: u32,
+) -> StorageMetrics {
     let mut total = 0_u64;
     let mut log_bytes = 0_u64;
     let mut index_bytes = 0_u64;
@@ -179,7 +256,9 @@ fn storage_metrics(data_dir: impl AsRef<Path>, messages: u32, payload_bytes: u32
                 Some("index") => index_bytes += size,
                 Some("timeindex") => timeindex_bytes += size,
                 Some("journal") => state_journal_bytes += size,
-                Some("snapshot") | Some("json") if path.to_string_lossy().contains("state/") => state_snapshot_bytes += size,
+                Some("snapshot") | Some("json") if path.to_string_lossy().contains("state/") => {
+                    state_snapshot_bytes += size
+                }
                 _ => {}
             }
         }
@@ -223,18 +302,34 @@ fn percentile(values: &[f64], pct: f64) -> f64 {
 }
 
 fn producer(bootstrap: &str) -> Result<FutureProducer> {
-    Ok(ClientConfig::new().set("bootstrap.servers", bootstrap).set("message.timeout.ms", "5000").set("enable.idempotence", "true").create()?)
+    Ok(ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("message.timeout.ms", "5000")
+        .set("enable.idempotence", "true")
+        .create()?)
 }
 
 fn consumer(bootstrap: &str, group_id: &str) -> Result<BaseConsumer> {
-    Ok(ClientConfig::new().set("bootstrap.servers", bootstrap).set("group.id", group_id).set("auto.offset.reset", "earliest").create()?)
+    Ok(ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group_id)
+        .set("auto.offset.reset", "earliest")
+        .create()?)
 }
 
 fn group_consumer(bootstrap: &str, group_id: &str) -> Result<BaseConsumer> {
-    Ok(ClientConfig::new().set("bootstrap.servers", bootstrap).set("group.id", group_id).set("auto.offset.reset", "earliest").set("enable.auto.commit", "false").create()?)
+    Ok(ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group_id)
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .create()?)
 }
 
-fn poll_for_message(consumer: &BaseConsumer, timeout: Duration) -> Result<rdkafka::message::BorrowedMessage<'_>> {
+fn poll_for_message(
+    consumer: &BaseConsumer,
+    timeout: Duration,
+) -> Result<rdkafka::message::BorrowedMessage<'_>> {
     let started = Instant::now();
     while started.elapsed() < timeout {
         if let Some(result) = consumer.poll(Duration::from_millis(250)) {

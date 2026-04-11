@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::{
-    BrokerRecord, FetchResult, GroupJoinResult, ListOffsetResult, ProducerSession, Result, Storage,
-    SyncGroupResult, TopicMetadata,
+    BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
+    ProducerSession, Result, Storage, SyncGroupResult, TopicMetadata,
 };
 use control_plane::ControlPlaneState;
 use data_plane::{AppendDecision, DataPlaneState};
@@ -220,28 +220,9 @@ impl Storage for FileStore {
         ))
     }
 
-    fn join_group(
-        &self,
-        group_id: &str,
-        member_id: Option<&str>,
-        protocol_type: &str,
-        protocol_name: &str,
-        metadata: &[u8],
-        session_timeout_ms: i32,
-        rebalance_timeout_ms: i32,
-        now_ms: i64,
-    ) -> Result<GroupJoinResult> {
+    fn join_group(&self, request: GroupJoinRequest<'_>) -> Result<GroupJoinResult> {
         let mut control = self.control.lock().expect("file store mutex poisoned");
-        control.join_group(
-            group_id,
-            member_id,
-            protocol_type,
-            protocol_name,
-            metadata,
-            session_timeout_ms,
-            rebalance_timeout_ms,
-            now_ms,
-        )
+        control.join_group(request)
     }
 
     fn sync_group(

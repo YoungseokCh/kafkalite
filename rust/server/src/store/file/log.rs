@@ -56,7 +56,7 @@ impl RecordLog {
             .append_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if append_number % DEFAULT_POLICY.log_sync_interval == 0 {
+        if append_number.is_multiple_of(DEFAULT_POLICY.log_sync_interval) {
             segment.sync_data()?;
         }
 
@@ -149,11 +149,8 @@ impl RecordLog {
         }
         let mut reader = File::open(self.index_path(topic))?;
         let mut entries = Vec::new();
-        loop {
-            match read_index_entry(&mut reader)? {
-                Some(entry) => entries.push(entry),
-                None => break,
-            }
+        while let Some(entry) = read_index_entry(&mut reader)? {
+            entries.push(entry);
         }
         Ok(entries)
     }

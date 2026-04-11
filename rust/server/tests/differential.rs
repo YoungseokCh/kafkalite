@@ -3,11 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use kafkalite_server::{
-    Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
-    protocol,
-};
 use kafka_protocol::messages::consumer_protocol_assignment::TopicPartition as AssignmentTopicPartition;
 use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
 use kafka_protocol::messages::offset_commit_request::{
@@ -16,12 +11,17 @@ use kafka_protocol::messages::offset_commit_request::{
 use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
-    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId,
-    HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
-    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
-    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName,
+    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId, HeartbeatRequest,
+    HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, OffsetCommitRequest,
+    OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader,
+    SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
+use kafkalite_server::{
+    Config, FileStore, KafkaBroker,
+    config::{BrokerConfig, StorageConfig},
+    protocol,
+};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -81,12 +81,16 @@ struct StaleSyncSnapshot {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
-        eprintln!("skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server");
+        eprintln!(
+            "skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server"
+        );
         return;
     };
 
     let (local_bootstrap, handle, _tempdir) = start_local_broker().await;
-    let real_bootstrap = real_bootstrap.into_string().expect("bootstrap must be utf-8");
+    let real_bootstrap = real_bootstrap
+        .into_string()
+        .expect("bootstrap must be utf-8");
     if !bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
         handle.abort();
@@ -107,28 +111,61 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_roundtrip = produce_consume_snapshot(&local_bootstrap, &roundtrip_topic).await;
     assert_eq!(local_roundtrip, real_roundtrip);
 
-    let real_resume = commit_resume_snapshot(&real_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
-    let local_resume = commit_resume_snapshot(&local_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
+    let real_resume =
+        commit_resume_snapshot(&real_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
+    let local_resume =
+        commit_resume_snapshot(&local_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
     assert_eq!(local_resume, real_resume);
 
     let invalid_partition_topic = format!("diff.invalid-partition.{suffix}");
     let real_invalid = invalid_partition_snapshot(&real_bootstrap, &invalid_partition_topic).await;
-    let local_invalid = invalid_partition_snapshot(&local_bootstrap, &invalid_partition_topic).await;
+    let local_invalid =
+        invalid_partition_snapshot(&local_bootstrap, &invalid_partition_topic).await;
     assert_eq!(local_invalid, real_invalid);
 
     let stale_commit_topic = format!("diff.stale-commit.{suffix}");
-    let real_stale_commit = stale_commit_after_handoff_snapshot(&real_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
-    let local_stale_commit = stale_commit_after_handoff_snapshot(&local_bootstrap, &stale_commit_topic, &format!("group.stale.{suffix}")).await;
+    let real_stale_commit = stale_commit_after_handoff_snapshot(
+        &real_bootstrap,
+        &stale_commit_topic,
+        &format!("group.stale.{suffix}"),
+    )
+    .await;
+    let local_stale_commit = stale_commit_after_handoff_snapshot(
+        &local_bootstrap,
+        &stale_commit_topic,
+        &format!("group.stale.{suffix}"),
+    )
+    .await;
     assert_eq!(local_stale_commit, real_stale_commit);
 
     let heartbeat_topic = format!("diff.stale-heartbeat.{suffix}");
-    let real_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(&real_bootstrap, &heartbeat_topic, &format!("group.heartbeat.{suffix}")).await;
-    let local_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(&local_bootstrap, &heartbeat_topic, &format!("group.heartbeat.{suffix}")).await;
+    let real_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(
+        &real_bootstrap,
+        &heartbeat_topic,
+        &format!("group.heartbeat.{suffix}"),
+    )
+    .await;
+    let local_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(
+        &local_bootstrap,
+        &heartbeat_topic,
+        &format!("group.heartbeat.{suffix}"),
+    )
+    .await;
     assert_eq!(local_stale_heartbeat, real_stale_heartbeat);
 
     let stale_sync_topic = format!("diff.stale-sync.{suffix}");
-    let real_stale_sync = stale_sync_after_handoff_snapshot(&real_bootstrap, &stale_sync_topic, &format!("group.sync.{suffix}")).await;
-    let local_stale_sync = stale_sync_after_handoff_snapshot(&local_bootstrap, &stale_sync_topic, &format!("group.sync.{suffix}")).await;
+    let real_stale_sync = stale_sync_after_handoff_snapshot(
+        &real_bootstrap,
+        &stale_sync_topic,
+        &format!("group.sync.{suffix}"),
+    )
+    .await;
+    let local_stale_sync = stale_sync_after_handoff_snapshot(
+        &local_bootstrap,
+        &stale_sync_topic,
+        &format!("group.sync.{suffix}"),
+    )
+    .await;
     assert_eq!(local_stale_sync, real_stale_sync);
 
     handle.abort();
@@ -139,9 +176,7 @@ async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPart
     let producer = producer(bootstrap);
     producer
         .send(
-            FutureRecord::to(topic)
-                .payload("seed")
-                .key("seed-key"),
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
             Duration::from_secs(10),
         )
         .await
@@ -163,7 +198,11 @@ async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPart
     }
 }
 
-async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group_id: &str) -> StaleCommitSnapshot {
+async fn stale_commit_after_handoff_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+) -> StaleCommitSnapshot {
     let producer = producer(bootstrap);
     producer
         .send(
@@ -175,16 +214,37 @@ async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group
 
     let join_v1 = join_group_with_timeout(bootstrap, group_id, None, topic, b"v1", 100);
     let assignment = encode_assignment(topic);
-    let _sync_v1 = sync_group(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, &join_v1.member_id, &[(&join_v1.member_id, assignment.clone())]);
-    let initial_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 1);
+    let _sync_v1 = sync_group(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        &join_v1.member_id,
+        &[(&join_v1.member_id, assignment.clone())],
+    );
+    let initial_commit = offset_commit(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        topic,
+        1,
+    );
     assert_eq!(initial_commit.topics[0].partitions[0].error_code, 0);
 
     let bootstrap_b = bootstrap.to_string();
     let group_b = group_id.to_string();
     let topic_b = topic.to_string();
-    let join_b_handle = std::thread::spawn(move || join_group(&bootstrap_b, &group_b, None, &topic_b, b"v2"));
+    let join_b_handle =
+        std::thread::spawn(move || join_group(&bootstrap_b, &group_b, None, &topic_b, b"v2"));
     std::thread::sleep(Duration::from_millis(50));
-    let join_a_v2 = join_group(bootstrap, group_id, Some(join_v1.member_id.as_ref()), topic, b"v1");
+    let join_a_v2 = join_group(
+        bootstrap,
+        group_id,
+        Some(join_v1.member_id.as_ref()),
+        topic,
+        b"v1",
+    );
     let join_b_v2 = join_b_handle.join().unwrap();
 
     let generation = join_a_v2.generation_id;
@@ -197,11 +257,32 @@ async fn stale_commit_after_handoff_snapshot(bootstrap: &str, topic: &str, group
         (join_a_v2.member_id.as_ref(), encode_empty_assignment()),
         (join_b_v2.member_id.as_ref(), encode_assignment(topic)),
     ];
-    let _leader_sync = sync_group(bootstrap, group_id, generation, &leader, &leader, &leader_assignments);
+    let _leader_sync = sync_group(
+        bootstrap,
+        group_id,
+        generation,
+        &leader,
+        &leader,
+        &leader_assignments,
+    );
 
-    let stale_commit = offset_commit(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id, topic, 9);
+    let stale_commit = offset_commit(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+        topic,
+        9,
+    );
     let offset_after_stale = offset_fetch(bootstrap, group_id, topic);
-    let valid_commit = offset_commit(bootstrap, group_id, generation, &join_b_v2.member_id, topic, 2);
+    let valid_commit = offset_commit(
+        bootstrap,
+        group_id,
+        generation,
+        &join_b_v2.member_id,
+        topic,
+        2,
+    );
     let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
 
     StaleCommitSnapshot {
@@ -248,8 +329,20 @@ async fn stale_heartbeat_after_timeout_snapshot(
         &[(&join_v2.member_id, assignment)],
     );
 
-    let stale_heartbeat = heartbeat(bootstrap, group_id, join_v1.generation_id, &join_v1.member_id);
-    let valid_commit = offset_commit(bootstrap, group_id, join_v2.generation_id, &join_v2.member_id, topic, 2);
+    let stale_heartbeat = heartbeat(
+        bootstrap,
+        group_id,
+        join_v1.generation_id,
+        &join_v1.member_id,
+    );
+    let valid_commit = offset_commit(
+        bootstrap,
+        group_id,
+        join_v2.generation_id,
+        &join_v2.member_id,
+        topic,
+        2,
+    );
     let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
 
     StaleHeartbeatSnapshot {
@@ -290,7 +383,14 @@ async fn stale_sync_after_handoff_snapshot(
     let generation = join_v2.generation_id;
     let leader = join_v2.leader.clone();
     let assignments = vec![(join_v2.member_id.as_ref(), encode_assignment(topic))];
-    let _leader_sync = sync_group(bootstrap, group_id, generation, &leader, &leader, &assignments);
+    let _leader_sync = sync_group(
+        bootstrap,
+        group_id,
+        generation,
+        &leader,
+        &leader,
+        &assignments,
+    );
 
     let stale_sync = sync_group(
         bootstrap,
@@ -308,12 +408,18 @@ async fn stale_sync_after_handoff_snapshot(
 
 async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataSnapshot {
     let consumer = consumer(bootstrap, &format!("meta-{topic}"));
-    let metadata = consumer.fetch_metadata(Some(topic), Duration::from_secs(10)).unwrap();
+    let metadata = consumer
+        .fetch_metadata(Some(topic), Duration::from_secs(10))
+        .unwrap();
     let topic = find_topic(&metadata, topic);
     MetadataSnapshot {
         topic: topic.name().to_string(),
         partition_count: topic.partitions().len(),
-        partition_ids: topic.partitions().iter().map(|partition| partition.id()).collect(),
+        partition_ids: topic
+            .partitions()
+            .iter()
+            .map(|partition| partition.id())
+            .collect(),
     }
 }
 
@@ -331,7 +437,8 @@ async fn produce_consume_snapshot(bootstrap: &str, topic: &str) -> ProduceConsum
 
     let consumer = consumer(bootstrap, &format!("direct-{topic}"));
     let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(topic, 0, Offset::Beginning).unwrap();
+    tpl.add_partition_offset(topic, 0, Offset::Beginning)
+        .unwrap();
     consumer.assign(&tpl).unwrap();
     let message = poll_for_message(&consumer, Duration::from_secs(10));
 
@@ -360,7 +467,9 @@ async fn commit_resume_snapshot(bootstrap: &str, topic: &str, group_id: &str) ->
     let consumer = group_consumer(bootstrap, group_id);
     consumer.subscribe(&[topic]).unwrap();
     let first = poll_for_message(&consumer, Duration::from_secs(10));
-    consumer.commit_message(&first, rdkafka::consumer::CommitMode::Sync).unwrap();
+    consumer
+        .commit_message(&first, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
     let first_bytes = first.payload().unwrap().to_vec();
     drop(first);
     drop(consumer);
@@ -376,7 +485,11 @@ async fn commit_resume_snapshot(bootstrap: &str, topic: &str, group_id: &str) ->
     }
 }
 
-async fn start_local_broker() -> (String, tokio::task::JoinHandle<anyhow::Result<()>>, tempfile::TempDir) {
+async fn start_local_broker() -> (
+    String,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
     let tempdir = tempdir().unwrap();
     let port = free_port();
     let config = Config {
@@ -424,7 +537,10 @@ fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
         .unwrap()
 }
 
-fn poll_for_message(consumer: &BaseConsumer, timeout: Duration) -> rdkafka::message::BorrowedMessage<'_> {
+fn poll_for_message(
+    consumer: &BaseConsumer,
+    timeout: Duration,
+) -> rdkafka::message::BorrowedMessage<'_> {
     let started = std::time::Instant::now();
     while started.elapsed() < timeout {
         if let Some(result) = consumer.poll(Duration::from_millis(250)) {
@@ -452,7 +568,9 @@ fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::
 
 fn bootstrap_available(bootstrap: &str) -> bool {
     let consumer = consumer(bootstrap, "bootstrap-probe");
-    consumer.fetch_metadata(None, Duration::from_secs(2)).is_ok()
+    consumer
+        .fetch_metadata(None, Duration::from_secs(2))
+        .is_ok()
 }
 
 fn join_group(
@@ -526,20 +644,18 @@ fn sync_group(
             .with_member_id(StrBytes::from(member_id.to_string()))
             .with_protocol_type(Some(StrBytes::from("consumer".to_string())))
             .with_protocol_name(Some(StrBytes::from("range".to_string())))
-            .with_assignments(
-                if member_id == leader_member_id {
-                    assignments
-                        .iter()
-                        .map(|(member, assignment)| {
-                            SyncGroupRequestAssignment::default()
-                                .with_member_id(StrBytes::from((*member).to_string()))
-                                .with_assignment(Bytes::from(assignment.clone()))
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                },
-            ),
+            .with_assignments(if member_id == leader_member_id {
+                assignments
+                    .iter()
+                    .map(|(member, assignment)| {
+                        SyncGroupRequestAssignment::default()
+                            .with_member_id(StrBytes::from((*member).to_string()))
+                            .with_assignment(Bytes::from(assignment.clone()))
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }),
     )
 }
 
@@ -596,8 +712,12 @@ fn send_request<TReq: Encodable, TResp: Decodable>(
     use std::io::{Read, Write};
 
     let mut stream = std::net::TcpStream::connect(bootstrap).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
 
     let mut payload = BytesMut::new();
     RequestHeader::default()
@@ -609,7 +729,9 @@ fn send_request<TReq: Encodable, TResp: Decodable>(
         .unwrap();
     request.encode(&mut payload, api_version).unwrap();
 
-    stream.write_all(&(payload.len() as i32).to_be_bytes()).unwrap();
+    stream
+        .write_all(&(payload.len() as i32).to_be_bytes())
+        .unwrap();
     stream.write_all(payload.as_ref()).unwrap();
 
     let mut size = [0_u8; 4];
@@ -618,7 +740,8 @@ fn send_request<TReq: Encodable, TResp: Decodable>(
     let mut body = vec![0_u8; size];
     stream.read_exact(&mut body).unwrap();
     let mut bytes = Bytes::from(body);
-    let _ = ResponseHeader::decode(&mut bytes, api_key.response_header_version(api_version)).unwrap();
+    let _ =
+        ResponseHeader::decode(&mut bytes, api_key.response_header_version(api_version)).unwrap();
     TResp::decode(&mut bytes, api_version).unwrap()
 }
 

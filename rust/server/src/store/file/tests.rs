@@ -5,7 +5,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use super::*;
-use crate::store::StoreError;
+use crate::store::{GroupJoinRequest, StoreError};
 
 #[test]
 fn appends_and_fetches_records() {
@@ -58,29 +58,31 @@ fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
 fn assignment_respects_member_subscriptions() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    let subscription_a = encode_subscription(&["topic-a"]);
+    let subscription_b = encode_subscription(&["topic-b", "topic-c"]);
     let _ = store
-        .join_group(
-            "group-a",
-            Some("member-a"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            5_000,
-            5_000,
-            100,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-a",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription_a,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
         .unwrap();
     let member_b = store
-        .join_group(
-            "group-a",
-            Some("member-b"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-b", "topic-c"]),
-            5_000,
-            5_000,
-            200,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-a",
+            member_id: Some("member-b"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription_b,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 200,
+        })
         .unwrap();
     let sync_a = store
         .sync_group(
@@ -116,17 +118,18 @@ fn assignment_respects_member_subscriptions() {
 fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_member() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
     let joined = store
-        .join_group(
-            "group-b",
-            Some("member-a"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            5_000,
-            5_000,
-            100,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-b",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
         .unwrap();
     store
         .commit_offset(
@@ -168,32 +171,122 @@ fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_me
 }
 
 #[test]
+fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-soft",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    store
+        .commit_offset(
+            "group-soft",
+            "member-a",
+            joined.generation_id,
+            "topic-a",
+            1,
+            200,
+        )
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened.fetch_offset("group-soft", "topic-a").unwrap(),
+        Some(1)
+    );
+
+    let stale_runtime_member = reopened.commit_offset(
+        "group-soft",
+        "member-a",
+        joined.generation_id,
+        "topic-a",
+        2,
+        300,
+    );
+    assert!(matches!(
+        stale_runtime_member,
+        Err(StoreError::UnknownMember { .. })
+    ));
+}
+
+#[test]
+fn heartbeat_does_not_grow_state_journal_but_offset_commit_does() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-journal",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let journal_path = dir.path().join("state/state.journal");
+
+    let after_join = std::fs::metadata(&journal_path).unwrap().len();
+    store
+        .heartbeat("group-journal", "member-a", joined.generation_id, 200)
+        .unwrap();
+    let after_heartbeat = std::fs::metadata(&journal_path).unwrap().len();
+    assert_eq!(after_join, 0);
+    assert_eq!(after_heartbeat, after_join);
+
+    store
+        .commit_offset(
+            "group-journal",
+            "member-a",
+            joined.generation_id,
+            "topic-a",
+            1,
+            300,
+        )
+        .unwrap();
+    let after_commit = std::fs::metadata(&journal_path).unwrap().len();
+    assert!(after_commit > after_heartbeat);
+}
+
+#[test]
 fn no_op_rejoin_keeps_generation() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
     let first = store
-        .join_group(
-            "group-c",
-            Some("member-a"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            5_000,
-            5_000,
-            100,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-c",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
         .unwrap();
     let second = store
-        .join_group(
-            "group-c",
-            Some("member-a"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            5_000,
-            5_000,
-            200,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-c",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 200,
+        })
         .unwrap();
     assert_eq!(first.generation_id, second.generation_id);
 }
@@ -202,29 +295,30 @@ fn no_op_rejoin_keeps_generation() {
 fn expired_member_is_pruned_on_next_join() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
     let _ = store
-        .join_group(
-            "group-d",
-            Some("member-a"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            10,
-            10,
-            100,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-d",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 10,
+            rebalance_timeout_ms: 10,
+            now_ms: 100,
+        })
         .unwrap();
     let second = store
-        .join_group(
-            "group-d",
-            Some("member-b"),
-            "consumer",
-            "range",
-            &encode_subscription(&["topic-a"]),
-            10,
-            10,
-            200,
-        )
+        .join_group(GroupJoinRequest {
+            group_id: "group-d",
+            member_id: Some("member-b"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 10,
+            rebalance_timeout_ms: 10,
+            now_ms: 200,
+        })
         .unwrap();
     let sync = store
         .sync_group(
@@ -237,9 +331,11 @@ fn expired_member_is_pruned_on_next_join() {
         )
         .unwrap();
     assert_eq!(decode_assignment_topics(&sync.assignment), vec!["topic-a"]);
-    assert!(store
-        .heartbeat("group-d", "member-a", second.generation_id, 220)
-        .is_err());
+    assert!(
+        store
+            .heartbeat("group-d", "member-a", second.generation_id, 220)
+            .is_err()
+    );
 }
 
 #[test]

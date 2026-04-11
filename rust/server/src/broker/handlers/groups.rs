@@ -17,7 +17,7 @@ use kafka_protocol::messages::{
 use kafka_protocol::protocol::StrBytes;
 
 use super::super::KafkaBroker;
-use crate::store::StoreError;
+use crate::store::{GroupJoinRequest, StoreError};
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 
@@ -59,22 +59,30 @@ pub fn handle_find_coordinator(
         .with_port(port)
 }
 
-pub async fn handle_join_group(broker: &KafkaBroker, request: JoinGroupRequest) -> Result<JoinGroupResponse> {
+pub async fn handle_join_group(
+    broker: &KafkaBroker,
+    request: JoinGroupRequest,
+) -> Result<JoinGroupResponse> {
     let selected = request
         .protocols
         .first()
-        .map(|protocol| (protocol.name.to_string(), protocol.metadata.clone().to_vec()))
+        .map(|protocol| {
+            (
+                protocol.name.to_string(),
+                protocol.metadata.clone().to_vec(),
+            )
+        })
         .unwrap_or_else(|| ("range".to_string(), Vec::new()));
-    let result = broker.store().join_group(
-        request.group_id.as_ref(),
-        Some(request.member_id.as_ref()),
-        request.protocol_type.as_ref(),
-        &selected.0,
-        &selected.1,
-        request.session_timeout_ms,
-        request.rebalance_timeout_ms,
-        chrono::Utc::now().timestamp_millis(),
-    )?;
+    let result = broker.store().join_group(GroupJoinRequest {
+        group_id: request.group_id.as_ref(),
+        member_id: Some(request.member_id.as_ref()),
+        protocol_type: request.protocol_type.as_ref(),
+        protocol_name: &selected.0,
+        metadata: &selected.1,
+        session_timeout_ms: request.session_timeout_ms,
+        rebalance_timeout_ms: request.rebalance_timeout_ms,
+        now_ms: chrono::Utc::now().timestamp_millis(),
+    })?;
     let members = result
         .members
         .into_iter()
@@ -95,13 +103,25 @@ pub async fn handle_join_group(broker: &KafkaBroker, request: JoinGroupRequest) 
         .with_members(members))
 }
 
-pub async fn handle_sync_group(broker: &KafkaBroker, request: SyncGroupRequest) -> Result<SyncGroupResponse> {
+pub async fn handle_sync_group(
+    broker: &KafkaBroker,
+    request: SyncGroupRequest,
+) -> Result<SyncGroupResponse> {
     let assignments = request
         .assignments
         .into_iter()
-        .map(|assignment| (assignment.member_id.to_string(), assignment.assignment.to_vec()))
+        .map(|assignment| {
+            (
+                assignment.member_id.to_string(),
+                assignment.assignment.to_vec(),
+            )
+        })
         .collect::<Vec<_>>();
-    let protocol_name = request.protocol_name.as_ref().map(|value| value.as_ref()).unwrap_or("range");
+    let protocol_name = request
+        .protocol_name
+        .as_ref()
+        .map(|value| value.as_ref())
+        .unwrap_or("range");
     let response = match broker.store().sync_group(
         request.group_id.as_ref(),
         request.member_id.as_ref(),
@@ -130,7 +150,10 @@ pub async fn handle_sync_group(broker: &KafkaBroker, request: SyncGroupRequest) 
     Ok(response)
 }
 
-pub async fn handle_heartbeat(broker: &KafkaBroker, request: HeartbeatRequest) -> HeartbeatResponse {
+pub async fn handle_heartbeat(
+    broker: &KafkaBroker,
+    request: HeartbeatRequest,
+) -> HeartbeatResponse {
     let error_code = match broker.store().heartbeat(
         request.group_id.as_ref(),
         request.member_id.as_ref(),
@@ -147,13 +170,126 @@ pub async fn handle_heartbeat(broker: &KafkaBroker, request: HeartbeatRequest) -
         .with_error_code(error_code)
 }
 
+pub async fn handle_leave_group(
+    broker: &KafkaBroker,
+    request: LeaveGroupRequest,
+) -> LeaveGroupResponse {
+    let members = if request.members.is_empty() {
+        vec![request.member_id.to_string()]
+    } else {
+        request
+            .members
+            .into_iter()
+            .map(|member| member.member_id.to_string())
+            .collect()
+    };
+    for member in members {
+        let _ = broker.store().leave_group(
+            request.group_id.as_ref(),
+            &member,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+    LeaveGroupResponse::default()
+        .with_throttle_time_ms(0)
+        .with_error_code(0)
+}
+
+pub async fn handle_offset_commit(
+    broker: &KafkaBroker,
+    request: OffsetCommitRequest,
+) -> Result<OffsetCommitResponse> {
+    let mut topics = Vec::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    for topic in request.topics {
+        let mut partitions = Vec::new();
+        for partition in topic.partitions {
+            let error_code = if partition.partition_index != 0 {
+                UNKNOWN_TOPIC_OR_PARTITION
+            } else {
+                match broker.store().commit_offset(
+                    request.group_id.as_ref(),
+                    request.member_id.as_ref(),
+                    request.generation_id_or_member_epoch,
+                    topic.name.as_ref(),
+                    partition.committed_offset,
+                    now,
+                ) {
+                    Ok(()) => 0,
+                    Err(StoreError::UnknownMember { .. }) => 25,
+                    Err(StoreError::StaleGeneration { .. }) => 22,
+                    Err(err) => return Err(err.into()),
+                }
+            };
+            partitions.push(
+                OffsetCommitResponsePartition::default()
+                    .with_partition_index(partition.partition_index)
+                    .with_error_code(error_code),
+            );
+        }
+        topics.push(
+            OffsetCommitResponseTopic::default()
+                .with_name(TopicName(StrBytes::from(topic.name.to_string())))
+                .with_partitions(partitions),
+        );
+    }
+    Ok(OffsetCommitResponse::default()
+        .with_throttle_time_ms(0)
+        .with_topics(topics))
+}
+
+pub async fn handle_offset_fetch(
+    broker: &KafkaBroker,
+    request: OffsetFetchRequest,
+) -> Result<OffsetFetchResponse> {
+    let mut topics = Vec::new();
+    if let Some(request_topics) = request.topics {
+        for topic in request_topics {
+            let mut partitions = Vec::new();
+            for partition in topic.partition_indexes {
+                let (offset, error_code) = if partition == 0 {
+                    (
+                        broker
+                            .store()
+                            .fetch_offset(request.group_id.as_ref(), topic.name.as_ref())?
+                            .unwrap_or(-1),
+                        0,
+                    )
+                } else {
+                    (-1, UNKNOWN_TOPIC_OR_PARTITION)
+                };
+                partitions.push(
+                    OffsetFetchResponsePartition::default()
+                        .with_partition_index(partition)
+                        .with_committed_offset(offset)
+                        .with_metadata(None)
+                        .with_error_code(error_code),
+                );
+            }
+            topics.push(
+                OffsetFetchResponseTopic::default()
+                    .with_name(TopicName(StrBytes::from(topic.name.to_string())))
+                    .with_partitions(partitions),
+            );
+        }
+    }
+    Ok(OffsetFetchResponse::default()
+        .with_throttle_time_ms(0)
+        .with_topics(topics)
+        .with_error_code(0))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
-    use kafka_protocol::messages::offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
-    use kafka_protocol::messages::{GroupId, JoinGroupRequest, OffsetCommitRequest, SyncGroupRequest};
+    use kafka_protocol::messages::offset_commit_request::{
+        OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+    };
+    use kafka_protocol::messages::{
+        GroupId, JoinGroupRequest, OffsetCommitRequest, SyncGroupRequest,
+    };
     use tempfile::tempdir;
 
     use crate::config::{BrokerConfig, Config, StorageConfig};
@@ -261,109 +397,11 @@ mod tests {
         let dir = tempdir().unwrap().keep();
         let config = Config {
             broker: BrokerConfig::default(),
-            storage: StorageConfig { data_dir: dir.join("data") },
+            storage: StorageConfig {
+                data_dir: dir.join("data"),
+            },
         };
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
         KafkaBroker::new(config, store)
     }
-}
-
-pub async fn handle_leave_group(broker: &KafkaBroker, request: LeaveGroupRequest) -> LeaveGroupResponse {
-    let members = if request.members.is_empty() {
-        vec![request.member_id.to_string()]
-    } else {
-        request.members.into_iter().map(|member| member.member_id.to_string()).collect()
-    };
-    for member in members {
-        let _ = broker
-            .store()
-            .leave_group(request.group_id.as_ref(), &member, chrono::Utc::now().timestamp_millis());
-    }
-    LeaveGroupResponse::default()
-        .with_throttle_time_ms(0)
-        .with_error_code(0)
-}
-
-pub async fn handle_offset_commit(
-    broker: &KafkaBroker,
-    request: OffsetCommitRequest,
-) -> Result<OffsetCommitResponse> {
-    let mut topics = Vec::new();
-    let now = chrono::Utc::now().timestamp_millis();
-    for topic in request.topics {
-        let mut partitions = Vec::new();
-        for partition in topic.partitions {
-            let error_code = if partition.partition_index != 0 {
-                UNKNOWN_TOPIC_OR_PARTITION
-            } else {
-                match broker.store().commit_offset(
-                    request.group_id.as_ref(),
-                    request.member_id.as_ref(),
-                    request.generation_id_or_member_epoch,
-                    topic.name.as_ref(),
-                    partition.committed_offset,
-                    now,
-                ) {
-                    Ok(()) => 0,
-                    Err(StoreError::UnknownMember { .. }) => 25,
-                    Err(StoreError::StaleGeneration { .. }) => 22,
-                    Err(err) => return Err(err.into()),
-                }
-            };
-            partitions.push(
-                OffsetCommitResponsePartition::default()
-                    .with_partition_index(partition.partition_index)
-                    .with_error_code(error_code),
-            );
-        }
-        topics.push(
-            OffsetCommitResponseTopic::default()
-                .with_name(TopicName(StrBytes::from(topic.name.to_string())))
-                .with_partitions(partitions),
-        );
-    }
-    Ok(OffsetCommitResponse::default()
-        .with_throttle_time_ms(0)
-        .with_topics(topics))
-}
-
-pub async fn handle_offset_fetch(
-    broker: &KafkaBroker,
-    request: OffsetFetchRequest,
-) -> Result<OffsetFetchResponse> {
-    let mut topics = Vec::new();
-    if let Some(request_topics) = request.topics {
-        for topic in request_topics {
-            let mut partitions = Vec::new();
-            for partition in topic.partition_indexes {
-                let (offset, error_code) = if partition == 0 {
-                    (
-                        broker
-                            .store()
-                            .fetch_offset(request.group_id.as_ref(), topic.name.as_ref())?
-                            .unwrap_or(-1),
-                        0,
-                    )
-                } else {
-                    (-1, UNKNOWN_TOPIC_OR_PARTITION)
-                };
-                partitions.push(
-                    OffsetFetchResponsePartition::default()
-                        .with_partition_index(partition)
-                        .with_committed_offset(offset)
-                        .with_metadata(None)
-                        .with_error_code(error_code),
-                );
-            }
-            topics.push(
-                OffsetFetchResponseTopic::default()
-                    .with_name(TopicName(StrBytes::from(topic.name.to_string())))
-                    .with_partitions(partitions),
-            );
-        }
-    }
-    Ok(OffsetFetchResponse::default()
-        .with_throttle_time_ms(0)
-        .with_topics(topics)
-        .with_error_code(0))
 }

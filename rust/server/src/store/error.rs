@@ -20,7 +20,9 @@ pub enum StoreError {
         expected: i32,
         actual: i32,
     },
-    #[error("stale producer epoch for producer {producer_id}: expected at least {expected}, got {actual}")]
+    #[error(
+        "stale producer epoch for producer {producer_id}: expected at least {expected}, got {actual}"
+    )]
     StaleProducerEpoch {
         producer_id: i64,
         expected: i16,

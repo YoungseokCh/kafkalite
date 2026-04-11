@@ -7,8 +7,8 @@ use tracing::debug;
 
 use crate::protocol;
 
-use super::handlers::{bootstrap, groups, produce_fetch};
 use super::KafkaBroker;
+use super::handlers::{bootstrap, groups, produce_fetch};
 
 pub async fn serve_connection(
     mut stream: TcpStream,
@@ -122,11 +122,8 @@ pub async fn serve_connection(
                 let request = protocol::decode_body::<
                     kafka_protocol::messages::FindCoordinatorRequest,
                 >(&frame, api_key, header.request_api_version)?;
-                let response = groups::handle_find_coordinator(
-                    &broker,
-                    request,
-                    header.request_api_version,
-                );
+                let response =
+                    groups::handle_find_coordinator(&broker, request, header.request_api_version);
                 protocol::write_response(
                     &mut stream,
                     api_key,
@@ -201,9 +198,11 @@ pub async fn serve_connection(
                 .await?;
             }
             ApiKey::OffsetCommit => {
-                let request = protocol::decode_body::<
-                    kafka_protocol::messages::OffsetCommitRequest,
-                >(&frame, api_key, header.request_api_version)?;
+                let request = protocol::decode_body::<kafka_protocol::messages::OffsetCommitRequest>(
+                    &frame,
+                    api_key,
+                    header.request_api_version,
+                )?;
                 let response = groups::handle_offset_commit(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,

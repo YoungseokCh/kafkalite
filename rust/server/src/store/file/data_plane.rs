@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::store::{
-    BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata, DEFAULT_PARTITION,
+    BrokerRecord, DEFAULT_PARTITION, ProducerSession, Result, StoreError, TopicMetadata,
 };
 
+use super::TopicSummary;
 use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
 use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
-use super::TopicSummary;
 
 pub struct DataPlaneState {
     catalog: TopicCatalog,

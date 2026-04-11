@@ -23,7 +23,10 @@ pub async fn read_frame(stream: &mut TcpStream) -> Result<BytesMut> {
     let size = stream.read_i32().await.context("read frame size")?;
     let size = usize::try_from(size).context("negative frame size")?;
     let mut payload = vec![0_u8; size];
-    stream.read_exact(&mut payload).await.context("read frame body")?;
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("read frame body")?;
     Ok(BytesMut::from(payload.as_slice()))
 }
 

@@ -17,11 +17,19 @@ pub fn handle_api_versions() -> ApiVersionsResponse {
     let apis = vec![
         api(ApiKey::ApiVersions, 0, protocol::API_VERSIONS_VERSION),
         api(ApiKey::Metadata, 1, protocol::METADATA_VERSION),
-        api(ApiKey::InitProducerId, 0, protocol::INIT_PRODUCER_ID_VERSION),
+        api(
+            ApiKey::InitProducerId,
+            0,
+            protocol::INIT_PRODUCER_ID_VERSION,
+        ),
         api(ApiKey::Produce, 3, protocol::PRODUCE_VERSION),
         api(ApiKey::Fetch, 4, protocol::FETCH_VERSION),
         api(ApiKey::ListOffsets, 1, protocol::LIST_OFFSETS_VERSION),
-        api(ApiKey::FindCoordinator, 0, protocol::FIND_COORDINATOR_VERSION),
+        api(
+            ApiKey::FindCoordinator,
+            0,
+            protocol::FIND_COORDINATOR_VERSION,
+        ),
         api(ApiKey::JoinGroup, 0, protocol::JOIN_GROUP_VERSION),
         api(ApiKey::SyncGroup, 0, protocol::SYNC_GROUP_VERSION),
         api(ApiKey::Heartbeat, 0, protocol::HEARTBEAT_VERSION),
@@ -36,7 +44,10 @@ pub fn handle_api_versions() -> ApiVersionsResponse {
         .with_throttle_time_ms(0)
 }
 
-pub async fn handle_metadata(broker: &KafkaBroker, request: MetadataRequest) -> Result<MetadataResponse> {
+pub async fn handle_metadata(
+    broker: &KafkaBroker,
+    request: MetadataRequest,
+) -> Result<MetadataResponse> {
     let names = request.topics.map(|topics| {
         topics
             .into_iter()
@@ -44,16 +55,14 @@ pub async fn handle_metadata(broker: &KafkaBroker, request: MetadataRequest) -> 
             .collect::<Vec<_>>()
     });
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if request.allow_auto_topic_creation {
-        if let Some(requested) = names.as_ref() {
-            for topic in requested {
-                broker.store().ensure_topic(topic, now_ms)?;
-            }
+    if request.allow_auto_topic_creation
+        && let Some(requested) = names.as_ref()
+    {
+        for topic in requested {
+            broker.store().ensure_topic(topic, now_ms)?;
         }
     }
-    let metadata = broker
-        .store()
-        .topic_metadata(names.as_deref(), now_ms)?;
+    let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
     let known_topics = metadata
         .into_iter()
         .map(|topic| (topic.name.clone(), topic))
@@ -100,14 +109,18 @@ pub async fn handle_metadata(broker: &KafkaBroker, request: MetadataRequest) -> 
 
     let broker_node = MetadataResponseBroker::default()
         .with_node_id(node_id)
-        .with_host(StrBytes::from(broker.config().broker.advertised_host.clone()))
+        .with_host(StrBytes::from(
+            broker.config().broker.advertised_host.clone(),
+        ))
         .with_port(i32::from(broker.config().broker.advertised_port))
         .with_rack(None);
 
     Ok(MetadataResponse::default()
         .with_throttle_time_ms(0)
         .with_brokers(vec![broker_node])
-        .with_cluster_id(Some(StrBytes::from(broker.config().broker.cluster_id.clone())))
+        .with_cluster_id(Some(StrBytes::from(
+            broker.config().broker.cluster_id.clone(),
+        )))
         .with_controller_id(node_id)
         .with_topics(topics))
 }
