@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use bytes::Bytes;
 
 use crate::store::{
-    DEFAULT_PARTITION, GroupJoinRequest, GroupJoinResult, GroupMember, Result, StoreError,
-    SyncGroupResult,
+    DEFAULT_PARTITION, GroupJoinRequest, GroupJoinResult, GroupMember, OffsetCommitRequest, Result,
+    StoreError, SyncGroupResult,
 };
 
 use super::state::{GroupMemberState, GroupState, StateJournal};
@@ -175,47 +175,39 @@ impl ControlPlaneState {
         Ok(())
     }
 
-    pub fn commit_offset(
-        &mut self,
-        group_id: &str,
-        member_id: &str,
-        generation_id: i32,
-        topic: &str,
-        next_offset: i64,
-        now_ms: i64,
-    ) -> Result<()> {
-        let group = self
-            .groups
-            .get_mut(group_id)
-            .ok_or_else(|| StoreError::UnknownMember {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
-            })?;
-        if !group.members.contains_key(member_id) {
+    pub fn commit_offset(&mut self, request: OffsetCommitRequest<'_>) -> Result<()> {
+        let group =
+            self.groups
+                .get_mut(request.group_id)
+                .ok_or_else(|| StoreError::UnknownMember {
+                    group_id: request.group_id.to_string(),
+                    member_id: request.member_id.to_string(),
+                })?;
+        if !group.members.contains_key(request.member_id) {
             return Err(StoreError::UnknownMember {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
+                group_id: request.group_id.to_string(),
+                member_id: request.member_id.to_string(),
             });
         }
-        if generation_id > group.generation_id {
+        if request.generation_id > group.generation_id {
             return Err(StoreError::StaleGeneration {
                 expected: group.generation_id,
-                actual: generation_id,
+                actual: request.generation_id,
             });
         }
-        if let Some(member) = group.members.get_mut(member_id) {
-            member.updated_at_unix_ms = now_ms;
+        if let Some(member) = group.members.get_mut(request.member_id) {
+            member.updated_at_unix_ms = request.now_ms;
         }
         self.offsets.insert(
-            OffsetKey::new(group_id, topic, DEFAULT_PARTITION),
-            next_offset,
+            OffsetKey::new(request.group_id, request.topic, request.partition),
+            request.next_offset,
         );
         self.persist_offsets()
     }
 
-    pub fn fetch_offset(&self, group_id: &str, topic: &str) -> Option<i64> {
+    pub fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Option<i64> {
         self.offsets
-            .get(&OffsetKey::new(group_id, topic, DEFAULT_PARTITION))
+            .get(&OffsetKey::new(group_id, topic, partition))
             .copied()
     }
 

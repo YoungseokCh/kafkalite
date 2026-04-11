@@ -30,6 +30,8 @@ pub enum StoreError {
     },
     #[error("unknown producer id {producer_id}")]
     UnknownProducerId { producer_id: i64 },
+    #[error("unknown topic '{topic}' or partition {partition}")]
+    UnknownTopicOrPartition { topic: String, partition: i32 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

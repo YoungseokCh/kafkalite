@@ -32,19 +32,6 @@ pub async fn handle_produce(
         let topic_name = topic_data.name.to_string();
         let mut partitions = Vec::new();
         for partition_data in topic_data.partition_data {
-            if partition_data.index != 0 {
-                partitions.push(
-                    PartitionProduceResponse::default()
-                        .with_index(partition_data.index)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
-                        .with_base_offset(-1)
-                        .with_log_append_time_ms(-1)
-                        .with_log_start_offset(-1)
-                        .with_record_errors(vec![])
-                        .with_error_message(None),
-                );
-                continue;
-            }
             let raw_records = partition_data.records.unwrap_or_default();
             let mut record_bytes = raw_records.clone();
             let decoded = RecordBatchDecoder::decode_all(&mut record_bytes)?;
@@ -54,9 +41,14 @@ pub async fn handle_produce(
                 .map(to_broker_record)
                 .collect::<Vec<_>>();
             let now = chrono::Utc::now().timestamp_millis();
-            let produce_result = broker.store().append_records(&topic_name, &flattened, now);
+            maybe_auto_create_topic(broker, &topic_name, partition_data.index, now)?;
+            let produce_result =
+                broker
+                    .store()
+                    .append_records(&topic_name, partition_data.index, &flattened, now);
             let (error_code, base_offset) = match produce_result {
                 Ok((base_offset, _)) => (0, base_offset),
+                Err(StoreError::UnknownTopicOrPartition { .. }) => (UNKNOWN_TOPIC_OR_PARTITION, -1),
                 Err(StoreError::InvalidProducerSequence { .. }) => {
                     (OUT_OF_ORDER_SEQUENCE_NUMBER, -1)
                 }
@@ -93,36 +85,41 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
         let mut partitions = Vec::new();
         let topic_name = topic.topic.to_string();
         for partition in topic.partitions {
-            if partition.partition != 0 {
-                partitions.push(
-                    PartitionData::default()
-                        .with_partition_index(partition.partition)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
-                        .with_high_watermark(-1)
-                        .with_last_stable_offset(-1)
-                        .with_log_start_offset(-1)
-                        .with_aborted_transactions(None)
-                        .with_preferred_read_replica(BrokerId(-1))
-                        .with_records(None),
-                );
-                continue;
+            match broker.store().fetch_records(
+                &topic_name,
+                partition.partition,
+                partition.fetch_offset,
+                1_000,
+            ) {
+                Ok(fetched) => {
+                    let records = encode_records(&fetched.records)?;
+                    partitions.push(
+                        PartitionData::default()
+                            .with_partition_index(partition.partition)
+                            .with_error_code(0)
+                            .with_high_watermark(fetched.high_watermark)
+                            .with_last_stable_offset(fetched.high_watermark)
+                            .with_log_start_offset(0)
+                            .with_aborted_transactions(None)
+                            .with_preferred_read_replica(BrokerId(-1))
+                            .with_records(Some(records)),
+                    );
+                }
+                Err(StoreError::UnknownTopicOrPartition { .. }) => {
+                    partitions.push(
+                        PartitionData::default()
+                            .with_partition_index(partition.partition)
+                            .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                            .with_high_watermark(-1)
+                            .with_last_stable_offset(-1)
+                            .with_log_start_offset(-1)
+                            .with_aborted_transactions(None)
+                            .with_preferred_read_replica(BrokerId(-1))
+                            .with_records(None),
+                    );
+                }
+                Err(err) => return Err(err.into()),
             }
-            let fetched =
-                broker
-                    .store()
-                    .fetch_records(&topic_name, partition.fetch_offset, 1_000)?;
-            let records = encode_records(&fetched.records)?;
-            partitions.push(
-                PartitionData::default()
-                    .with_partition_index(partition.partition)
-                    .with_error_code(0)
-                    .with_high_watermark(fetched.high_watermark)
-                    .with_last_stable_offset(fetched.high_watermark)
-                    .with_log_start_offset(0)
-                    .with_aborted_transactions(None)
-                    .with_preferred_read_replica(BrokerId(-1))
-                    .with_records(Some(records)),
-            );
         }
         responses.push(
             FetchableTopicResponse::default()
@@ -145,32 +142,40 @@ pub async fn handle_list_offsets(
     let mut topics = Vec::new();
     for topic in request.topics {
         let topic_name = topic.name.to_string();
-        let (earliest, latest) = broker.store().list_offsets(&topic_name)?;
-        let partitions = topic
-            .partitions
-            .into_iter()
-            .map(|partition| {
-                if partition.partition_index != 0 {
-                    return ListOffsetsPartitionResponse::default()
-                        .with_partition_index(partition.partition_index)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
-                        .with_timestamp(-1)
-                        .with_offset(-1)
-                        .with_leader_epoch(-1);
+        let mut partitions = Vec::new();
+        for partition in topic.partitions {
+            match broker
+                .store()
+                .list_offsets(&topic_name, partition.partition_index)
+            {
+                Ok((earliest, latest)) => {
+                    let result = match partition.timestamp {
+                        -2 => earliest,
+                        -1 => latest,
+                        _ => earliest,
+                    };
+                    partitions.push(
+                        ListOffsetsPartitionResponse::default()
+                            .with_partition_index(partition.partition_index)
+                            .with_error_code(0)
+                            .with_timestamp(result.timestamp_ms)
+                            .with_offset(result.offset)
+                            .with_leader_epoch(if api_version >= 4 { 0 } else { -1 }),
+                    );
                 }
-                let result = match partition.timestamp {
-                    -2 => earliest.clone(),
-                    -1 => latest.clone(),
-                    _ => earliest.clone(),
-                };
-                ListOffsetsPartitionResponse::default()
-                    .with_partition_index(partition.partition_index)
-                    .with_error_code(0)
-                    .with_timestamp(result.timestamp_ms)
-                    .with_offset(result.offset)
-                    .with_leader_epoch(if api_version >= 4 { 0 } else { -1 })
-            })
-            .collect();
+                Err(StoreError::UnknownTopicOrPartition { .. }) => {
+                    partitions.push(
+                        ListOffsetsPartitionResponse::default()
+                            .with_partition_index(partition.partition_index)
+                            .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                            .with_timestamp(-1)
+                            .with_offset(-1)
+                            .with_leader_epoch(-1),
+                    );
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
         topics.push(
             ListOffsetsTopicResponse::default()
                 .with_name(TopicName(StrBytes::from(topic_name.clone())))
@@ -180,6 +185,27 @@ pub async fn handle_list_offsets(
     Ok(ListOffsetsResponse::default()
         .with_throttle_time_ms(0)
         .with_topics(topics))
+}
+
+fn maybe_auto_create_topic(
+    broker: &KafkaBroker,
+    topic: &str,
+    partition: i32,
+    now_ms: i64,
+) -> Result<()> {
+    let known = broker
+        .store()
+        .topic_metadata(Some(&[topic.to_string()]), now_ms)?;
+    if !known.is_empty() {
+        return Ok(());
+    }
+    if partition < 0 || partition >= broker.config().storage.default_partitions {
+        return Ok(());
+    }
+    broker
+        .store()
+        .ensure_topic(topic, broker.config().storage.default_partitions, now_ms)?;
+    Ok(())
 }
 
 fn to_broker_record(record: Record) -> BrokerRecord {
@@ -279,7 +305,10 @@ mod tests {
         assert_eq!(first_partition.error_code, 0);
         assert_eq!(duplicate_partition.error_code, 0);
         assert_eq!(first_partition.base_offset, duplicate_partition.base_offset);
-        let fetched = broker.store().fetch_records("retry.topic", 0, 10).unwrap();
+        let fetched = broker
+            .store()
+            .fetch_records("retry.topic", 0, 0, 10)
+            .unwrap();
         assert_eq!(fetched.records.len(), 1);
     }
 
@@ -321,6 +350,7 @@ mod tests {
             broker: BrokerConfig::default(),
             storage: StorageConfig {
                 data_dir: dir.join("data"),
+                ..StorageConfig::default()
             },
         };
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
@@ -329,6 +359,16 @@ mod tests {
 
     fn produce_request(
         topic: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        sequence: i32,
+    ) -> ProduceRequest {
+        produce_request_for_partition(topic, 0, producer_id, producer_epoch, sequence)
+    }
+
+    fn produce_request_for_partition(
+        topic: &str,
+        partition: i32,
         producer_id: i64,
         producer_epoch: i16,
         sequence: i32,
@@ -365,7 +405,7 @@ mod tests {
                     .with_name(TopicName(StrBytes::from(topic.to_string())))
                     .with_partition_data(vec![
                         PartitionProduceData::default()
-                            .with_index(0)
+                            .with_index(partition)
                             .with_records(Some(encoded.freeze())),
                     ]),
             ])

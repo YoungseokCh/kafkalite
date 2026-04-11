@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::store::DEFAULT_PARTITION;
+use crate::store::PartitionMetadata;
 
 use super::{TopicPartitionSummary, TopicSummary};
 
@@ -90,14 +90,28 @@ impl TopicCatalog {
         })
     }
 
-    pub fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
+    pub fn topic_metadata(&self, topic: &str) -> Option<Vec<PartitionMetadata>> {
+        let topic = self.topics.get(topic)?;
+        Some(
+            topic
+                .partitions
+                .keys()
+                .map(|partition| PartitionMetadata {
+                    partition: *partition,
+                })
+                .collect(),
+        )
+    }
+
+    pub fn ensure_topic_runtime(
+        &mut self,
+        topic: &str,
+        partition_count: i32,
+        now_ms: i64,
+    ) -> &mut TopicRuntime {
         self.topics
             .entry(topic.to_string())
-            .or_insert_with(|| TopicRuntime {
-                name: topic.to_string(),
-                partitions: BTreeMap::from([(DEFAULT_PARTITION, PartitionRuntime::new(now_ms))]),
-                updated_at_unix_ms: now_ms,
-            })
+            .or_insert_with(|| TopicRuntime::new(topic, partition_count, now_ms))
     }
 
     pub fn partition_state(&self, topic: &str, partition: i32) -> Option<&PartitionRuntime> {
@@ -110,17 +124,29 @@ impl TopicCatalog {
         &mut self,
         topic: &str,
         partition: i32,
-        now_ms: i64,
-    ) -> &mut PartitionRuntime {
-        self.ensure_topic_runtime(topic, now_ms)
-            .partitions
-            .entry(partition)
-            .or_insert_with(|| PartitionRuntime::new(now_ms))
+    ) -> Option<&mut PartitionRuntime> {
+        self.topics
+            .get_mut(topic)
+            .and_then(|topic| topic.partitions.get_mut(&partition))
     }
 
-    pub fn topic_runtime_mut(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
-        self.ensure_topic_runtime(topic, now_ms)
+    pub fn topic_runtime_mut(&mut self, topic: &str) -> Option<&mut TopicRuntime> {
+        self.topics.get_mut(topic)
     }
+
+    pub fn ensure_known_partitions(&mut self, topic: &str, partitions: &[i32], now_ms: i64) {
+        let runtime = self
+            .topics
+            .entry(topic.to_string())
+            .or_insert_with(|| TopicRuntime::new(topic, 0, now_ms));
+        for partition in partitions {
+            runtime
+                .partitions
+                .entry(*partition)
+                .or_insert_with(|| PartitionRuntime::new(now_ms));
+        }
+    }
+
     pub fn to_producer_state(&self, next_producer_id: i64) -> ProducerState {
         let mut sequences = BTreeMap::new();
         for (topic_name, topic) in &self.topics {
@@ -150,5 +176,19 @@ impl PartitionRuntime {
 
     pub fn producer_sequences_ref(&self) -> &BTreeMap<i64, ProducerSequenceState> {
         &self.producer_sequences
+    }
+}
+
+impl TopicRuntime {
+    fn new(topic: &str, partition_count: i32, now_ms: i64) -> Self {
+        let mut partitions = BTreeMap::new();
+        for partition in 0..partition_count.max(0) {
+            partitions.insert(partition, PartitionRuntime::new(now_ms));
+        }
+        Self {
+            name: topic.to_string(),
+            partitions,
+            updated_at_unix_ms: now_ms,
+        }
     }
 }

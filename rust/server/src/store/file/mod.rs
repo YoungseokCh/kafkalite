@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use super::{
     BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
-    ProducerSession, Result, Storage, SyncGroupResult, TopicMetadata,
+    OffsetCommitRequest, ProducerSession, Result, Storage, SyncGroupResult, TopicMetadata,
 };
 use control_plane::ControlPlaneState;
 use data_plane::{AppendDecision, DataPlaneState};
@@ -62,14 +62,24 @@ impl FileStore {
         let mut snapshots = SnapshotSet::load(&root)?;
         journal.replay(&mut snapshots)?;
         snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
+        let recovered = snapshots
+            .topics
+            .iter()
+            .map(|(topic, state)| {
+                (
+                    topic.clone(),
+                    state.partitions.keys().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut data = DataPlaneState::new(snapshots.topics, snapshots.producers, journal.clone());
+        for (topic, partitions) in recovered {
+            data.ensure_known_partitions(&topic, &partitions, 0);
+        }
         Ok(Self {
             root,
             logs,
-            data: Mutex::new(DataPlaneState::new(
-                snapshots.topics,
-                snapshots.producers,
-                journal.clone(),
-            )),
+            data: Mutex::new(data),
             control: Mutex::new(ControlPlaneState::new(
                 snapshots.groups,
                 snapshots.offsets,
@@ -151,10 +161,10 @@ impl Storage for FileStore {
         Ok(data.topic_metadata(topics))
     }
 
-    fn ensure_topic(&self, topic: &str, now_ms: i64) -> Result<()> {
-        self.logs.ensure_topic(topic)?;
+    fn ensure_topic(&self, topic: &str, partition_count: i32, now_ms: i64) -> Result<()> {
+        self.logs.ensure_topic(topic, partition_count)?;
         let mut data = self.data.lock().expect("file store mutex poisoned");
-        data.ensure_topic(topic, now_ms)
+        data.ensure_topic(topic, partition_count, now_ms)
     }
 
     fn init_producer(&self, now_ms: i64) -> Result<ProducerSession> {
@@ -165,13 +175,22 @@ impl Storage for FileStore {
     fn append_records(
         &self,
         topic: &str,
+        partition: i32,
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<(i64, i64)> {
-        self.logs.ensure_topic(topic)?;
         let decision = {
             let mut data = self.data.lock().expect("file store mutex poisoned");
-            data.prepare_append(topic, records, now_ms)?
+            match data.prepare_append(topic, partition, records, now_ms) {
+                Ok(decision) => decision,
+                Err(crate::store::StoreError::UnknownTopicOrPartition { .. }) if partition == 0 => {
+                    drop(data);
+                    self.ensure_topic(topic, 1, now_ms)?;
+                    let mut data = self.data.lock().expect("file store mutex poisoned");
+                    data.prepare_append(topic, partition, records, now_ms)?
+                }
+                Err(err) => return Err(err),
+            }
         };
         match decision {
             AppendDecision::Duplicate {
@@ -179,8 +198,12 @@ impl Storage for FileStore {
                 last_offset,
             } => Ok((base_offset, last_offset)),
             AppendDecision::Append(prepared) => {
-                self.logs
-                    .append_batch(topic, &StoredBatch::from_records(&prepared.records))?;
+                self.logs.ensure_partition(topic, partition)?;
+                self.logs.append_batch(
+                    topic,
+                    partition,
+                    &StoredBatch::from_records(&prepared.records),
+                )?;
                 let result = (prepared.base_offset, prepared.last_offset);
                 let mut data = self.data.lock().expect("file store mutex poisoned");
                 data.finish_append(&prepared, now_ms)?;
@@ -189,26 +212,41 @@ impl Storage for FileStore {
         }
     }
 
-    fn fetch_records(&self, topic: &str, start_offset: i64, limit: usize) -> Result<FetchResult> {
+    fn fetch_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<FetchResult> {
         let high_watermark = self
             .data
             .lock()
             .expect("file store mutex poisoned")
-            .high_watermark(topic);
-        let records = self.logs.read_records(topic, start_offset, limit)?;
+            .high_watermark(topic, partition)?;
+        let records = self
+            .logs
+            .read_records(topic, partition, start_offset, limit)?;
         Ok(FetchResult {
             high_watermark,
             records,
         })
     }
 
-    fn list_offsets(&self, topic: &str) -> Result<(ListOffsetResult, ListOffsetResult)> {
-        let earliest = self.logs.earliest_offset(topic)?.unwrap_or((0, 0));
+    fn list_offsets(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<(ListOffsetResult, ListOffsetResult)> {
+        let earliest = self
+            .logs
+            .earliest_offset(topic, partition)?
+            .unwrap_or((0, 0));
         let latest = self
             .data
             .lock()
             .expect("file store mutex poisoned")
-            .latest_offset(topic);
+            .latest_offset(topic, partition)?;
         Ok((
             ListOffsetResult {
                 offset: earliest.0,
@@ -262,29 +300,14 @@ impl Storage for FileStore {
         control.leave_group(group_id, member_id, now_ms)
     }
 
-    fn commit_offset(
-        &self,
-        group_id: &str,
-        member_id: &str,
-        generation_id: i32,
-        topic: &str,
-        next_offset: i64,
-        now_ms: i64,
-    ) -> Result<()> {
+    fn commit_offset(&self, request: OffsetCommitRequest<'_>) -> Result<()> {
         let mut control = self.control.lock().expect("file store mutex poisoned");
-        control.commit_offset(
-            group_id,
-            member_id,
-            generation_id,
-            topic,
-            next_offset,
-            now_ms,
-        )
+        control.commit_offset(request)
     }
 
-    fn fetch_offset(&self, group_id: &str, topic: &str) -> Result<Option<i64>> {
+    fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Result<Option<i64>> {
         let control = self.control.lock().expect("file store mutex poisoned");
-        Ok(control.fetch_offset(group_id, topic))
+        Ok(control.fetch_offset(group_id, topic, partition))
     }
 }
 

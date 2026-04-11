@@ -34,6 +34,8 @@ pub struct BrokerConfig {
 pub struct StorageConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    #[serde(default = "default_partitions")]
+    pub default_partitions: i32,
 }
 
 impl Default for BrokerConfig {
@@ -53,6 +55,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            default_partitions: default_partitions(),
         }
     }
 }
@@ -83,6 +86,10 @@ fn default_cluster_id() -> String {
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
+}
+
+fn default_partitions() -> i32 {
+    1
 }
 
 impl Config {
@@ -124,7 +131,7 @@ mod tests {
         let path = temp_config_path("kafkalite-config.toml");
         std::fs::write(
             &path,
-            "[kafkalite.broker]\nbroker_id = 7\nhost = \"0.0.0.0\"\nport = 19092\nadvertised_host = \"broker.local\"\nadvertised_port = 29092\ncluster_id = \"cluster-a\"\n[kafkalite.storage]\ndata_dir = \"/tmp/test-kafkalite-data\"\n",
+            "[kafkalite.broker]\nbroker_id = 7\nhost = \"0.0.0.0\"\nport = 19092\nadvertised_host = \"broker.local\"\nadvertised_port = 29092\ncluster_id = \"cluster-a\"\n[kafkalite.storage]\ndata_dir = \"/tmp/test-kafkalite-data\"\ndefault_partitions = 3\n",
         )
         .unwrap();
 
@@ -140,6 +147,7 @@ mod tests {
             config.storage.data_dir,
             PathBuf::from("/tmp/test-kafkalite-data")
         );
+        assert_eq!(config.storage.default_partitions, 3);
 
         std::fs::remove_file(path).unwrap();
     }

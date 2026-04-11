@@ -59,7 +59,11 @@ pub async fn handle_metadata(
         && let Some(requested) = names.as_ref()
     {
         for topic in requested {
-            broker.store().ensure_topic(topic, now_ms)?;
+            broker.store().ensure_topic(
+                topic,
+                broker.config().storage.default_partitions,
+                now_ms,
+            )?;
         }
     }
     let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
@@ -69,14 +73,6 @@ pub async fn handle_metadata(
         .collect::<std::collections::BTreeMap<_, _>>();
 
     let node_id = BrokerId(broker.config().broker.broker_id);
-    let partition = MetadataResponsePartition::default()
-        .with_error_code(0)
-        .with_partition_index(0)
-        .with_leader_id(node_id)
-        .with_leader_epoch(0)
-        .with_replica_nodes(vec![node_id])
-        .with_isr_nodes(vec![node_id])
-        .with_offline_replicas(vec![]);
 
     let topics = if let Some(requested) = names {
         requested
@@ -86,7 +82,7 @@ pub async fn handle_metadata(
                     .with_error_code(0)
                     .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
                     .with_is_internal(false)
-                    .with_partitions(vec![partition.clone()]),
+                    .with_partitions(topic_partitions(topic, node_id)),
                 None => MetadataResponseTopic::default()
                     .with_error_code(3)
                     .with_name(Some(TopicName(StrBytes::from(name))))
@@ -100,9 +96,9 @@ pub async fn handle_metadata(
             .map(|topic| {
                 MetadataResponseTopic::default()
                     .with_error_code(0)
-                    .with_name(Some(TopicName(StrBytes::from(topic.name))))
+                    .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
                     .with_is_internal(false)
-                    .with_partitions(vec![partition.clone()])
+                    .with_partitions(topic_partitions(&topic, node_id))
             })
             .collect()
     };
@@ -141,4 +137,24 @@ fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {
         .with_api_key(api_key as i16)
         .with_min_version(min_version)
         .with_max_version(max_version)
+}
+
+fn topic_partitions(
+    topic: &crate::store::TopicMetadata,
+    node_id: BrokerId,
+) -> Vec<MetadataResponsePartition> {
+    topic
+        .partitions
+        .iter()
+        .map(|partition| {
+            MetadataResponsePartition::default()
+                .with_error_code(0)
+                .with_partition_index(partition.partition)
+                .with_leader_id(node_id)
+                .with_leader_epoch(0)
+                .with_replica_nodes(vec![node_id])
+                .with_isr_nodes(vec![node_id])
+                .with_offline_replicas(vec![])
+        })
+        .collect()
 }

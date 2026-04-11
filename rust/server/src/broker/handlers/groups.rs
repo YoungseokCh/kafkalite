@@ -17,7 +17,7 @@ use kafka_protocol::messages::{
 use kafka_protocol::protocol::StrBytes;
 
 use super::super::KafkaBroker;
-use crate::store::{GroupJoinRequest, StoreError};
+use crate::store::{GroupJoinRequest, OffsetCommitRequest as StoreOffsetCommitRequest, StoreError};
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 
@@ -207,14 +207,15 @@ pub async fn handle_offset_commit(
             let error_code = if partition.partition_index != 0 {
                 UNKNOWN_TOPIC_OR_PARTITION
             } else {
-                match broker.store().commit_offset(
-                    request.group_id.as_ref(),
-                    request.member_id.as_ref(),
-                    request.generation_id_or_member_epoch,
-                    topic.name.as_ref(),
-                    partition.committed_offset,
-                    now,
-                ) {
+                match broker.store().commit_offset(StoreOffsetCommitRequest {
+                    group_id: request.group_id.as_ref(),
+                    member_id: request.member_id.as_ref(),
+                    generation_id: request.generation_id_or_member_epoch,
+                    topic: topic.name.as_ref(),
+                    partition: partition.partition_index,
+                    next_offset: partition.committed_offset,
+                    now_ms: now,
+                }) {
                     Ok(()) => 0,
                     Err(StoreError::UnknownMember { .. }) => 25,
                     Err(StoreError::StaleGeneration { .. }) => 22,
@@ -251,7 +252,11 @@ pub async fn handle_offset_fetch(
                     (
                         broker
                             .store()
-                            .fetch_offset(request.group_id.as_ref(), topic.name.as_ref())?
+                            .fetch_offset(
+                                request.group_id.as_ref(),
+                                topic.name.as_ref(),
+                                partition,
+                            )?
                             .unwrap_or(-1),
                         0,
                     )
@@ -399,6 +404,7 @@ mod tests {
             broker: BrokerConfig::default(),
             storage: StorageConfig {
                 data_dir: dir.join("data"),
+                ..StorageConfig::default()
             },
         };
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());

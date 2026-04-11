@@ -101,6 +101,7 @@ mod tests {
         store
             .append_records(
                 "inspect.events",
+                0,
                 &[BrokerRecord {
                     offset: 0,
                     timestamp_ms: 10,
@@ -130,6 +131,7 @@ mod tests {
         store
             .append_records(
                 "repair.events",
+                0,
                 &[BrokerRecord {
                     offset: 0,
                     timestamp_ms: 10,

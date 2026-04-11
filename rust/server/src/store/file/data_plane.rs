@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::store::{
-    BrokerRecord, DEFAULT_PARTITION, ProducerSession, Result, StoreError, TopicMetadata,
-};
+use crate::store::{BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata};
 
 use super::TopicSummary;
 use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
@@ -45,19 +43,17 @@ impl DataPlaneState {
             return requested
                 .iter()
                 .filter(|topic| self.catalog.contains(topic))
-                .map(|topic| TopicMetadata {
-                    name: topic.clone(),
-                })
+                .map(|topic| self.topic_metadata_for(topic))
                 .collect();
         }
         self.catalog
             .topic_names()
-            .map(|name| TopicMetadata { name })
+            .map(|name| self.topic_metadata_for(&name))
             .collect()
     }
 
-    pub fn ensure_topic(&mut self, topic: &str, now_ms: i64) -> Result<()> {
-        self.ensure_topic_runtime(topic, now_ms);
+    pub fn ensure_topic(&mut self, topic: &str, partition_count: i32, now_ms: i64) -> Result<()> {
+        self.ensure_topic_runtime(topic, partition_count, now_ms);
         Ok(())
     }
 
@@ -74,16 +70,22 @@ impl DataPlaneState {
     pub fn prepare_append(
         &mut self,
         topic: &str,
+        partition: i32,
         records: &[BrokerRecord],
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<AppendDecision> {
         let next_producer_id = self.next_producer_id;
-        let partition = self.ensure_partition_runtime(topic, DEFAULT_PARTITION, now_ms);
-        let batch = ProducerBatchInfo::from_records(records);
-        if let Some(batch) = batch.as_ref() {
-            validate_producer_state(next_producer_id, partition.producer_sequences_ref(), batch)?;
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        let batch_info = ProducerBatchInfo::from_records(records);
+        if let Some(batch) = batch_info.as_ref() {
+            validate_producer_state(next_producer_id, runtime.producer_sequences_ref(), batch)?;
             if let Some((base_offset, last_offset)) =
-                duplicate_append_result(partition.producer_sequences_ref(), batch)
+                duplicate_append_result(runtime.producer_sequences_ref(), batch)
             {
                 return Ok(AppendDecision::Duplicate {
                     base_offset,
@@ -92,7 +94,7 @@ impl DataPlaneState {
             }
         }
 
-        let base_offset = partition.state.next_offset;
+        let base_offset = runtime.state.next_offset;
         let mut appended = Vec::new();
         for (index, record) in records.iter().enumerate() {
             appended.push(BrokerRecord {
@@ -112,7 +114,7 @@ impl DataPlaneState {
             .unwrap_or(base_offset);
         Ok(AppendDecision::Append(PreparedAppend {
             topic: topic.to_string(),
-            partition: DEFAULT_PARTITION,
+            partition,
             base_offset,
             last_offset,
             records: appended,
@@ -120,7 +122,12 @@ impl DataPlaneState {
     }
 
     pub fn finish_append(&mut self, prepared: &PreparedAppend, now_ms: i64) -> Result<()> {
-        let partition = self.ensure_partition_runtime(&prepared.topic, prepared.partition, now_ms);
+        let partition = self
+            .partition_state_mut(&prepared.topic, prepared.partition)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: prepared.topic.clone(),
+                partition: prepared.partition,
+            })?;
         partition.state.next_offset = prepared.last_offset + 1;
         for record in &prepared.records {
             partition.producer_sequences.insert(
@@ -138,19 +145,28 @@ impl DataPlaneState {
                 },
             );
         }
-        let topic = self.catalog.topic_runtime_mut(&prepared.topic, now_ms);
+        let topic = self
+            .catalog
+            .topic_runtime_mut(&prepared.topic)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: prepared.topic.clone(),
+                partition: prepared.partition,
+            })?;
         topic.updated_at_unix_ms = now_ms;
         self.persist_producers(now_ms)
     }
 
-    pub fn high_watermark(&self, topic: &str) -> i64 {
-        self.partition_state(topic)
+    pub fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
+        self.partition_state(topic, partition)
             .map(|partition| partition.state.next_offset)
-            .unwrap_or(0)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            })
     }
 
-    pub fn latest_offset(&self, topic: &str) -> i64 {
-        self.high_watermark(topic)
+    pub fn latest_offset(&self, topic: &str, partition: i32) -> Result<i64> {
+        self.high_watermark(topic, partition)
     }
 
     pub fn topic_count(&self) -> usize {
@@ -161,22 +177,40 @@ impl DataPlaneState {
         self.catalog.describe_topic(topic)
     }
 
-    fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
-        self.catalog.ensure_topic_runtime(topic, now_ms)
+    pub fn ensure_known_partitions(&mut self, topic: &str, partitions: &[i32], now_ms: i64) {
+        self.catalog
+            .ensure_known_partitions(topic, partitions, now_ms)
     }
 
-    fn ensure_partition_runtime(
+    fn ensure_topic_runtime(
+        &mut self,
+        topic: &str,
+        partition_count: i32,
+        now_ms: i64,
+    ) -> &mut TopicRuntime {
+        self.catalog
+            .ensure_topic_runtime(topic, partition_count, now_ms)
+    }
+
+    fn partition_state(&self, topic: &str, partition: i32) -> Option<&PartitionRuntime> {
+        self.catalog.partition_state(topic, partition)
+    }
+
+    fn partition_state_mut(
         &mut self,
         topic: &str,
         partition: i32,
-        now_ms: i64,
-    ) -> &mut PartitionRuntime {
-        self.catalog.partition_state_mut(topic, partition, now_ms)
+    ) -> Option<&mut PartitionRuntime> {
+        self.catalog.partition_state_mut(topic, partition)
     }
 
-    fn partition_state(&self, topic: &str) -> Option<&PartitionRuntime> {
-        self.catalog.partition_state(topic, DEFAULT_PARTITION)
+    fn topic_metadata_for(&self, topic: &str) -> TopicMetadata {
+        TopicMetadata {
+            name: topic.to_string(),
+            partitions: self.catalog.topic_metadata(topic).unwrap_or_default(),
+        }
     }
+
     fn persist_producers(&self, now_ms: i64) -> Result<()> {
         self.journal.append_producer_state(
             &self.catalog.to_producer_state(self.next_producer_id),

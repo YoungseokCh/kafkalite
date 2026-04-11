@@ -2,8 +2,14 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionMetadata {
+    pub partition: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicMetadata {
     pub name: String,
+    pub partitions: Vec<PartitionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,26 +29,33 @@ impl RecordLog {
         Ok(log)
     }
 
-    pub fn ensure_topic(&self, topic: &str) -> Result<()> {
-        fs::create_dir_all(self.partition_dir(topic))?;
-        if !self.segment_path(topic).exists() {
-            File::create(self.segment_path(topic))?;
-        }
-        if !self.index_path(topic).exists() {
-            File::create(self.index_path(topic))?;
-        }
-        if !self.time_index_path(topic).exists() {
-            File::create(self.time_index_path(topic))?;
+    pub fn ensure_topic(&self, topic: &str, partition_count: i32) -> Result<()> {
+        for partition in 0..partition_count.max(0) {
+            self.ensure_partition(topic, partition)?;
         }
         Ok(())
     }
 
-    pub fn append_batch(&self, topic: &str, batch: &StoredBatch) -> Result<()> {
-        self.ensure_topic(topic)?;
+    pub fn ensure_partition(&self, topic: &str, partition: i32) -> Result<()> {
+        fs::create_dir_all(self.partition_dir(topic, partition))?;
+        if !self.segment_path(topic, partition).exists() {
+            File::create(self.segment_path(topic, partition))?;
+        }
+        if !self.index_path(topic, partition).exists() {
+            File::create(self.index_path(topic, partition))?;
+        }
+        if !self.time_index_path(topic, partition).exists() {
+            File::create(self.time_index_path(topic, partition))?;
+        }
+        Ok(())
+    }
+
+    pub fn append_batch(&self, topic: &str, partition: i32, batch: &StoredBatch) -> Result<()> {
+        self.ensure_partition(topic, partition)?;
         let mut segment = OpenOptions::new()
             .append(true)
             .read(true)
-            .open(self.segment_path(topic))?;
+            .open(self.segment_path(topic, partition))?;
         let position = segment.seek(SeekFrom::End(0))?;
         let payload = batch.encode_binary()?;
         segment.write_all(&(payload.len() as u32).to_le_bytes())?;
@@ -64,7 +71,7 @@ impl RecordLog {
         if should_index_batch(batch) {
             let mut index = OpenOptions::new()
                 .append(true)
-                .open(self.index_path(topic))?;
+                .open(self.index_path(topic, partition))?;
             write_index_entry(
                 &mut index,
                 &IndexEntry {
@@ -77,7 +84,7 @@ impl RecordLog {
 
             let mut time_index = OpenOptions::new()
                 .append(true)
-                .open(self.time_index_path(topic))?;
+                .open(self.time_index_path(topic, partition))?;
             write_time_index_entry(
                 &mut time_index,
                 &TimeIndexEntry {
@@ -93,14 +100,15 @@ impl RecordLog {
     pub fn read_records(
         &self,
         topic: &str,
+        partition: i32,
         start_offset: i64,
         limit: usize,
     ) -> Result<Vec<BrokerRecord>> {
-        if !self.segment_path(topic).exists() {
+        if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
-        let start_position = self.lookup_position(topic, start_offset)?;
-        let mut file = File::open(self.segment_path(topic))?;
+        let start_position = self.lookup_position(topic, partition, start_offset)?;
+        let mut file = File::open(self.segment_path(topic, partition))?;
         file.seek(SeekFrom::Start(start_position))?;
         let mut reader = BufReader::new(file);
         let mut records = Vec::new();
@@ -124,17 +132,17 @@ impl RecordLog {
         Ok(records)
     }
 
-    pub fn earliest_offset(&self, topic: &str) -> Result<Option<(i64, i64)>> {
-        let records = self.read_records(topic, 0, 1)?;
+    pub fn earliest_offset(&self, topic: &str, partition: i32) -> Result<Option<(i64, i64)>> {
+        let records = self.read_records(topic, partition, 0, 1)?;
         Ok(records
             .into_iter()
             .next()
             .map(|record| (record.offset, record.timestamp_ms)))
     }
 
-    fn lookup_position(&self, topic: &str, start_offset: i64) -> Result<u64> {
+    fn lookup_position(&self, topic: &str, partition: i32, start_offset: i64) -> Result<u64> {
         let mut candidate = 0_u64;
-        for entry in self.read_index_entries(topic)? {
+        for entry in self.read_index_entries(topic, partition)? {
             if entry.base_offset <= start_offset {
                 candidate = entry.position;
             } else {
@@ -144,11 +152,11 @@ impl RecordLog {
         Ok(candidate)
     }
 
-    fn read_index_entries(&self, topic: &str) -> Result<Vec<IndexEntry>> {
-        if !self.index_path(topic).exists() {
+    fn read_index_entries(&self, topic: &str, partition: i32) -> Result<Vec<IndexEntry>> {
+        if !self.index_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
-        let mut reader = File::open(self.index_path(topic))?;
+        let mut reader = File::open(self.index_path(topic, partition))?;
         let mut entries = Vec::new();
         while let Some(entry) = read_index_entry(&mut reader)? {
             entries.push(entry);
@@ -167,7 +175,14 @@ impl RecordLog {
     }
 
     fn recover_topic(&self, topic: &str) -> Result<()> {
-        let segment_path = self.segment_path(topic);
+        for partition in self.partition_ids(topic)? {
+            self.recover_partition(topic, partition)?;
+        }
+        Ok(())
+    }
+
+    fn recover_partition(&self, topic: &str, partition: i32) -> Result<()> {
+        let segment_path = self.segment_path(topic, partition);
         if !segment_path.exists() {
             return Ok(());
         }
@@ -195,7 +210,7 @@ impl RecordLog {
         if safe_len < file_len {
             file.set_len(safe_len)?;
             file.sync_all()?;
-            self.rebuild_indexes_for_topic(topic)?;
+            self.rebuild_indexes_for_partition(topic, partition)?;
         }
         Ok(())
     }
@@ -218,21 +233,32 @@ impl RecordLog {
                 updated_at_unix_ms: 0,
             });
             topic.name = topic_name.clone();
-            topic
-                .partitions
-                .insert(0, self.recover_partition_state(&topic_name)?);
+            let partition_ids = self.partition_ids(&topic_name)?;
+            for partition in partition_ids {
+                topic.partitions.insert(
+                    partition,
+                    self.recover_partition_state(&topic_name, partition)?,
+                );
+            }
             topics.insert(topic_name, topic);
         }
         Ok(topics)
     }
 
     pub fn rebuild_indexes_for_topic(&self, topic: &str) -> Result<()> {
-        if !self.segment_path(topic).exists() {
+        for partition in self.partition_ids(topic)? {
+            self.rebuild_indexes_for_partition(topic, partition)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_indexes_for_partition(&self, topic: &str, partition: i32) -> Result<()> {
+        if !self.segment_path(topic, partition).exists() {
             return Ok(());
         }
-        let mut index = File::create(self.index_path(topic))?;
-        let mut time_index = File::create(self.time_index_path(topic))?;
-        let mut reader = BufReader::new(File::open(self.segment_path(topic))?);
+        let mut index = File::create(self.index_path(topic, partition))?;
+        let mut time_index = File::create(self.time_index_path(topic, partition))?;
+        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
         let mut position = 0_u64;
         loop {
             let mut len = [0_u8; 4];
@@ -271,11 +297,11 @@ impl RecordLog {
         self.root.join("topics").join(topic)
     }
 
-    fn recover_partition_state(&self, topic: &str) -> Result<PartitionState> {
-        if !self.segment_path(topic).exists() {
+    fn recover_partition_state(&self, topic: &str, partition: i32) -> Result<PartitionState> {
+        if !self.segment_path(topic, partition).exists() {
             return Ok(PartitionState::new(0));
         }
-        let mut reader = BufReader::new(File::open(self.segment_path(topic))?);
+        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
         let mut next_offset = 0;
         loop {
             let mut len = [0_u8; 4];
@@ -295,22 +321,44 @@ impl RecordLog {
         })
     }
 
-    fn partition_dir(&self, topic: &str) -> PathBuf {
+    fn partition_ids(&self, topic: &str) -> Result<Vec<i32>> {
+        let partitions_dir = self.topic_dir(topic).join("partitions");
+        if !partitions_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = fs::read_dir(partitions_dir)?
+            .filter_map(|entry| {
+                entry.ok().and_then(|entry| {
+                    entry
+                        .file_type()
+                        .ok()
+                        .filter(|kind| kind.is_dir())
+                        .and_then(|_| entry.file_name().to_string_lossy().parse::<i32>().ok())
+                })
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    fn partition_dir(&self, topic: &str, partition: i32) -> PathBuf {
         self.topic_dir(topic)
             .join("partitions")
-            .join(crate::store::DEFAULT_PARTITION.to_string())
+            .join(partition.to_string())
     }
 
-    fn segment_path(&self, topic: &str) -> PathBuf {
-        self.partition_dir(topic).join("00000000000000000000.log")
+    fn segment_path(&self, topic: &str, partition: i32) -> PathBuf {
+        self.partition_dir(topic, partition)
+            .join("00000000000000000000.log")
     }
 
-    fn index_path(&self, topic: &str) -> PathBuf {
-        self.partition_dir(topic).join("00000000000000000000.index")
+    fn index_path(&self, topic: &str, partition: i32) -> PathBuf {
+        self.partition_dir(topic, partition)
+            .join("00000000000000000000.index")
     }
 
-    fn time_index_path(&self, topic: &str) -> PathBuf {
-        self.partition_dir(topic)
+    fn time_index_path(&self, topic: &str, partition: i32) -> PathBuf {
+        self.partition_dir(topic, partition)
             .join("00000000000000000000.timeindex")
     }
 }

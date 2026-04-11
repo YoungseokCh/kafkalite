@@ -22,10 +22,10 @@ fn append_only_adds_one_state_journal_entry_per_write() {
     let journal_path = dir.path().join("state/state.journal");
     assert_eq!(count_journal_entries(&journal_path), 1);
 
-    store.append_records("d1.events", &records, 20).unwrap();
+    store.append_records("d1.events", 0, &records, 20).unwrap();
     assert_eq!(count_journal_entries(&journal_path), 2);
 
-    store.append_records("d1.events", &records, 30).unwrap();
+    store.append_records("d1.events", 0, &records, 30).unwrap();
     assert_eq!(count_journal_entries(&journal_path), 2);
 
     let next = vec![BrokerRecord {
@@ -33,7 +33,7 @@ fn append_only_adds_one_state_journal_entry_per_write() {
         timestamp_ms: 30,
         ..records[0].clone()
     }];
-    store.append_records("d1.events", &next, 30).unwrap();
+    store.append_records("d1.events", 0, &next, 30).unwrap();
     assert_eq!(count_journal_entries(&journal_path), 3);
 }
 
@@ -64,10 +64,12 @@ fn topic_offsets_are_recovered_from_log_after_reopen() {
             headers_json: b"[]".to_vec(),
         },
     ];
-    store.append_records("recover.topic", &records, 20).unwrap();
+    store
+        .append_records("recover.topic", 0, &records, 20)
+        .unwrap();
 
     let reopened = FileStore::open(dir.path()).unwrap();
-    let (_, latest) = reopened.list_offsets("recover.topic").unwrap();
+    let (_, latest) = reopened.list_offsets("recover.topic", 0).unwrap();
     let topic = reopened.describe_topic("recover.topic").unwrap();
 
     assert_eq!(latest.offset, 2);

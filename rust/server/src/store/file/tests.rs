@@ -5,7 +5,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use super::*;
-use crate::store::{GroupJoinRequest, StoreError};
+use crate::store::{GroupJoinRequest, OffsetCommitRequest, StoreError};
 
 #[test]
 fn appends_and_fetches_records() {
@@ -22,9 +22,11 @@ fn appends_and_fetches_records() {
         value: Some(Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
     }];
-    let (base, last) = store.append_records("test.events", &records, 10).unwrap();
+    let (base, last) = store
+        .append_records("test.events", 0, &records, 10)
+        .unwrap();
     assert_eq!((base, last), (0, 0));
-    let fetched = store.fetch_records("test.events", 0, 10).unwrap();
+    let fetched = store.fetch_records("test.events", 0, 0, 10).unwrap();
     assert_eq!(fetched.high_watermark, 1);
     assert_eq!(fetched.records.len(), 1);
 }
@@ -46,9 +48,11 @@ fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
             headers_json: b"[]".to_vec(),
         })
         .collect::<Vec<_>>();
-    store.append_records("tail.events", &records, 10).unwrap();
+    store
+        .append_records("tail.events", 0, &records, 10)
+        .unwrap();
 
-    let fetched = store.fetch_records("tail.events", 3, 10).unwrap();
+    let fetched = store.fetch_records("tail.events", 0, 3, 10).unwrap();
     assert_eq!(fetched.records.len(), 2);
     assert_eq!(fetched.records[0].offset, 3);
     assert_eq!(fetched.records[1].offset, 4);
@@ -132,41 +136,45 @@ fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_me
         })
         .unwrap();
     store
-        .commit_offset(
+        .commit_offset(commit_request(
             "group-b",
             "member-a",
             joined.generation_id,
             "topic-a",
+            0,
             1,
             200,
-        )
+        ))
         .unwrap();
-    let stale = store.commit_offset(
+    let stale = store.commit_offset(commit_request(
         "group-b",
         "member-a",
         joined.generation_id - 1,
         "topic-a",
+        0,
         2,
         300,
-    );
+    ));
     assert!(stale.is_ok());
-    let future = store.commit_offset(
+    let future = store.commit_offset(commit_request(
         "group-b",
         "member-a",
         joined.generation_id + 1,
         "topic-a",
+        0,
         3,
         300,
-    );
+    ));
     assert!(matches!(future, Err(StoreError::StaleGeneration { .. })));
-    let unknown = store.commit_offset(
+    let unknown = store.commit_offset(commit_request(
         "group-b",
         "member-b",
         joined.generation_id,
         "topic-a",
+        0,
         2,
         300,
-    );
+    ));
     assert!(matches!(unknown, Err(StoreError::UnknownMember { .. })));
 }
 
@@ -188,30 +196,32 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
         })
         .unwrap();
     store
-        .commit_offset(
+        .commit_offset(commit_request(
             "group-soft",
             "member-a",
             joined.generation_id,
             "topic-a",
+            0,
             1,
             200,
-        )
+        ))
         .unwrap();
 
     let reopened = FileStore::open(dir.path()).unwrap();
     assert_eq!(
-        reopened.fetch_offset("group-soft", "topic-a").unwrap(),
+        reopened.fetch_offset("group-soft", "topic-a", 0).unwrap(),
         Some(1)
     );
 
-    let stale_runtime_member = reopened.commit_offset(
+    let stale_runtime_member = reopened.commit_offset(commit_request(
         "group-soft",
         "member-a",
         joined.generation_id,
         "topic-a",
+        0,
         2,
         300,
-    );
+    ));
     assert!(matches!(
         stale_runtime_member,
         Err(StoreError::UnknownMember { .. })
@@ -246,14 +256,15 @@ fn heartbeat_does_not_grow_state_journal_but_offset_commit_does() {
     assert_eq!(after_heartbeat, after_join);
 
     store
-        .commit_offset(
+        .commit_offset(commit_request(
             "group-journal",
             "member-a",
             joined.generation_id,
             "topic-a",
+            0,
             1,
             300,
-        )
+        ))
         .unwrap();
     let after_commit = std::fs::metadata(&journal_path).unwrap().len();
     assert!(after_commit > after_heartbeat);
@@ -354,7 +365,7 @@ fn truncated_tail_is_recovered_on_restart() {
         headers_json: b"[]".to_vec(),
     }];
     store
-        .append_records("recover.events", &records, 10)
+        .append_records("recover.events", 0, &records, 10)
         .unwrap();
     std::fs::OpenOptions::new()
         .append(true)
@@ -367,7 +378,7 @@ fn truncated_tail_is_recovered_on_restart() {
         .unwrap();
 
     let reopened = FileStore::open(dir.path()).unwrap();
-    let fetched = reopened.fetch_records("recover.events", 0, 10).unwrap();
+    let fetched = reopened.fetch_records("recover.events", 0, 0, 10).unwrap();
     assert_eq!(fetched.records.len(), 1);
     assert_eq!(fetched.records[0].value.as_deref(), Some(&b"value"[..]));
 }
@@ -388,9 +399,13 @@ fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
         headers_json: b"[]".to_vec(),
     }];
 
-    let first = store.append_records("retry.events", &records, 10).unwrap();
-    let duplicate = store.append_records("retry.events", &records, 20).unwrap();
-    let fetched = store.fetch_records("retry.events", 0, 10).unwrap();
+    let first = store
+        .append_records("retry.events", 0, &records, 10)
+        .unwrap();
+    let duplicate = store
+        .append_records("retry.events", 0, &records, 20)
+        .unwrap();
+    let fetched = store.fetch_records("retry.events", 0, 0, 10).unwrap();
 
     assert_eq!(first, duplicate);
     assert_eq!(fetched.records.len(), 1);
@@ -411,7 +426,7 @@ fn stale_producer_epoch_is_rejected() {
         value: Some(Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
     }];
-    store.append_records("epoch.events", &first, 10).unwrap();
+    store.append_records("epoch.events", 0, &first, 10).unwrap();
 
     let stale = vec![BrokerRecord {
         offset: 0,
@@ -424,7 +439,7 @@ fn stale_producer_epoch_is_rejected() {
         headers_json: b"[]".to_vec(),
     }];
 
-    let result = store.append_records("epoch.events", &stale, 20);
+    let result = store.append_records("epoch.events", 0, &stale, 20);
     assert!(matches!(result, Err(StoreError::StaleProducerEpoch { .. })));
 }
 
@@ -448,4 +463,24 @@ fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
         .into_iter()
         .map(|partition| partition.topic.to_string())
         .collect()
+}
+
+fn commit_request<'a>(
+    group_id: &'a str,
+    member_id: &'a str,
+    generation_id: i32,
+    topic: &'a str,
+    partition: i32,
+    next_offset: i64,
+    now_ms: i64,
+) -> OffsetCommitRequest<'a> {
+    OffsetCommitRequest {
+        group_id,
+        member_id,
+        generation_id,
+        topic,
+        partition,
+        next_offset,
+        now_ms,
+    }
 }

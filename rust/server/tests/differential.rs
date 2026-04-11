@@ -500,6 +500,7 @@ async fn start_local_broker() -> (
         },
         storage: StorageConfig {
             data_dir: tempdir.path().join("kafkalite-data"),
+            ..StorageConfig::default()
         },
     };
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());

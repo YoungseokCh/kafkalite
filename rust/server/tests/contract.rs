@@ -107,6 +107,51 @@ async fn broker_contract_keeps_records_and_committed_offsets_across_restart() {
     stop_broker(handle).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broker_contract_auto_creates_multi_partition_topic_for_valid_partition() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let topic = "contract.multi";
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let producer = producer(&bootstrap);
+
+    let (partition, offset) = producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p2")
+                .key("key")
+                .partition(2),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!((partition, offset), (2, 0));
+
+    let metadata_consumer = base_consumer(&bootstrap, "contract-metadata");
+    let metadata = metadata_consumer
+        .fetch_metadata(Some(topic), Duration::from_secs(5))
+        .unwrap();
+    let topic_meta = metadata
+        .topics()
+        .iter()
+        .find(|entry| entry.name() == topic)
+        .unwrap();
+    assert_eq!(topic_meta.partitions().len(), 3);
+    assert_eq!(topic_meta.partitions()[0].id(), 0);
+    assert_eq!(topic_meta.partitions()[1].id(), 1);
+    assert_eq!(topic_meta.partitions()[2].id(), 2);
+
+    let direct = base_consumer(&bootstrap, "contract-p2-direct");
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(topic, 2, Offset::Beginning)
+        .unwrap();
+    direct.assign(&tpl).unwrap();
+    let message = poll_for_message(&direct, Duration::from_secs(5));
+    assert_eq!(message.payload(), Some(&b"p2"[..]));
+
+    stop_broker(handle).await;
+}
+
 #[test]
 fn store_contract_replays_duplicate_retry_without_double_append() {
     let dir = tempdir().unwrap();
@@ -114,12 +159,43 @@ fn store_contract_replays_duplicate_retry_without_double_append() {
     let producer = store.init_producer(10).unwrap();
     let records = vec![record(&producer, 0, 10, b"value")];
 
-    let first = store.append_records("retry.events", &records, 10).unwrap();
-    let duplicate = store.append_records("retry.events", &records, 20).unwrap();
-    let fetched = store.fetch_records("retry.events", 0, 10).unwrap();
+    let first = store
+        .append_records("retry.events", 0, &records, 10)
+        .unwrap();
+    let duplicate = store
+        .append_records("retry.events", 0, &records, 20)
+        .unwrap();
+    let fetched = store.fetch_records("retry.events", 0, 0, 10).unwrap();
 
     assert_eq!(first, duplicate);
     assert_eq!(fetched.records.len(), 1);
+}
+
+#[test]
+fn store_contract_keeps_partition_offsets_independent() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("multi.events", 3, 10).unwrap();
+    let producer = store.init_producer(10).unwrap();
+
+    store
+        .append_records("multi.events", 1, &[record(&producer, 0, 10, b"p1")], 10)
+        .unwrap();
+    store
+        .append_records("multi.events", 2, &[record(&producer, 1, 20, b"p2")], 20)
+        .unwrap();
+
+    let (_, latest_zero) = store.list_offsets("multi.events", 0).unwrap();
+    let (_, latest_one) = store.list_offsets("multi.events", 1).unwrap();
+    let (_, latest_two) = store.list_offsets("multi.events", 2).unwrap();
+    let fetch_one = store.fetch_records("multi.events", 1, 0, 10).unwrap();
+    let fetch_two = store.fetch_records("multi.events", 2, 0, 10).unwrap();
+
+    assert_eq!(latest_zero.offset, 0);
+    assert_eq!(latest_one.offset, 1);
+    assert_eq!(latest_two.offset, 1);
+    assert_eq!(fetch_one.records[0].value.as_deref(), Some(&b"p1"[..]));
+    assert_eq!(fetch_two.records[0].value.as_deref(), Some(&b"p2"[..]));
 }
 
 #[test]
@@ -131,6 +207,7 @@ fn store_contract_rejects_stale_producer_epoch() {
     store
         .append_records(
             "epoch.events",
+            0,
             &[BrokerRecord {
                 producer_epoch: producer.producer_epoch + 1,
                 ..record(&producer, 0, 10, b"value")
@@ -141,6 +218,7 @@ fn store_contract_rejects_stale_producer_epoch() {
 
     let stale = store.append_records(
         "epoch.events",
+        0,
         &[BrokerRecord {
             producer_epoch: producer.producer_epoch,
             sequence: 1,
@@ -160,7 +238,12 @@ fn store_contract_recovers_torn_tail_on_reopen() {
     let store = FileStore::open(dir.path()).unwrap();
     let producer = store.init_producer(10).unwrap();
     store
-        .append_records("recover.events", &[record(&producer, 0, 10, b"value")], 10)
+        .append_records(
+            "recover.events",
+            0,
+            &[record(&producer, 0, 10, b"value")],
+            10,
+        )
         .unwrap();
 
     std::fs::OpenOptions::new()
@@ -174,7 +257,7 @@ fn store_contract_recovers_torn_tail_on_reopen() {
         .unwrap();
 
     let reopened = FileStore::open(dir.path()).unwrap();
-    let fetched = reopened.fetch_records("recover.events", 0, 10).unwrap();
+    let fetched = reopened.fetch_records("recover.events", 0, 0, 10).unwrap();
     assert_eq!(fetched.records.len(), 1);
     assert_eq!(fetched.records[0].value.as_deref(), Some(&b"value"[..]));
 }
@@ -214,6 +297,13 @@ async fn start_broker() -> (
 async fn start_broker_in_dir(
     tempdir: &tempfile::TempDir,
 ) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    start_broker_in_dir_with_partitions(tempdir, 1).await
+}
+
+async fn start_broker_in_dir_with_partitions(
+    tempdir: &tempfile::TempDir,
+    default_partitions: i32,
+) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let port = free_port();
     let config = Config {
         broker: BrokerConfig {
@@ -223,6 +313,7 @@ async fn start_broker_in_dir(
         },
         storage: StorageConfig {
             data_dir: tempdir.path().join("kafkalite-data"),
+            default_partitions,
         },
     };
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());

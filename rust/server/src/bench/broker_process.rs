@@ -29,6 +29,7 @@ impl BrokerProcess {
             },
             storage: StorageConfig {
                 data_dir: root.join("data"),
+                ..StorageConfig::default()
             },
         };
         let config_path = root.join("bench.toml");
