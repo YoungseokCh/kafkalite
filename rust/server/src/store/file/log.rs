@@ -29,7 +29,7 @@ impl RecordLog {
     }
 
     pub fn ensure_topic(&self, topic: &str) -> Result<()> {
-        fs::create_dir_all(self.topic_dir(topic))?;
+        fs::create_dir_all(self.partition_dir(topic))?;
         if !self.segment_path(topic).exists() {
             File::create(self.segment_path(topic))?;
         }
@@ -247,16 +247,23 @@ impl RecordLog {
         self.root.join("topics").join(topic)
     }
 
+    fn partition_dir(&self, topic: &str) -> PathBuf {
+        self.topic_dir(topic)
+            .join("partitions")
+            .join(crate::store::DEFAULT_PARTITION.to_string())
+    }
+
     fn segment_path(&self, topic: &str) -> PathBuf {
-        self.topic_dir(topic).join("00000000000000000000.log")
+        self.partition_dir(topic).join("00000000000000000000.log")
     }
 
     fn index_path(&self, topic: &str) -> PathBuf {
-        self.topic_dir(topic).join("00000000000000000000.index")
+        self.partition_dir(topic).join("00000000000000000000.index")
     }
 
     fn time_index_path(&self, topic: &str) -> PathBuf {
-        self.topic_dir(topic).join("00000000000000000000.timeindex")
+        self.partition_dir(topic)
+            .join("00000000000000000000.timeindex")
     }
 }
 

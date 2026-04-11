@@ -264,7 +264,7 @@ fn truncated_tail_is_recovered_on_restart() {
         .append(true)
         .open(
             dir.path()
-                .join("topics/recover.events/00000000000000000000.log"),
+                .join("topics/recover.events/partitions/0/00000000000000000000.log"),
         )
         .unwrap()
         .write_all(b"partial-tail")

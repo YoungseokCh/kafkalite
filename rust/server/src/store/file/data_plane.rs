@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 
-use crate::store::{BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata};
+use crate::store::{
+    BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata, DEFAULT_PARTITION,
+};
 
-use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
+use super::state::{
+    PartitionState, ProducerSequenceState, ProducerState, StateJournal, TopicState,
+};
 
 pub struct DataPlaneState {
-    topics: BTreeMap<String, TopicState>,
-    producers: ProducerState,
+    catalog: TopicCatalog,
+    next_producer_id: i64,
     journal: StateJournal,
 }
 
@@ -17,9 +21,26 @@ pub enum AppendDecision {
 
 pub struct PreparedAppend {
     pub topic: String,
+    pub partition: i32,
     pub base_offset: i64,
     pub last_offset: i64,
     pub records: Vec<BrokerRecord>,
+}
+
+struct TopicCatalog {
+    topics: BTreeMap<String, TopicRuntime>,
+}
+
+struct TopicRuntime {
+    name: String,
+    partitions: BTreeMap<i32, PartitionRuntime>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+struct PartitionRuntime {
+    state: PartitionState,
+    producer_sequences: BTreeMap<i64, ProducerSequenceState>,
 }
 
 impl DataPlaneState {
@@ -29,8 +50,8 @@ impl DataPlaneState {
         journal: StateJournal,
     ) -> Self {
         Self {
-            topics,
-            producers,
+            catalog: TopicCatalog::from_persisted(topics, &producers.sequences),
+            next_producer_id: producers.next_producer_id,
             journal,
         }
     }
@@ -39,13 +60,14 @@ impl DataPlaneState {
         if let Some(requested) = topics {
             return requested
                 .iter()
-                .filter(|topic| self.topics.contains_key(*topic))
+                .filter(|topic| self.catalog.topics.contains_key(*topic))
                 .map(|topic| TopicMetadata {
                     name: topic.clone(),
                 })
                 .collect();
         }
-        self.topics
+        self.catalog
+            .topics
             .keys()
             .cloned()
             .map(|name| TopicMetadata { name })
@@ -53,16 +75,16 @@ impl DataPlaneState {
     }
 
     pub fn ensure_topic(&mut self, topic: &str, now_ms: i64) -> Result<()> {
-        self.ensure_topic_state(topic, now_ms);
+        self.ensure_topic_runtime(topic, now_ms);
         self.persist_topics()
     }
 
     pub fn init_producer(&mut self, now_ms: i64) -> Result<ProducerSession> {
         let session = ProducerSession {
-            producer_id: self.producers.next_producer_id,
+            producer_id: self.next_producer_id,
             producer_epoch: 0,
         };
-        self.producers.next_producer_id += 1;
+        self.next_producer_id += 1;
         self.persist_producers(now_ms)?;
         Ok(session)
     }
@@ -73,11 +95,13 @@ impl DataPlaneState {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<AppendDecision> {
+        let next_producer_id = self.next_producer_id;
+        let partition = self.ensure_partition_runtime(topic, DEFAULT_PARTITION, now_ms);
         let batch = ProducerBatchInfo::from_records(records);
         if let Some(batch) = batch.as_ref() {
-            validate_producer_state(&self.producers, topic, batch)?;
+            validate_producer_state(next_producer_id, partition.producer_sequences_ref(), batch)?;
             if let Some((base_offset, last_offset)) =
-                duplicate_append_result(&self.producers, topic, batch)
+                duplicate_append_result(partition.producer_sequences_ref(), batch)
             {
                 return Ok(AppendDecision::Duplicate {
                     base_offset,
@@ -86,7 +110,7 @@ impl DataPlaneState {
             }
         }
 
-        let base_offset = self.ensure_topic_state(topic, now_ms).next_offset;
+        let base_offset = partition.state.next_offset;
         let mut appended = Vec::new();
         for (index, record) in records.iter().enumerate() {
             appended.push(BrokerRecord {
@@ -106,6 +130,7 @@ impl DataPlaneState {
             .unwrap_or(base_offset);
         Ok(AppendDecision::Append(PreparedAppend {
             topic: topic.to_string(),
+            partition: DEFAULT_PARTITION,
             base_offset,
             last_offset,
             records: appended,
@@ -113,12 +138,11 @@ impl DataPlaneState {
     }
 
     pub fn finish_append(&mut self, prepared: &PreparedAppend, now_ms: i64) -> Result<()> {
-        let topic_state = self.topics.get_mut(&prepared.topic).expect("topic exists");
-        topic_state.next_offset = prepared.last_offset + 1;
-        topic_state.updated_at_unix_ms = now_ms;
+        let partition = self.ensure_partition_runtime(&prepared.topic, prepared.partition, now_ms);
+        partition.state.next_offset = prepared.last_offset + 1;
         for record in &prepared.records {
-            self.producers.sequences.insert(
-                producer_key(record.producer_id, &prepared.topic),
+            partition.producer_sequences.insert(
+                record.producer_id,
                 ProducerSequenceState {
                     producer_epoch: record.producer_epoch,
                     first_sequence: prepared
@@ -132,14 +156,19 @@ impl DataPlaneState {
                 },
             );
         }
+        let topic = self
+            .catalog
+            .topics
+            .get_mut(&prepared.topic)
+            .expect("topic exists");
+        topic.updated_at_unix_ms = now_ms;
         self.persist_topics()?;
         self.persist_producers(now_ms)
     }
 
     pub fn high_watermark(&self, topic: &str) -> i64 {
-        self.topics
-            .get(topic)
-            .map(|topic| topic.next_offset)
+        self.partition_state(topic)
+            .map(|partition| partition.state.next_offset)
             .unwrap_or(0)
     }
 
@@ -147,38 +176,155 @@ impl DataPlaneState {
         self.high_watermark(topic)
     }
 
-    fn ensure_topic_state(&mut self, topic: &str, now_ms: i64) -> &mut TopicState {
-        self.topics
+    fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
+        self.catalog
+            .topics
             .entry(topic.to_string())
-            .or_insert_with(|| TopicState::new(topic, now_ms))
+            .or_insert_with(|| TopicRuntime {
+                name: topic.to_string(),
+                partitions: BTreeMap::from([(DEFAULT_PARTITION, PartitionRuntime::new(now_ms))]),
+                created_at_unix_ms: now_ms,
+                updated_at_unix_ms: now_ms,
+            })
+    }
+
+    fn ensure_partition_runtime(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+    ) -> &mut PartitionRuntime {
+        self.ensure_topic_runtime(topic, now_ms)
+            .partitions
+            .entry(partition)
+            .or_insert_with(|| PartitionRuntime::new(now_ms))
+    }
+
+    fn partition_state(&self, topic: &str) -> Option<&PartitionRuntime> {
+        self.catalog
+            .topics
+            .get(topic)
+            .and_then(|topic| topic.partitions.get(&DEFAULT_PARTITION))
     }
 
     fn persist_topics(&self) -> Result<()> {
-        self.journal.append_topics(&self.topics)
+        self.journal.append_topics(&self.catalog.to_persisted())
     }
 
     fn persist_producers(&self, now_ms: i64) -> Result<()> {
-        self.journal.append_producer_state(&self.producers, now_ms)
+        self.journal.append_producer_state(
+            &self.catalog.to_producer_state(self.next_producer_id),
+            now_ms,
+        )
+    }
+}
+
+impl TopicCatalog {
+    fn from_persisted(
+        topics: BTreeMap<String, TopicState>,
+        producer_sequences: &BTreeMap<String, ProducerSequenceState>,
+    ) -> Self {
+        let mut runtimes = BTreeMap::new();
+        for (name, topic) in topics {
+            let mut partitions = BTreeMap::new();
+            for (partition_id, partition_state) in topic.partitions {
+                let prefix = format!("{name}:{partition_id}:");
+                let sequences = producer_sequences
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        key.strip_prefix(&prefix)
+                            .and_then(|id| id.parse::<i64>().ok())
+                            .map(|producer_id| (producer_id, value.clone()))
+                    })
+                    .collect();
+                partitions.insert(
+                    partition_id,
+                    PartitionRuntime {
+                        state: partition_state,
+                        producer_sequences: sequences,
+                    },
+                );
+            }
+            runtimes.insert(
+                name.clone(),
+                TopicRuntime {
+                    name,
+                    partitions,
+                    created_at_unix_ms: topic.created_at_unix_ms,
+                    updated_at_unix_ms: topic.updated_at_unix_ms,
+                },
+            );
+        }
+        Self { topics: runtimes }
+    }
+
+    fn to_persisted(&self) -> BTreeMap<String, TopicState> {
+        self.topics
+            .iter()
+            .map(|(name, topic)| {
+                (
+                    name.clone(),
+                    TopicState {
+                        name: topic.name.clone(),
+                        partitions: topic
+                            .partitions
+                            .iter()
+                            .map(|(partition_id, runtime)| (*partition_id, runtime.state.clone()))
+                            .collect(),
+                        created_at_unix_ms: topic.created_at_unix_ms,
+                        updated_at_unix_ms: topic.updated_at_unix_ms,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn to_producer_state(&self, next_producer_id: i64) -> ProducerState {
+        let mut sequences = BTreeMap::new();
+        for (topic_name, topic) in &self.topics {
+            for (partition_id, runtime) in &topic.partitions {
+                for (producer_id, state) in &runtime.producer_sequences {
+                    sequences.insert(
+                        format!("{topic_name}:{partition_id}:{producer_id}"),
+                        state.clone(),
+                    );
+                }
+            }
+        }
+        ProducerState {
+            next_producer_id,
+            sequences,
+        }
+    }
+}
+
+impl PartitionRuntime {
+    fn new(now_ms: i64) -> Self {
+        Self {
+            state: PartitionState::new(now_ms),
+            producer_sequences: BTreeMap::new(),
+        }
+    }
+
+    fn producer_sequences_ref(&self) -> &BTreeMap<i64, ProducerSequenceState> {
+        &self.producer_sequences
     }
 }
 
 fn validate_producer_state(
-    producers: &ProducerState,
-    topic: &str,
+    next_producer_id: i64,
+    producer_sequences: &BTreeMap<i64, ProducerSequenceState>,
     batch: &ProducerBatchInfo,
 ) -> Result<()> {
     if batch.producer_id < 0 {
         return Ok(());
     }
-    if batch.producer_id >= producers.next_producer_id {
+    if batch.producer_id >= next_producer_id {
         return Err(StoreError::UnknownProducerId {
             producer_id: batch.producer_id,
         });
     }
-    if let Some(sequence) = producers
-        .sequences
-        .get(&producer_key(batch.producer_id, topic))
-    {
+    if let Some(sequence) = producer_sequences.get(&batch.producer_id) {
         if batch.producer_epoch < sequence.producer_epoch {
             return Err(StoreError::StaleProducerEpoch {
                 producer_id: batch.producer_id,
@@ -206,13 +352,10 @@ fn validate_producer_state(
 }
 
 fn duplicate_append_result(
-    producers: &ProducerState,
-    topic: &str,
+    producer_sequences: &BTreeMap<i64, ProducerSequenceState>,
     batch: &ProducerBatchInfo,
 ) -> Option<(i64, i64)> {
-    let state = producers
-        .sequences
-        .get(&producer_key(batch.producer_id, topic))?;
+    let state = producer_sequences.get(&batch.producer_id)?;
     if batch.producer_epoch == state.producer_epoch
         && batch.first_sequence == state.first_sequence
         && batch.last_sequence == state.last_sequence
@@ -221,10 +364,6 @@ fn duplicate_append_result(
     } else {
         None
     }
-}
-
-fn producer_key(producer_id: i64, topic: &str) -> String {
-    format!("{producer_id}:{topic}")
 }
 
 struct ProducerBatchInfo {

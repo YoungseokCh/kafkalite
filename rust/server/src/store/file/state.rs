@@ -12,22 +12,24 @@ const JOURNAL_MAGIC: &[u8; 4] = b"KFSJ";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicState {
     pub name: String,
-    pub next_offset: i64,
-    pub log_start_offset: i64,
-    pub active_segment_base_offset: i64,
+    pub partitions: BTreeMap<i32, PartitionState>,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
 
-impl TopicState {
-    pub fn new(name: &str, now_ms: i64) -> Self {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionState {
+    pub next_offset: i64,
+    pub log_start_offset: i64,
+    pub active_segment_base_offset: i64,
+}
+
+impl PartitionState {
+    pub fn new(_now_ms: i64) -> Self {
         Self {
-            name: name.to_string(),
             next_offset: 0,
             log_start_offset: 0,
             active_segment_base_offset: 0,
-            created_at_unix_ms: now_ms,
-            updated_at_unix_ms: now_ms,
         }
     }
 }
