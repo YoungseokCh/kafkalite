@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Result, StoreError};
 
+use super::policy::DEFAULT_POLICY;
+
 const JOURNAL_MAGIC: &[u8; 4] = b"KFSJ";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,7 +154,10 @@ impl StateJournal {
     }
 
     pub fn append_offsets(&self, offsets: &BTreeMap<String, i64>) -> Result<()> {
-        self.append(JournalEntry::Offsets(offsets.clone()), true)
+        self.append(
+            JournalEntry::Offsets(offsets.clone()),
+            DEFAULT_POLICY.sync_offset_journal,
+        )
     }
 
     fn append(&self, entry: JournalEntry, sync: bool) -> Result<()> {

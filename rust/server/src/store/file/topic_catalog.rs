@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::store::DEFAULT_PARTITION;
 
+use super::{TopicPartitionSummary, TopicSummary};
+
 use super::state::{PartitionState, ProducerSequenceState, ProducerState, TopicState};
 
 pub struct TopicCatalog {
@@ -65,6 +67,29 @@ impl TopicCatalog {
 
     pub fn topic_names(&self) -> impl Iterator<Item = String> + '_ {
         self.topics.keys().cloned()
+    }
+
+    pub fn topic_count(&self) -> usize {
+        self.topics.len()
+    }
+
+    pub fn describe_topic(&self, topic: &str) -> Option<TopicSummary> {
+        let topic = self.topics.get(topic)?;
+        let partitions = topic
+            .partitions
+            .iter()
+            .map(|(partition, runtime)| TopicPartitionSummary {
+                partition: *partition,
+                next_offset: runtime.state.next_offset,
+                log_start_offset: runtime.state.log_start_offset,
+                active_segment_base_offset: runtime.state.active_segment_base_offset,
+            })
+            .collect::<Vec<_>>();
+        Some(TopicSummary {
+            name: topic.name.clone(),
+            partition_count: partitions.len(),
+            partitions,
+        })
     }
 
     pub fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {

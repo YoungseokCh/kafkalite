@@ -236,6 +236,14 @@ impl ControlPlaneState {
             .copied()
     }
 
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn committed_offset_count(&self) -> usize {
+        self.offsets.len()
+    }
+
     fn persist_groups(&self) -> Result<()> {
         self.journal.append_groups(&self.groups)
     }

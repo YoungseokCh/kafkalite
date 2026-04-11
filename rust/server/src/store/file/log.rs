@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{BrokerRecord, Result, StoreError};
 
+use super::policy::DEFAULT_POLICY;
+
 const BATCH_MAGIC: &[u8; 4] = b"KFLG";
-const LOG_SYNC_INTERVAL: u64 = 64;
-const INDEX_STRIDE: i64 = 16;
 
 #[derive(Debug)]
 pub struct RecordLog {
@@ -56,7 +56,7 @@ impl RecordLog {
             .append_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if append_number % LOG_SYNC_INTERVAL == 0 {
+        if append_number % DEFAULT_POLICY.log_sync_interval == 0 {
             segment.sync_data()?;
         }
 
@@ -197,12 +197,12 @@ impl RecordLog {
         if safe_len < file_len {
             file.set_len(safe_len)?;
             file.sync_all()?;
-            self.rebuild_indexes(topic)?;
+            self.rebuild_indexes_for_topic(topic)?;
         }
         Ok(())
     }
 
-    fn rebuild_indexes(&self, topic: &str) -> Result<()> {
+    pub fn rebuild_indexes_for_topic(&self, topic: &str) -> Result<()> {
         if !self.segment_path(topic).exists() {
             return Ok(());
         }
@@ -382,7 +382,7 @@ fn write_index_entry(writer: &mut File, entry: &IndexEntry) -> Result<()> {
 }
 
 fn should_index_batch(batch: &StoredBatch) -> bool {
-    batch.base_offset == 0 || batch.base_offset % INDEX_STRIDE == 0
+    batch.base_offset == 0 || batch.base_offset % DEFAULT_POLICY.index_stride == 0
 }
 
 fn read_index_entry(reader: &mut File) -> Result<Option<IndexEntry>> {

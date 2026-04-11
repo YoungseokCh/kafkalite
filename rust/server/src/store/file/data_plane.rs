@@ -6,6 +6,7 @@ use crate::store::{
 
 use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
 use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
+use super::TopicSummary;
 
 pub struct DataPlaneState {
     catalog: TopicCatalog,
@@ -151,6 +152,14 @@ impl DataPlaneState {
 
     pub fn latest_offset(&self, topic: &str) -> i64 {
         self.high_watermark(topic)
+    }
+
+    pub fn topic_count(&self) -> usize {
+        self.catalog.topic_count()
+    }
+
+    pub fn describe_topic(&self, topic: &str) -> Option<TopicSummary> {
+        self.catalog.describe_topic(topic)
     }
 
     fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
