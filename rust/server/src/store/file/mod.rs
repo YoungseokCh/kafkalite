@@ -2,6 +2,7 @@ mod control_plane;
 mod data_plane;
 mod log;
 mod state;
+mod topic_catalog;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

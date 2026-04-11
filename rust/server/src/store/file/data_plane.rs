@@ -4,9 +4,8 @@ use crate::store::{
     BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata, DEFAULT_PARTITION,
 };
 
-use super::state::{
-    PartitionState, ProducerSequenceState, ProducerState, StateJournal, TopicState,
-};
+use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
+use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
 
 pub struct DataPlaneState {
     catalog: TopicCatalog,
@@ -27,22 +26,6 @@ pub struct PreparedAppend {
     pub records: Vec<BrokerRecord>,
 }
 
-struct TopicCatalog {
-    topics: BTreeMap<String, TopicRuntime>,
-}
-
-struct TopicRuntime {
-    name: String,
-    partitions: BTreeMap<i32, PartitionRuntime>,
-    created_at_unix_ms: i64,
-    updated_at_unix_ms: i64,
-}
-
-struct PartitionRuntime {
-    state: PartitionState,
-    producer_sequences: BTreeMap<i64, ProducerSequenceState>,
-}
-
 impl DataPlaneState {
     pub fn new(
         topics: BTreeMap<String, TopicState>,
@@ -60,16 +43,14 @@ impl DataPlaneState {
         if let Some(requested) = topics {
             return requested
                 .iter()
-                .filter(|topic| self.catalog.topics.contains_key(*topic))
+                .filter(|topic| self.catalog.contains(topic))
                 .map(|topic| TopicMetadata {
                     name: topic.clone(),
                 })
                 .collect();
         }
         self.catalog
-            .topics
-            .keys()
-            .cloned()
+            .topic_names()
             .map(|name| TopicMetadata { name })
             .collect()
     }
@@ -156,11 +137,7 @@ impl DataPlaneState {
                 },
             );
         }
-        let topic = self
-            .catalog
-            .topics
-            .get_mut(&prepared.topic)
-            .expect("topic exists");
+        let topic = self.catalog.topic_runtime_mut(&prepared.topic, now_ms);
         topic.updated_at_unix_ms = now_ms;
         self.persist_topics()?;
         self.persist_producers(now_ms)
@@ -177,15 +154,7 @@ impl DataPlaneState {
     }
 
     fn ensure_topic_runtime(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
-        self.catalog
-            .topics
-            .entry(topic.to_string())
-            .or_insert_with(|| TopicRuntime {
-                name: topic.to_string(),
-                partitions: BTreeMap::from([(DEFAULT_PARTITION, PartitionRuntime::new(now_ms))]),
-                created_at_unix_ms: now_ms,
-                updated_at_unix_ms: now_ms,
-            })
+        self.catalog.ensure_topic_runtime(topic, now_ms)
     }
 
     fn ensure_partition_runtime(
@@ -194,17 +163,11 @@ impl DataPlaneState {
         partition: i32,
         now_ms: i64,
     ) -> &mut PartitionRuntime {
-        self.ensure_topic_runtime(topic, now_ms)
-            .partitions
-            .entry(partition)
-            .or_insert_with(|| PartitionRuntime::new(now_ms))
+        self.catalog.partition_state_mut(topic, partition, now_ms)
     }
 
     fn partition_state(&self, topic: &str) -> Option<&PartitionRuntime> {
-        self.catalog
-            .topics
-            .get(topic)
-            .and_then(|topic| topic.partitions.get(&DEFAULT_PARTITION))
+        self.catalog.partition_state(topic, DEFAULT_PARTITION)
     }
 
     fn persist_topics(&self) -> Result<()> {
@@ -216,98 +179,6 @@ impl DataPlaneState {
             &self.catalog.to_producer_state(self.next_producer_id),
             now_ms,
         )
-    }
-}
-
-impl TopicCatalog {
-    fn from_persisted(
-        topics: BTreeMap<String, TopicState>,
-        producer_sequences: &BTreeMap<String, ProducerSequenceState>,
-    ) -> Self {
-        let mut runtimes = BTreeMap::new();
-        for (name, topic) in topics {
-            let mut partitions = BTreeMap::new();
-            for (partition_id, partition_state) in topic.partitions {
-                let prefix = format!("{name}:{partition_id}:");
-                let sequences = producer_sequences
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        key.strip_prefix(&prefix)
-                            .and_then(|id| id.parse::<i64>().ok())
-                            .map(|producer_id| (producer_id, value.clone()))
-                    })
-                    .collect();
-                partitions.insert(
-                    partition_id,
-                    PartitionRuntime {
-                        state: partition_state,
-                        producer_sequences: sequences,
-                    },
-                );
-            }
-            runtimes.insert(
-                name.clone(),
-                TopicRuntime {
-                    name,
-                    partitions,
-                    created_at_unix_ms: topic.created_at_unix_ms,
-                    updated_at_unix_ms: topic.updated_at_unix_ms,
-                },
-            );
-        }
-        Self { topics: runtimes }
-    }
-
-    fn to_persisted(&self) -> BTreeMap<String, TopicState> {
-        self.topics
-            .iter()
-            .map(|(name, topic)| {
-                (
-                    name.clone(),
-                    TopicState {
-                        name: topic.name.clone(),
-                        partitions: topic
-                            .partitions
-                            .iter()
-                            .map(|(partition_id, runtime)| (*partition_id, runtime.state.clone()))
-                            .collect(),
-                        created_at_unix_ms: topic.created_at_unix_ms,
-                        updated_at_unix_ms: topic.updated_at_unix_ms,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn to_producer_state(&self, next_producer_id: i64) -> ProducerState {
-        let mut sequences = BTreeMap::new();
-        for (topic_name, topic) in &self.topics {
-            for (partition_id, runtime) in &topic.partitions {
-                for (producer_id, state) in &runtime.producer_sequences {
-                    sequences.insert(
-                        format!("{topic_name}:{partition_id}:{producer_id}"),
-                        state.clone(),
-                    );
-                }
-            }
-        }
-        ProducerState {
-            next_producer_id,
-            sequences,
-        }
-    }
-}
-
-impl PartitionRuntime {
-    fn new(now_ms: i64) -> Self {
-        Self {
-            state: PartitionState::new(now_ms),
-            producer_sequences: BTreeMap::new(),
-        }
-    }
-
-    fn producer_sequences_ref(&self) -> &BTreeMap<i64, ProducerSequenceState> {
-        &self.producer_sequences
     }
 }
 

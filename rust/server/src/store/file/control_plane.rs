@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 
-use crate::store::{GroupJoinResult, GroupMember, Result, StoreError, SyncGroupResult};
+use crate::store::{
+    GroupJoinResult, GroupMember, Result, StoreError, SyncGroupResult, DEFAULT_PARTITION,
+};
 
 use super::state::{GroupMemberState, GroupState, StateJournal};
 
 pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
-    offsets: BTreeMap<String, i64>,
+    offsets: BTreeMap<OffsetKey, i64>,
     journal: StateJournal,
 }
 
@@ -20,7 +22,10 @@ impl ControlPlaneState {
     ) -> Self {
         Self {
             groups,
-            offsets,
+            offsets: offsets
+                .into_iter()
+                .map(|(key, value)| (OffsetKey::from_serialized(&key), value))
+                .collect(),
             journal,
         }
     }
@@ -217,14 +222,18 @@ impl ControlPlaneState {
         if let Some(member) = group.members.get_mut(member_id) {
             member.updated_at_unix_ms = now_ms;
         }
-        self.offsets
-            .insert(offset_key(group_id, topic), next_offset);
+        self.offsets.insert(
+            OffsetKey::new(group_id, topic, DEFAULT_PARTITION),
+            next_offset,
+        );
         self.persist_groups()?;
         self.persist_offsets()
     }
 
     pub fn fetch_offset(&self, group_id: &str, topic: &str) -> Option<i64> {
-        self.offsets.get(&offset_key(group_id, topic)).copied()
+        self.offsets
+            .get(&OffsetKey::new(group_id, topic, DEFAULT_PARTITION))
+            .copied()
     }
 
     fn persist_groups(&self) -> Result<()> {
@@ -232,7 +241,48 @@ impl ControlPlaneState {
     }
 
     fn persist_offsets(&self) -> Result<()> {
-        self.journal.append_offsets(&self.offsets)
+        let serialized = self
+            .offsets
+            .iter()
+            .map(|(key, value)| (key.serialize(), *value))
+            .collect();
+        self.journal.append_offsets(&serialized)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OffsetKey {
+    group_id: String,
+    topic: String,
+    partition: i32,
+}
+
+impl OffsetKey {
+    fn new(group_id: &str, topic: &str, partition: i32) -> Self {
+        Self {
+            group_id: group_id.to_string(),
+            topic: topic.to_string(),
+            partition,
+        }
+    }
+
+    fn from_serialized(value: &str) -> Self {
+        let mut parts = value.splitn(3, ':');
+        let group_id = parts.next().unwrap_or_default().to_string();
+        let topic = parts.next().unwrap_or_default().to_string();
+        let partition = parts
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_PARTITION);
+        Self {
+            group_id,
+            topic,
+            partition,
+        }
+    }
+
+    fn serialize(&self) -> String {
+        format!("{}:{}:{}", self.group_id, self.topic, self.partition)
     }
 }
 
@@ -357,8 +407,4 @@ fn encode_assignment(topics: &[String]) -> Result<Vec<u8>> {
         .encode(&mut bytes, 3)
         .map_err(|err| StoreError::Protocol(err.to_string()))?;
     Ok(bytes.to_vec())
-}
-
-fn offset_key(group_id: &str, topic: &str) -> String {
-    format!("{group_id}:{topic}:0")
 }
