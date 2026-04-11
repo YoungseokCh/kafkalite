@@ -66,7 +66,7 @@ make test-python
 make test-differential
 ```
 
-- `make test` runs the Rust server/client suites
+- `make test` runs the Rust server/client suites, including the fast local `tests/contract.rs` contract layer
 - `make test-python` provisions a temporary virtualenv and runs the Python compatibility smoke test
 - `make test-differential` starts a temporary single-node Kafka container and compares supported roundtrips against the local broker
 
@@ -86,29 +86,42 @@ make bench-compare
 ```
 
 - benchmark outputs are written under `.benchmarks/`
+- `make bench-runtime` and `make bench` now include the mixed control-plane/data-plane scenario `bench.mixed.handoff`
 - `make bench-baseline` promotes the latest run to the comparison baseline
 - `make bench-compare` compares the current baseline and latest benchmark JSON reports
 
+## Store inspection and repair
+
+From the repository root:
+
+```bash
+cargo run --manifest-path rust/server/Cargo.toml --bin store_tool -- --data-dir ./data storage-summary
+cargo run --manifest-path rust/server/Cargo.toml --bin store_tool -- --data-dir ./data topic-summary my-topic
+cargo run --manifest-path rust/server/Cargo.toml --bin store_tool -- --data-dir ./data rebuild-indexes my-topic
+```
+
+- `storage-summary` prints aggregate topic/group/byte totals
+- `topic-summary` prints partition offsets for one topic
+- `rebuild-indexes` recreates `.index` and `.timeindex` files from the `.log` data for a topic
+
 ## Current benchmark snapshot
 
-Latest full benchmark run recorded from `.benchmarks/latest/result.json`:
+Latest recorded benchmark snapshot from `.benchmarks/latest/result.json`:
 
-- git sha: `1864f78`
-- release binary size: `5,092,096` bytes
-- package size: `44,124` bytes
+- git sha: `1278842`
+- release binary size: `5,225,744` bytes
+- package size: `49,944` bytes
 - host: `linux/x86_64`
+- run shape: `make bench-quick`
 
 | scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
 |---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 47,635 ms | 20.99 msgs/s | 5,808 KB | 580,999 B | log 185,000 / index 1,764 / timeindex 1,512 / state journal 392,723 |
-| `bench.produce.medium` | 500 msgs × 1,024B | 24,099 ms | 20.75 msgs/s | 5,804 KB | 753,888 B | log 554,500 / index 896 / timeindex 768 / state journal 197,724 |
-| `bench.roundtrip` | 200 msgs × 512B | 10,557 ms | 18.95 msgs/s | 5,924 KB | 195,990 B | log 119,400 / index 364 / timeindex 312 / state journal 75,914 |
-| `bench.fetch.tail` | 500 msgs × 512B | 85 ms | 5860.29 msgs/s | 5,780 KB | 491,880 B | log 298,500 / index 896 / timeindex 768 / state journal 191,716 |
-| `bench.commit.resume` | 4 msgs × 256B | 1,539 ms | 2.60 msgs/s | 5,908 KB | 8,631 B | log 1,364 / index 28 / timeindex 24 / state journal 7,215 |
+| `bench.produce.small` | 1,000 msgs × 100B | 47,507 ms | 21.05 msgs/s | 5,828 KB | 369,895 B | log 185,000 / index 1,764 / timeindex 1,512 / state journal 181,619 |
 
-For reproducibility, rerun:
+For reproducibility, rerun either:
 
 ```bash
+make bench-quick
 make bench
 ```
 

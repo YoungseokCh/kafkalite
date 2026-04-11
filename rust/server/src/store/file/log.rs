@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::{BrokerRecord, Result, StoreError};
 
 use super::policy::DEFAULT_POLICY;
+use super::state::{PartitionState, TopicState};
 
 const BATCH_MAGIC: &[u8; 4] = b"KFLG";
 
@@ -199,6 +200,32 @@ impl RecordLog {
         Ok(())
     }
 
+    pub fn recover_topic_states(
+        &self,
+        previous: &std::collections::BTreeMap<String, TopicState>,
+    ) -> Result<std::collections::BTreeMap<String, TopicState>> {
+        let mut topics = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(self.root.join("topics"))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let topic_name = entry.file_name().to_string_lossy().to_string();
+            let mut topic = previous.get(&topic_name).cloned().unwrap_or(TopicState {
+                name: topic_name.clone(),
+                partitions: std::collections::BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            });
+            topic.name = topic_name.clone();
+            topic
+                .partitions
+                .insert(0, self.recover_partition_state(&topic_name)?);
+            topics.insert(topic_name, topic);
+        }
+        Ok(topics)
+    }
+
     pub fn rebuild_indexes_for_topic(&self, topic: &str) -> Result<()> {
         if !self.segment_path(topic).exists() {
             return Ok(());
@@ -242,6 +269,30 @@ impl RecordLog {
 
     fn topic_dir(&self, topic: &str) -> PathBuf {
         self.root.join("topics").join(topic)
+    }
+
+    fn recover_partition_state(&self, topic: &str) -> Result<PartitionState> {
+        if !self.segment_path(topic).exists() {
+            return Ok(PartitionState::new(0));
+        }
+        let mut reader = BufReader::new(File::open(self.segment_path(topic))?);
+        let mut next_offset = 0;
+        loop {
+            let mut len = [0_u8; 4];
+            if reader.read_exact(&mut len).is_err() {
+                break;
+            }
+            let payload_len = u32::from_le_bytes(len) as usize;
+            let mut payload = vec![0_u8; payload_len];
+            reader.read_exact(&mut payload)?;
+            let batch = StoredBatch::decode_binary(&payload)?;
+            next_offset = batch.last_offset + 1;
+        }
+        Ok(PartitionState {
+            next_offset,
+            log_start_offset: 0,
+            active_segment_base_offset: 0,
+        })
     }
 
     fn partition_dir(&self, topic: &str) -> PathBuf {

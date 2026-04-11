@@ -58,7 +58,7 @@ impl DataPlaneState {
 
     pub fn ensure_topic(&mut self, topic: &str, now_ms: i64) -> Result<()> {
         self.ensure_topic_runtime(topic, now_ms);
-        self.persist_topics()
+        Ok(())
     }
 
     pub fn init_producer(&mut self, now_ms: i64) -> Result<ProducerSession> {
@@ -140,7 +140,6 @@ impl DataPlaneState {
         }
         let topic = self.catalog.topic_runtime_mut(&prepared.topic, now_ms);
         topic.updated_at_unix_ms = now_ms;
-        self.persist_topics()?;
         self.persist_producers(now_ms)
     }
 
@@ -178,11 +177,6 @@ impl DataPlaneState {
     fn partition_state(&self, topic: &str) -> Option<&PartitionRuntime> {
         self.catalog.partition_state(topic, DEFAULT_PARTITION)
     }
-
-    fn persist_topics(&self) -> Result<()> {
-        self.journal.append_topics(&self.catalog.to_persisted())
-    }
-
     fn persist_producers(&self, now_ms: i64) -> Result<()> {
         self.journal.append_producer_state(
             &self.catalog.to_producer_state(self.next_producer_id),

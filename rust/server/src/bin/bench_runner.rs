@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
+use kafkalite_server::bench::mixed::run_mixed_handoff;
 use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
 use kafkalite_server::bench::scenarios::{
     ScenarioSpec, run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
@@ -95,6 +96,11 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 messages: 4,
                 payload_bytes: 256,
             },
+            ScenarioSpec {
+                name: "bench.mixed.handoff",
+                messages: 200,
+                payload_bytes: 256,
+            },
         ],
         BenchMode::Memory => vec![
             ScenarioSpec {
@@ -144,6 +150,11 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 messages: 4,
                 payload_bytes: 256,
             },
+            ScenarioSpec {
+                name: "bench.mixed.handoff",
+                messages: 200,
+                payload_bytes: 256,
+            },
         ],
     };
 
@@ -158,6 +169,8 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
             run_roundtrip(&scenario_root, &args.broker_bin, &spec).await?
         } else if spec.name.contains("commit.resume") {
             run_commit_resume(&scenario_root, &args.broker_bin, &spec).await?
+        } else if spec.name.contains("mixed.handoff") {
+            run_mixed_handoff(&scenario_root, &args.broker_bin, &spec).await?
         } else {
             run_produce_only(&scenario_root, &args.broker_bin, &spec).await?
         };

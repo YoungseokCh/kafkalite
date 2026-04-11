@@ -61,6 +61,7 @@ impl FileStore {
         let journal = StateJournal::open(&root)?;
         let mut snapshots = SnapshotSet::load(&root)?;
         journal.replay(&mut snapshots)?;
+        snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
         Ok(Self {
             root,
             logs,
@@ -289,3 +290,5 @@ impl Storage for FileStore {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_d1;

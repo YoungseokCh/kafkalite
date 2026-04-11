@@ -13,7 +13,6 @@ pub struct TopicCatalog {
 pub struct TopicRuntime {
     pub name: String,
     pub partitions: BTreeMap<i32, PartitionRuntime>,
-    pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
 
@@ -53,7 +52,6 @@ impl TopicCatalog {
                 TopicRuntime {
                     name,
                     partitions,
-                    created_at_unix_ms: topic.created_at_unix_ms,
                     updated_at_unix_ms: topic.updated_at_unix_ms,
                 },
             );
@@ -98,7 +96,6 @@ impl TopicCatalog {
             .or_insert_with(|| TopicRuntime {
                 name: topic.to_string(),
                 partitions: BTreeMap::from([(DEFAULT_PARTITION, PartitionRuntime::new(now_ms))]),
-                created_at_unix_ms: now_ms,
                 updated_at_unix_ms: now_ms,
             })
     }
@@ -124,28 +121,6 @@ impl TopicCatalog {
     pub fn topic_runtime_mut(&mut self, topic: &str, now_ms: i64) -> &mut TopicRuntime {
         self.ensure_topic_runtime(topic, now_ms)
     }
-
-    pub fn to_persisted(&self) -> BTreeMap<String, TopicState> {
-        self.topics
-            .iter()
-            .map(|(name, topic)| {
-                (
-                    name.clone(),
-                    TopicState {
-                        name: topic.name.clone(),
-                        partitions: topic
-                            .partitions
-                            .iter()
-                            .map(|(partition_id, runtime)| (*partition_id, runtime.state.clone()))
-                            .collect(),
-                        created_at_unix_ms: topic.created_at_unix_ms,
-                        updated_at_unix_ms: topic.updated_at_unix_ms,
-                    },
-                )
-            })
-            .collect()
-    }
-
     pub fn to_producer_state(&self, next_producer_id: i64) -> ProducerState {
         let mut sequences = BTreeMap::new();
         for (topic_name, topic) in &self.topics {

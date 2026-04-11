@@ -149,13 +149,6 @@ impl StateJournal {
         Ok(())
     }
 
-    pub fn append_topics(&self, topics: &BTreeMap<String, TopicState>) -> Result<()> {
-        self.append(
-            JournalEntry::Topics(topics.clone()),
-            DEFAULT_POLICY.sync_topic_journal,
-        )
-    }
-
     pub fn append_producer_state(&self, producers: &ProducerState, _now_ms: i64) -> Result<()> {
         self.append(
             JournalEntry::Producers(producers.clone()),
