@@ -1,0 +1,5 @@
+node.id=1
+listeners=PLAINTEXT://127.0.0.1:9092
+advertised.listeners=PLAINTEXT://127.0.0.1:9092
+log.dirs=./data
+num.partitions=3

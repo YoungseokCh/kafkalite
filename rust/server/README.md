@@ -6,7 +6,7 @@ Broker-owned file-log Kafka wire-protocol server.
 
 - single broker
 - many topics
-- exactly one partition per topic (`0`)
+- configurable partition count per topic via `default_partitions` (default: `1`)
 - file-log persistence
 - narrow Kafka API surface
 
@@ -28,9 +28,11 @@ Broker-owned file-log Kafka wire-protocol server.
 
 ## Behavioral notes
 
-- only partition `0` is supported; any other partition is rejected
 - metadata requests can auto-create topics when the request enables auto topic creation
-- produce requests also create topics on first successful write
+- produce requests also create topics on first successful write when the requested partition is within the configured `default_partitions` range
+- metadata advertises every configured partition for known topics
+- direct produce/fetch/list-offsets operate on any existing partition in the configured range; out-of-range partitions return `UNKNOWN_TOPIC_OR_PARTITION`
+- committed offsets are stored per `(group, topic, partition)`
 - idempotent producer support covers validated duplicate retry replay, stale epoch rejection, and unknown producer id rejection for the current single-broker flow
 - producer transactions and full multi-broker EOS semantics are out of scope
 
@@ -41,20 +43,27 @@ Broker-owned file-log Kafka wire-protocol server.
 
 ## Configuration
 
-The server reads the `[kafkalite]` section from the provided TOML file.
+The server reads a Kafka-style `.properties` file.
 
-```toml
-[kafkalite.broker]
-broker_id = 1
-host = "127.0.0.1"
-port = 9092
-advertised_host = "127.0.0.1"
-advertised_port = 9092
-cluster_id = "kafkalite-single-broker"
+See `server.properties.example` for a ready-to-copy sample.
 
-[kafkalite.storage]
-data_dir = "./data"
+Run the broker with:
+
+```bash
+cargo run --manifest-path rust/server/Cargo.toml --bin kafkalite -- --config rust/server/server.properties.example
 ```
+
+```properties
+node.id=1
+listeners=PLAINTEXT://127.0.0.1:9092
+advertised.listeners=PLAINTEXT://127.0.0.1:9092
+log.dirs=./data
+num.partitions=3
+```
+
+- `num.partitions` defaults to `1`, which preserves the single-partition topic shape unless you opt into more partitions
+- `log.dirs` currently supports exactly one directory
+- `cluster.id` is optional and overrides the default response cluster id if set
 
 ## Validation commands
 
@@ -86,7 +95,7 @@ make bench-compare
 ```
 
 - benchmark outputs are written under `.benchmarks/`
-- `make bench-runtime` and `make bench` now include the mixed control-plane/data-plane scenario `bench.mixed.handoff`
+- `make bench-runtime` and `make bench` include the multi-partition scenarios `bench.produce.multi_partition` and `bench.fetch.multi_partition` alongside `bench.mixed.handoff`
 - `make bench-baseline` promotes the latest run to the comparison baseline
 - `make bench-compare` compares the current baseline and latest benchmark JSON reports
 
@@ -108,20 +117,26 @@ cargo run --manifest-path rust/server/Cargo.toml --bin store_tool -- --data-dir 
 
 Latest recorded benchmark snapshot from `.benchmarks/latest/result.json`:
 
-- git sha: `1278842`
-- release binary size: `5,225,744` bytes
-- package size: `49,944` bytes
+- git sha: `592d416`
+- release binary size: `5,324,152` bytes
+- package size: `0` bytes
 - host: `linux/x86_64`
-- run shape: `make bench-quick`
+- run shape: `make bench-runtime`
 
-| scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
-|---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 47,507 ms | 21.05 msgs/s | 5,828 KB | 369,895 B | log 185,000 / index 1,764 / timeindex 1,512 / state journal 181,619 |
+| scenario | partitions | workload | elapsed | throughput | peak RSS | storage total |
+|---|---:|---:|---:|---:|---:|---:|
+| `bench.produce.small` | 1 | 1,000 msgs × 100B | 47,727 ms | 20.95 msgs/s | 5,884 KB | 369,895 B |
+| `bench.produce.multi_partition` | 3 | 1,000 msgs × 100B | 47,675 ms | 20.98 msgs/s | 5,992 KB | 643,973 B |
+| `bench.roundtrip` | 1 | 200 msgs × 512B | 10,484 ms | 19.08 msgs/s | 6,180 KB | 155,295 B |
+| `bench.fetch.multi_partition` | 3 | 500 msgs × 512B | 24,909 ms | 20.07 msgs/s | 5,916 KB | 522,919 B |
+| `bench.fetch.tail` | 1 | 500 msgs × 512B | 85 ms | 5861.54 msgs/s | 5,976 KB | 389,283 B |
+| `bench.commit.resume` | 1 | 4 msgs × 256B | 1,546 ms | 2.59 msgs/s | 5,944 KB | 2,231 B |
+| `bench.mixed.handoff` | 1 | 200 msgs × 256B | 11,383 ms | 17.57 msgs/s | 6,112 KB | 106,206 B |
 
 For reproducibility, rerun either:
 
 ```bash
-make bench-quick
+make bench-runtime
 make bench
 ```
 

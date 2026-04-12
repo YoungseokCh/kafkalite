@@ -18,7 +18,7 @@ pub struct BrokerProcess {
 }
 
 impl BrokerProcess {
-    pub fn start(broker_bin: &Path, root: &Path) -> Result<Self> {
+    pub fn start(broker_bin: &Path, root: &Path, default_partitions: i32) -> Result<Self> {
         fs::create_dir_all(root)?;
         let port = free_port()?;
         let config = Config {
@@ -29,12 +29,12 @@ impl BrokerProcess {
             },
             storage: StorageConfig {
                 data_dir: root.join("data"),
-                ..StorageConfig::default()
+                default_partitions,
             },
         };
-        let config_path = root.join("bench.toml");
+        let config_path = root.join("server.properties");
         let config_text = format!(
-            "[kafkalite.broker]\nbroker_id = {}\nhost = \"{}\"\nport = {}\nadvertised_host = \"{}\"\nadvertised_port = {}\ncluster_id = \"{}\"\n[kafkalite.storage]\ndata_dir = \"{}\"\n",
+            "node.id={}\nlisteners=PLAINTEXT://{}:{}\nadvertised.listeners=PLAINTEXT://{}:{}\ncluster.id={}\nlog.dirs={}\nnum.partitions={}\n",
             config.broker.broker_id,
             config.broker.host,
             config.broker.port,
@@ -42,6 +42,7 @@ impl BrokerProcess {
             config.broker.advertised_port,
             config.broker.cluster_id,
             config.storage.data_dir.display(),
+            config.storage.default_partitions,
         );
         fs::write(&config_path, config_text)?;
         let child = Command::new(broker_bin)
