@@ -15,6 +15,7 @@ pub struct ScenarioSpec {
     pub name: &'static str,
     pub messages: u32,
     pub payload_bytes: u32,
+    pub default_partitions: i32,
 }
 
 pub async fn run_produce_only(
@@ -22,7 +23,7 @@ pub async fn run_produce_only(
     broker_bin: &Path,
     spec: &ScenarioSpec,
 ) -> Result<ScenarioReport> {
-    let broker = BrokerProcess::start(broker_bin, root)?;
+    let broker = BrokerProcess::start(broker_bin, root, spec.default_partitions)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'a'; spec.payload_bytes as usize];
     let mut latencies = Vec::with_capacity(spec.messages as usize);
@@ -34,7 +35,7 @@ pub async fn run_produce_only(
                 FutureRecord::to(spec.name)
                     .payload(&payload)
                     .key("bench")
-                    .partition(0),
+                    .partition(partition_for_message(index, spec.default_partitions)),
                 Duration::from_secs(10),
             )
             .await
@@ -58,19 +59,19 @@ pub async fn run_roundtrip(
     broker_bin: &Path,
     spec: &ScenarioSpec,
 ) -> Result<ScenarioReport> {
-    let broker = BrokerProcess::start(broker_bin, root)?;
+    let broker = BrokerProcess::start(broker_bin, root, spec.default_partitions)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'b'; spec.payload_bytes as usize];
     let mut latencies = Vec::with_capacity(spec.messages as usize);
     let started = Instant::now();
-    for _ in 0..spec.messages {
+    for index in 0..spec.messages {
         let send_started = Instant::now();
         producer
             .send(
                 FutureRecord::to(spec.name)
                     .payload(&payload)
                     .key("bench")
-                    .partition(0),
+                    .partition(partition_for_message(index, spec.default_partitions)),
                 Duration::from_secs(10),
             )
             .await
@@ -79,7 +80,9 @@ pub async fn run_roundtrip(
     }
     let consumer = consumer(&broker.bootstrap, "bench-roundtrip")?;
     let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(spec.name, 0, Offset::Beginning)?;
+    for partition in 0..spec.default_partitions.max(1) {
+        tpl.add_partition_offset(spec.name, partition, Offset::Beginning)?;
+    }
     consumer.assign(&tpl)?;
     for _ in 0..spec.messages {
         let _ = poll_for_message(&consumer, Duration::from_secs(10))?;
@@ -100,16 +103,16 @@ pub async fn run_fetch_tail(
     broker_bin: &Path,
     spec: &ScenarioSpec,
 ) -> Result<ScenarioReport> {
-    let broker = BrokerProcess::start(broker_bin, root)?;
+    let broker = BrokerProcess::start(broker_bin, root, spec.default_partitions)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'd'; spec.payload_bytes as usize];
-    for _ in 0..spec.messages {
+    for index in 0..spec.messages {
         producer
             .send(
                 FutureRecord::to(spec.name)
                     .payload(&payload)
                     .key("bench")
-                    .partition(0),
+                    .partition(partition_for_message(index, spec.default_partitions)),
                 Duration::from_secs(10),
             )
             .await
@@ -117,10 +120,14 @@ pub async fn run_fetch_tail(
     }
     let consumer = consumer(&broker.bootstrap, "bench-fetch-tail")?;
     let mut tpl = TopicPartitionList::new();
+    let target_partition = spec.default_partitions.max(1) - 1;
     tpl.add_partition_offset(
         spec.name,
-        0,
-        Offset::Offset((spec.messages.saturating_sub(10)) as i64),
+        target_partition,
+        Offset::Offset(
+            partition_message_count(spec.messages, spec.default_partitions, target_partition)
+                .saturating_sub(10) as i64,
+        ),
     )?;
     consumer.assign(&tpl)?;
     let started = Instant::now();
@@ -146,19 +153,19 @@ pub async fn run_commit_resume(
     broker_bin: &Path,
     spec: &ScenarioSpec,
 ) -> Result<ScenarioReport> {
-    let broker = BrokerProcess::start(broker_bin, root)?;
+    let broker = BrokerProcess::start(broker_bin, root, spec.default_partitions)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'c'; spec.payload_bytes as usize];
     let mut latencies = Vec::with_capacity(spec.messages as usize);
     let started = Instant::now();
-    for _ in 0..spec.messages {
+    for index in 0..spec.messages {
         let send_started = Instant::now();
         producer
             .send(
                 FutureRecord::to(spec.name)
                     .payload(&payload)
                     .key("bench")
-                    .partition(0),
+                    .partition(partition_for_message(index, spec.default_partitions)),
                 Duration::from_secs(10),
             )
             .await
@@ -206,10 +213,25 @@ fn build_report(
         warmups: 0,
         messages,
         payload_bytes,
+        default_partitions: spec.default_partitions,
         runtime,
         memory,
         storage,
     }
+}
+
+fn partition_for_message(index: u32, default_partitions: i32) -> i32 {
+    let partitions = default_partitions.max(1) as u32;
+    (index % partitions) as i32
+}
+
+fn partition_message_count(messages: u32, default_partitions: i32, partition: i32) -> u32 {
+    if partition < 0 || partition >= default_partitions.max(1) {
+        return 0;
+    }
+    (0..messages)
+        .filter(|index| partition_for_message(*index, default_partitions) == partition)
+        .count() as u32
 }
 
 fn runtime_metrics(
@@ -337,4 +359,25 @@ fn poll_for_message(
         }
     }
     anyhow::bail!("expected a message before timeout")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{partition_for_message, partition_message_count};
+
+    #[test]
+    fn partition_for_message_round_robins_across_partitions() {
+        let partitions = (0..6)
+            .map(|index| partition_for_message(index, 3))
+            .collect::<Vec<_>>();
+
+        assert_eq!(partitions, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn partition_message_count_tracks_tail_partition_volume() {
+        assert_eq!(partition_message_count(10, 3, 0), 4);
+        assert_eq!(partition_message_count(10, 3, 1), 3);
+        assert_eq!(partition_message_count(10, 3, 2), 3);
+    }
 }

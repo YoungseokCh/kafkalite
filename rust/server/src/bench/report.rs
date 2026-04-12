@@ -32,6 +32,7 @@ pub struct ScenarioReport {
     pub warmups: u32,
     pub messages: u32,
     pub payload_bytes: u32,
+    pub default_partitions: i32,
     pub runtime: RuntimeMetrics,
     pub memory: MemoryMetrics,
     pub storage: StorageMetrics,

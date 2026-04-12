@@ -73,6 +73,7 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
             name: "bench.produce.small",
             messages: 1_000,
             payload_bytes: 100,
+            default_partitions: 1,
         }],
         BenchMode::Size => Vec::new(),
         BenchMode::Runtime => vec![
@@ -80,26 +81,43 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 name: "bench.produce.small",
                 messages: 1_000,
                 payload_bytes: 100,
+                default_partitions: 1,
+            },
+            ScenarioSpec {
+                name: "bench.produce.multi_partition",
+                messages: 1_000,
+                payload_bytes: 100,
+                default_partitions: 3,
             },
             ScenarioSpec {
                 name: "bench.roundtrip",
                 messages: 200,
                 payload_bytes: 512,
+                default_partitions: 1,
+            },
+            ScenarioSpec {
+                name: "bench.fetch.multi_partition",
+                messages: 500,
+                payload_bytes: 512,
+                default_partitions: 3,
             },
             ScenarioSpec {
                 name: "bench.fetch.tail",
                 messages: 500,
                 payload_bytes: 512,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.commit.resume",
                 messages: 4,
                 payload_bytes: 256,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.mixed.handoff",
                 messages: 200,
                 payload_bytes: 256,
+                default_partitions: 1,
             },
         ],
         BenchMode::Memory => vec![
@@ -107,53 +125,75 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 name: "bench.produce.small",
                 messages: 1_000,
                 payload_bytes: 100,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.roundtrip",
                 messages: 200,
                 payload_bytes: 512,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.fetch.tail",
                 messages: 500,
                 payload_bytes: 512,
+                default_partitions: 1,
             },
         ],
         BenchMode::Storage => vec![ScenarioSpec {
             name: "bench.produce.medium",
             messages: 500,
             payload_bytes: 1024,
+            default_partitions: 1,
         }],
         BenchMode::Full => vec![
             ScenarioSpec {
                 name: "bench.produce.small",
                 messages: 1_000,
                 payload_bytes: 100,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.produce.medium",
                 messages: 500,
                 payload_bytes: 1024,
+                default_partitions: 1,
+            },
+            ScenarioSpec {
+                name: "bench.produce.multi_partition",
+                messages: 1_000,
+                payload_bytes: 100,
+                default_partitions: 3,
             },
             ScenarioSpec {
                 name: "bench.roundtrip",
                 messages: 200,
                 payload_bytes: 512,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.fetch.tail",
                 messages: 500,
                 payload_bytes: 512,
+                default_partitions: 1,
+            },
+            ScenarioSpec {
+                name: "bench.fetch.multi_partition",
+                messages: 500,
+                payload_bytes: 512,
+                default_partitions: 3,
             },
             ScenarioSpec {
                 name: "bench.commit.resume",
                 messages: 4,
                 payload_bytes: 256,
+                default_partitions: 1,
             },
             ScenarioSpec {
                 name: "bench.mixed.handoff",
                 messages: 200,
                 payload_bytes: 256,
+                default_partitions: 1,
             },
         ],
     };
@@ -180,13 +220,14 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
 }
 
 fn to_csv(report: &BenchmarkReport) -> String {
-    let mut lines = vec!["name,messages,payload_bytes,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes".to_string()];
+    let mut lines = vec!["name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes".to_string()];
     for scenario in &report.scenarios {
         lines.push(format!(
-            "{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{}",
             scenario.name,
             scenario.messages,
             scenario.payload_bytes,
+            scenario.default_partitions,
             scenario.runtime.elapsed_ms,
             scenario.runtime.throughput_msgs_per_sec,
             scenario.runtime.throughput_bytes_per_sec,
@@ -212,11 +253,12 @@ fn to_markdown(report: &BenchmarkReport) -> String {
         "- git_sha: `{}`\n- dirty: `{}`\n- binary_bytes: `{}`\n- package_bytes: `{}`\n\n",
         report.git_sha, report.dirty, report.build.binary_bytes, report.build.package_bytes
     ));
-    out.push_str("| scenario | elapsed_ms | msgs/sec | peak_rss_kb | total_bytes |\n|---|---:|---:|---:|---:|\n");
+    out.push_str("| scenario | partitions | elapsed_ms | msgs/sec | peak_rss_kb | total_bytes |\n|---|---:|---:|---:|---:|---:|\n");
     for scenario in &report.scenarios {
         out.push_str(&format!(
-            "| {} | {:.2} | {:.2} | {} | {} |\n",
+            "| {} | {} | {:.2} | {:.2} | {} | {} |\n",
             scenario.name,
+            scenario.default_partitions,
             scenario.runtime.elapsed_ms,
             scenario.runtime.throughput_msgs_per_sec,
             scenario.memory.peak_rss_kb,

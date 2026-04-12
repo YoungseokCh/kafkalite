@@ -20,7 +20,7 @@ pub async fn run_mixed_handoff(
     broker_bin: &Path,
     spec: &ScenarioSpec,
 ) -> Result<ScenarioReport> {
-    let broker = BrokerProcess::start(broker_bin, root)?;
+    let broker = BrokerProcess::start(broker_bin, root, spec.default_partitions)?;
     let producer = producer(&broker.bootstrap)?;
     let payload = vec![b'm'; spec.payload_bytes as usize];
     let mut latencies = Vec::with_capacity(spec.messages as usize);
@@ -115,6 +115,7 @@ fn build_report(
         warmups: 0,
         messages,
         payload_bytes,
+        default_partitions: spec.default_partitions,
         runtime,
         memory,
         storage,
