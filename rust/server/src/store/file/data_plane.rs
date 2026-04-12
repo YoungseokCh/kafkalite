@@ -177,6 +177,10 @@ impl DataPlaneState {
         self.catalog.describe_topic(topic)
     }
 
+    pub fn has_partition(&self, topic: &str, partition: i32) -> bool {
+        self.catalog.has_partition(topic, partition)
+    }
+
     pub fn ensure_known_partitions(&mut self, topic: &str, partitions: &[i32], now_ms: i64) {
         self.catalog
             .ensure_known_partitions(topic, partitions, now_ms)

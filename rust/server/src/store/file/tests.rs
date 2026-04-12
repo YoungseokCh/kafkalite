@@ -62,6 +62,9 @@ fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
 fn assignment_respects_member_subscriptions() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+    store.ensure_topic("topic-b", 1, 10).unwrap();
+    store.ensure_topic("topic-c", 1, 10).unwrap();
     let subscription_a = encode_subscription(&["topic-a"]);
     let subscription_b = encode_subscription(&["topic-b", "topic-c"]);
     let _ = store
@@ -122,6 +125,7 @@ fn assignment_respects_member_subscriptions() {
 fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_member() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
     let subscription = encode_subscription(&["topic-a"]);
     let joined = store
         .join_group(GroupJoinRequest {
@@ -182,6 +186,7 @@ fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_me
 fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
     let subscription = encode_subscription(&["topic-a"]);
     let joined = store
         .join_group(GroupJoinRequest {
@@ -232,6 +237,7 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
 fn heartbeat_does_not_grow_state_journal_but_offset_commit_does() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
     let subscription = encode_subscription(&["topic-a"]);
     let joined = store
         .join_group(GroupJoinRequest {
@@ -306,6 +312,7 @@ fn no_op_rejoin_keeps_generation() {
 fn expired_member_is_pruned_on_next_join() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
     let subscription = encode_subscription(&["topic-a"]);
     let _ = store
         .join_group(GroupJoinRequest {
@@ -346,6 +353,130 @@ fn expired_member_is_pruned_on_next_join() {
         store
             .heartbeat("group-d", "member-a", second.generation_id, 220)
             .is_err()
+    );
+}
+
+#[test]
+fn offsets_are_committed_and_fetched_per_partition() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 3, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-partitions",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+
+    store
+        .commit_offset(commit_request(
+            "group-partitions",
+            "member-a",
+            joined.generation_id,
+            "topic-a",
+            1,
+            11,
+            200,
+        ))
+        .unwrap();
+    store
+        .commit_offset(commit_request(
+            "group-partitions",
+            "member-a",
+            joined.generation_id,
+            "topic-a",
+            2,
+            22,
+            210,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store
+            .fetch_offset("group-partitions", "topic-a", 0)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .fetch_offset("group-partitions", "topic-a", 1)
+            .unwrap(),
+        Some(11)
+    );
+    assert_eq!(
+        store
+            .fetch_offset("group-partitions", "topic-a", 2)
+            .unwrap(),
+        Some(22)
+    );
+}
+
+#[test]
+fn assignments_split_topic_partitions_across_members() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 4, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let _first = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-range",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let second = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-range",
+            member_id: Some("member-b"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 200,
+        })
+        .unwrap();
+
+    let sync_a = store
+        .sync_group(
+            "group-range",
+            "member-a",
+            second.generation_id,
+            "range",
+            &[],
+            300,
+        )
+        .unwrap();
+    let sync_b = store
+        .sync_group(
+            "group-range",
+            "member-b",
+            second.generation_id,
+            "range",
+            &[],
+            300,
+        )
+        .unwrap();
+
+    assert_eq!(
+        decode_assignment_partitions(&sync_a.assignment, "topic-a"),
+        vec![0, 1]
+    );
+    assert_eq!(
+        decode_assignment_partitions(&sync_b.assignment, "topic-a"),
+        vec![2, 3]
     );
 }
 
@@ -463,6 +594,17 @@ fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
         .into_iter()
         .map(|partition| partition.topic.to_string())
         .collect()
+}
+
+fn decode_assignment_partitions(bytes: &[u8], topic: &str) -> Vec<i32> {
+    let mut payload = Bytes::copy_from_slice(bytes);
+    let assignment = ConsumerProtocolAssignment::decode(&mut payload, 3).unwrap();
+    assignment
+        .assigned_partitions
+        .into_iter()
+        .find(|partition| partition.topic.to_string() == topic)
+        .map(|partition| partition.partitions)
+        .unwrap_or_default()
 }
 
 fn commit_request<'a>(

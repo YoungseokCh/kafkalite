@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 use crate::store::{
     DEFAULT_PARTITION, GroupJoinRequest, GroupJoinResult, GroupMember, OffsetCommitRequest, Result,
-    StoreError, SyncGroupResult,
+    StoreError, SyncGroupResult, TopicMetadata,
 };
 
 use super::state::{GroupMemberState, GroupState, StateJournal};
@@ -13,6 +13,16 @@ pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
     offsets: BTreeMap<OffsetKey, i64>,
     journal: StateJournal,
+}
+
+pub struct SyncGroupStateRequest<'a> {
+    pub group_id: &'a str,
+    pub member_id: &'a str,
+    pub generation_id: i32,
+    pub protocol_name: &'a str,
+    pub assignments: &'a [(String, Vec<u8>)],
+    pub topics: &'a [TopicMetadata],
+    pub now_ms: i64,
 }
 
 impl ControlPlaneState {
@@ -83,53 +93,45 @@ impl ControlPlaneState {
         })
     }
 
-    pub fn sync_group(
-        &mut self,
-        group_id: &str,
-        member_id: &str,
-        generation_id: i32,
-        protocol_name: &str,
-        assignments: &[(String, Vec<u8>)],
-        now_ms: i64,
-    ) -> Result<SyncGroupResult> {
+    pub fn sync_group(&mut self, request: SyncGroupStateRequest<'_>) -> Result<SyncGroupResult> {
         let group = self
             .groups
-            .get_mut(group_id)
+            .get_mut(request.group_id)
             .ok_or(StoreError::StaleGeneration {
                 expected: 0,
-                actual: generation_id,
+                actual: request.generation_id,
             })?;
-        let _ = prune_expired_members(group, now_ms);
-        if !group.members.contains_key(member_id) {
+        let _ = prune_expired_members(group, request.now_ms);
+        if !group.members.contains_key(request.member_id) {
             return Err(StoreError::UnknownMember {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
+                group_id: request.group_id.to_string(),
+                member_id: request.member_id.to_string(),
             });
         }
-        if generation_id < group.generation_id {
+        if request.generation_id < group.generation_id {
             return Err(StoreError::UnknownMember {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
+                group_id: request.group_id.to_string(),
+                member_id: request.member_id.to_string(),
             });
         }
-        ensure_generation(group, generation_id)?;
-        if !assignments.is_empty() {
-            for (assigned_member, assignment) in assignments {
+        ensure_generation(group, request.generation_id)?;
+        if !request.assignments.is_empty() {
+            for (assigned_member, assignment) in request.assignments {
                 if let Some(member) = group.members.get_mut(assigned_member) {
                     member.assignment = assignment.clone();
-                    member.updated_at_unix_ms = now_ms;
+                    member.updated_at_unix_ms = request.now_ms;
                 }
             }
         } else {
-            maybe_build_assignments(group)?;
+            maybe_build_assignments(group, request.topics)?;
         }
         let assignment = group
             .members
-            .get(member_id)
+            .get(request.member_id)
             .map(|member| member.assignment.clone())
             .unwrap_or_default();
         Ok(SyncGroupResult {
-            protocol_name: protocol_name.to_string(),
+            protocol_name: request.protocol_name.to_string(),
             assignment,
         })
     }
@@ -334,7 +336,7 @@ fn ensure_generation(group: &GroupState, generation_id: i32) -> Result<()> {
     Ok(())
 }
 
-fn maybe_build_assignments(group: &mut GroupState) -> Result<()> {
+fn maybe_build_assignments(group: &mut GroupState, topics: &[TopicMetadata]) -> Result<()> {
     let subscriptions = group
         .members
         .values()
@@ -344,6 +346,19 @@ fn maybe_build_assignments(group: &mut GroupState) -> Result<()> {
                 .map(|topics| (member.member_id.clone(), topics))
         })
         .collect::<Vec<_>>();
+    let topic_partitions = topics
+        .iter()
+        .map(|topic| {
+            (
+                topic.name.clone(),
+                topic
+                    .partitions
+                    .iter()
+                    .map(|partition| partition.partition)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut topic_subscribers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (member_id, topics) in subscriptions {
         for topic in topics.into_iter().collect::<BTreeSet<_>>() {
@@ -353,11 +368,28 @@ fn maybe_build_assignments(group: &mut GroupState) -> Result<()> {
                 .push(member_id.clone());
         }
     }
-    let mut assignments: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (index, (topic, mut subscribers)) in topic_subscribers.into_iter().enumerate() {
-        subscribers.sort();
-        let member_id = subscribers[index % subscribers.len()].clone();
-        assignments.entry(member_id).or_default().push(topic);
+    let mut assignments: BTreeMap<String, Vec<(String, i32)>> = BTreeMap::new();
+    for (topic, mut subscribers) in topic_subscribers {
+        if let Some(partitions) = topic_partitions.get(&topic) {
+            subscribers.sort();
+            if subscribers.is_empty() {
+                continue;
+            }
+            let base = partitions.len() / subscribers.len();
+            let remainder = partitions.len() % subscribers.len();
+            let mut start = 0_usize;
+            for (index, subscriber) in subscribers.iter().enumerate() {
+                let size = base + usize::from(index < remainder);
+                let end = start + size;
+                for partition in &partitions[start..end] {
+                    assignments
+                        .entry(subscriber.clone())
+                        .or_default()
+                        .push((topic.clone(), *partition));
+                }
+                start = end;
+            }
+        }
     }
     for member in group.members.values_mut() {
         member.assignment = encode_assignment(
@@ -383,18 +415,23 @@ fn parse_topics(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-fn encode_assignment(topics: &[String]) -> Result<Vec<u8>> {
+fn encode_assignment(assignments: &[(String, i32)]) -> Result<Vec<u8>> {
     use bytes::BytesMut;
     use kafka_protocol::messages::consumer_protocol_assignment::TopicPartition;
     use kafka_protocol::messages::{ConsumerProtocolAssignment, TopicName};
     use kafka_protocol::protocol::{Encodable, StrBytes};
 
-    let partitions = topics
-        .iter()
-        .map(|topic| {
+    let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+    for (topic, partition) in assignments {
+        by_topic.entry(topic.clone()).or_default().push(*partition);
+    }
+    let partitions = by_topic
+        .into_iter()
+        .map(|(topic, mut partitions)| {
+            partitions.sort_unstable();
             TopicPartition::default()
-                .with_topic(TopicName(StrBytes::from(topic.clone())))
-                .with_partitions(vec![super::super::DEFAULT_PARTITION])
+                .with_topic(TopicName(StrBytes::from(topic)))
+                .with_partitions(partitions)
         })
         .collect();
     let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(partitions);

@@ -13,7 +13,7 @@ use super::{
     BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
     OffsetCommitRequest, ProducerSession, Result, Storage, SyncGroupResult, TopicMetadata,
 };
-use control_plane::ControlPlaneState;
+use control_plane::{ControlPlaneState, SyncGroupStateRequest};
 use data_plane::{AppendDecision, DataPlaneState};
 use log::{RecordLog, StoredBatch};
 #[allow(unused_imports)]
@@ -273,15 +273,20 @@ impl Storage for FileStore {
         assignments: &[(String, Vec<u8>)],
         now_ms: i64,
     ) -> Result<SyncGroupResult> {
+        let topics = {
+            let data = self.data.lock().expect("file store mutex poisoned");
+            data.topic_metadata(None)
+        };
         let mut control = self.control.lock().expect("file store mutex poisoned");
-        control.sync_group(
+        control.sync_group(SyncGroupStateRequest {
             group_id,
             member_id,
             generation_id,
             protocol_name,
             assignments,
+            topics: &topics,
             now_ms,
-        )
+        })
     }
 
     fn heartbeat(
@@ -301,11 +306,33 @@ impl Storage for FileStore {
     }
 
     fn commit_offset(&self, request: OffsetCommitRequest<'_>) -> Result<()> {
+        let known_partition = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .has_partition(request.topic, request.partition);
+        if !known_partition {
+            return Err(crate::store::StoreError::UnknownTopicOrPartition {
+                topic: request.topic.to_string(),
+                partition: request.partition,
+            });
+        }
         let mut control = self.control.lock().expect("file store mutex poisoned");
         control.commit_offset(request)
     }
 
     fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Result<Option<i64>> {
+        let known_partition = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .has_partition(topic, partition);
+        if !known_partition {
+            return Err(crate::store::StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            });
+        }
         let control = self.control.lock().expect("file store mutex poisoned");
         Ok(control.fetch_offset(group_id, topic, partition))
     }

@@ -295,6 +295,121 @@ async fn partition_assignment_moves_to_remaining_group_member() {
     let _ = handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_partition_metadata_and_direct_fetch_work() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let producer = producer(&bootstrap);
+
+    let (partition, offset) = producer
+        .send(
+            FutureRecord::to("compat.multi")
+                .payload("p2")
+                .key("p2-key")
+                .partition(2),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partition, 2);
+    assert_eq!(offset, 0);
+
+    let consumer = base_consumer(&bootstrap, "compat-multi-meta");
+    let metadata = consumer
+        .fetch_metadata(Some("compat.multi"), Duration::from_secs(5))
+        .unwrap();
+    let topic = find_topic(&metadata, "compat.multi");
+    assert_eq!(topic.partitions().len(), 3);
+    assert_eq!(topic.partitions()[0].id(), 0);
+    assert_eq!(topic.partitions()[1].id(), 1);
+    assert_eq!(topic.partitions()[2].id(), 2);
+
+    let direct = base_consumer(&bootstrap, "compat-multi-direct");
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset("compat.multi", 2, Offset::Beginning)
+        .unwrap();
+    direct.assign(&tpl).unwrap();
+    let message = poll_for_message(&direct, Duration::from_secs(5));
+    assert_eq!(message.payload(), Some(&b"p2"[..]));
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_offsets_are_partition_scoped() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let producer = producer(&bootstrap);
+
+    producer
+        .send(
+            FutureRecord::to("compat.resume.multi")
+                .payload("p1-first")
+                .key("k")
+                .partition(1),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    let consumer = group_consumer(&bootstrap, "compat-multi-group");
+    consumer.subscribe(&["compat.resume.multi"]).unwrap();
+
+    let first = poll_for_message(&consumer, Duration::from_secs(8));
+    assert_eq!(first.partition(), 1);
+    assert_eq!(first.payload(), Some(&b"p1-first"[..]));
+    consumer
+        .commit_message(&first, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+    drop(first);
+    drop(consumer);
+
+    producer
+        .send(
+            FutureRecord::to("compat.resume.multi")
+                .payload("p1-second")
+                .key("k")
+                .partition(1),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to("compat.resume.multi")
+                .payload("p2-only")
+                .key("k")
+                .partition(2),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    handle.abort();
+    let _ = handle.await;
+
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let resumed = group_consumer(&bootstrap, "compat-multi-group");
+    resumed.subscribe(&["compat.resume.multi"]).unwrap();
+
+    let first = poll_for_message(&resumed, Duration::from_secs(8));
+    let second = poll_for_message(&resumed, Duration::from_secs(8));
+    let mut seen = [
+        (first.partition(), first.payload().unwrap().to_vec()),
+        (second.partition(), second.payload().unwrap().to_vec()),
+    ];
+    seen.sort_by_key(|row| row.0);
+    assert_eq!(seen[0].0, 1);
+    assert_eq!(seen[0].1, b"p1-second".to_vec());
+    assert_eq!(seen[1].0, 2);
+    assert_eq!(seen[1].1, b"p2-only".to_vec());
+
+    handle.abort();
+    let _ = handle.await;
+}
+
 fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
@@ -312,6 +427,13 @@ async fn start_broker() -> (
 async fn start_broker_in_dir(
     tempdir: &tempfile::TempDir,
 ) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    start_broker_in_dir_with_partitions(tempdir, 1).await
+}
+
+async fn start_broker_in_dir_with_partitions(
+    tempdir: &tempfile::TempDir,
+    default_partitions: i32,
+) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let port = free_port();
     let config = Config {
         broker: BrokerConfig {
@@ -321,7 +443,7 @@ async fn start_broker_in_dir(
         },
         storage: StorageConfig {
             data_dir: tempdir.path().join("kafkalite-data"),
-            ..StorageConfig::default()
+            default_partitions,
         },
     };
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());

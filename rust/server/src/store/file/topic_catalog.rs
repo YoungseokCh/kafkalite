@@ -67,6 +67,10 @@ impl TopicCatalog {
         self.topics.keys().cloned()
     }
 
+    pub fn has_partition(&self, topic: &str, partition: i32) -> bool {
+        self.partition_state(topic, partition).is_some()
+    }
+
     pub fn topic_count(&self) -> usize {
         self.topics.len()
     }

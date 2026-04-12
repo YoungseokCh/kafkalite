@@ -204,23 +204,20 @@ pub async fn handle_offset_commit(
     for topic in request.topics {
         let mut partitions = Vec::new();
         for partition in topic.partitions {
-            let error_code = if partition.partition_index != 0 {
-                UNKNOWN_TOPIC_OR_PARTITION
-            } else {
-                match broker.store().commit_offset(StoreOffsetCommitRequest {
-                    group_id: request.group_id.as_ref(),
-                    member_id: request.member_id.as_ref(),
-                    generation_id: request.generation_id_or_member_epoch,
-                    topic: topic.name.as_ref(),
-                    partition: partition.partition_index,
-                    next_offset: partition.committed_offset,
-                    now_ms: now,
-                }) {
-                    Ok(()) => 0,
-                    Err(StoreError::UnknownMember { .. }) => 25,
-                    Err(StoreError::StaleGeneration { .. }) => 22,
-                    Err(err) => return Err(err.into()),
-                }
+            let error_code = match broker.store().commit_offset(StoreOffsetCommitRequest {
+                group_id: request.group_id.as_ref(),
+                member_id: request.member_id.as_ref(),
+                generation_id: request.generation_id_or_member_epoch,
+                topic: topic.name.as_ref(),
+                partition: partition.partition_index,
+                next_offset: partition.committed_offset,
+                now_ms: now,
+            }) {
+                Ok(()) => 0,
+                Err(StoreError::UnknownTopicOrPartition { .. }) => UNKNOWN_TOPIC_OR_PARTITION,
+                Err(StoreError::UnknownMember { .. }) => 25,
+                Err(StoreError::StaleGeneration { .. }) => 22,
+                Err(err) => return Err(err.into()),
             };
             partitions.push(
                 OffsetCommitResponsePartition::default()
@@ -248,20 +245,16 @@ pub async fn handle_offset_fetch(
         for topic in request_topics {
             let mut partitions = Vec::new();
             for partition in topic.partition_indexes {
-                let (offset, error_code) = if partition == 0 {
-                    (
-                        broker
-                            .store()
-                            .fetch_offset(
-                                request.group_id.as_ref(),
-                                topic.name.as_ref(),
-                                partition,
-                            )?
-                            .unwrap_or(-1),
-                        0,
-                    )
-                } else {
-                    (-1, UNKNOWN_TOPIC_OR_PARTITION)
+                let (offset, error_code) = match broker.store().fetch_offset(
+                    request.group_id.as_ref(),
+                    topic.name.as_ref(),
+                    partition,
+                ) {
+                    Ok(offset) => (offset.unwrap_or(-1), 0),
+                    Err(StoreError::UnknownTopicOrPartition { .. }) => {
+                        (-1, UNKNOWN_TOPIC_OR_PARTITION)
+                    }
+                    Err(err) => return Err(err.into()),
                 };
                 partitions.push(
                     OffsetFetchResponsePartition::default()
@@ -339,6 +332,7 @@ mod tests {
     #[tokio::test]
     async fn stale_offset_commit_from_current_member_is_accepted() {
         let broker = test_broker();
+        broker.store().ensure_topic("topic-a", 1, 0).unwrap();
         let joined = handle_join_group(
             &broker,
             JoinGroupRequest::default()

@@ -47,6 +47,18 @@ struct ProduceConsumeSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct MultiPartitionRoundtripSnapshot {
+    partitions: Vec<i32>,
+    payloads: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MultiPartitionOffsetFetchSnapshot {
+    partition_1_offset: i64,
+    partition_2_offset: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ResumeSnapshot {
     first_payload: Vec<u8>,
     resumed_payload: Vec<u8>,
@@ -111,6 +123,13 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_roundtrip = produce_consume_snapshot(&local_bootstrap, &roundtrip_topic).await;
     assert_eq!(local_roundtrip, real_roundtrip);
 
+    let multi_roundtrip_topic = format!("diff.multi-roundtrip.{suffix}");
+    let real_multi_roundtrip =
+        multi_partition_roundtrip_snapshot(&real_bootstrap, &multi_roundtrip_topic).await;
+    let local_multi_roundtrip =
+        multi_partition_roundtrip_snapshot(&local_bootstrap, &multi_roundtrip_topic).await;
+    assert_eq!(local_multi_roundtrip, real_multi_roundtrip);
+
     let real_resume =
         commit_resume_snapshot(&real_bootstrap, &resume_topic, &format!("group.{suffix}")).await;
     let local_resume =
@@ -137,6 +156,13 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     )
     .await;
     assert_eq!(local_stale_commit, real_stale_commit);
+
+    let offset_fetch_topic = format!("diff.multi-offsets.{suffix}");
+    let real_offset_fetch =
+        multi_partition_offset_fetch_snapshot(&real_bootstrap, &offset_fetch_topic).await;
+    let local_offset_fetch =
+        multi_partition_offset_fetch_snapshot(&local_bootstrap, &offset_fetch_topic).await;
+    assert_eq!(local_offset_fetch, real_offset_fetch);
 
     let heartbeat_topic = format!("diff.stale-heartbeat.{suffix}");
     let real_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(
@@ -228,6 +254,7 @@ async fn stale_commit_after_handoff_snapshot(
         join_v1.generation_id,
         &join_v1.member_id,
         topic,
+        0,
         1,
     );
     assert_eq!(initial_commit.topics[0].partitions[0].error_code, 0);
@@ -272,18 +299,20 @@ async fn stale_commit_after_handoff_snapshot(
         join_v1.generation_id,
         &join_v1.member_id,
         topic,
+        0,
         9,
     );
-    let offset_after_stale = offset_fetch(bootstrap, group_id, topic);
+    let offset_after_stale = offset_fetch(bootstrap, group_id, topic, &[0]);
     let valid_commit = offset_commit(
         bootstrap,
         group_id,
         generation,
         &join_b_v2.member_id,
         topic,
+        0,
         2,
     );
-    let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
+    let offset_after_valid = offset_fetch(bootstrap, group_id, topic, &[0]);
 
     StaleCommitSnapshot {
         stale_commit_error: stale_commit.topics[0].partitions[0].error_code,
@@ -341,9 +370,10 @@ async fn stale_heartbeat_after_timeout_snapshot(
         join_v2.generation_id,
         &join_v2.member_id,
         topic,
+        0,
         2,
     );
-    let offset_after_valid = offset_fetch(bootstrap, group_id, topic);
+    let offset_after_valid = offset_fetch(bootstrap, group_id, topic, &[0]);
 
     StaleHeartbeatSnapshot {
         stale_heartbeat_error: stale_heartbeat.error_code,
@@ -482,6 +512,120 @@ async fn commit_resume_snapshot(bootstrap: &str, topic: &str, group_id: &str) ->
     ResumeSnapshot {
         first_payload: first_bytes,
         resumed_payload: resumed_bytes,
+    }
+}
+
+async fn multi_partition_roundtrip_snapshot(
+    bootstrap: &str,
+    topic: &str,
+) -> MultiPartitionRoundtripSnapshot {
+    let producer = producer(bootstrap);
+    let payload_one = format!("one-{topic}");
+    let payload_two = format!("two-{topic}");
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload(&payload_one)
+                .key("key")
+                .partition(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload(&payload_two)
+                .key("key")
+                .partition(2),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let consumer = consumer(bootstrap, &format!("multi-{topic}"));
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(topic, 1, Offset::Beginning)
+        .unwrap();
+    tpl.add_partition_offset(topic, 2, Offset::Beginning)
+        .unwrap();
+    consumer.assign(&tpl).unwrap();
+    let first = poll_for_message(&consumer, Duration::from_secs(10));
+    let second = poll_for_message(&consumer, Duration::from_secs(10));
+
+    let mut rows = vec![
+        (first.partition(), first.payload().unwrap().to_vec()),
+        (second.partition(), second.payload().unwrap().to_vec()),
+    ];
+    rows.sort_by_key(|row| row.0);
+    MultiPartitionRoundtripSnapshot {
+        partitions: rows.iter().map(|row| row.0).collect(),
+        payloads: rows.into_iter().map(|row| row.1).collect(),
+    }
+}
+
+async fn multi_partition_offset_fetch_snapshot(
+    bootstrap: &str,
+    topic: &str,
+) -> MultiPartitionOffsetFetchSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p1")
+                .key("key")
+                .partition(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p2")
+                .key("key")
+                .partition(2),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join = join_group(bootstrap, &format!("group.{topic}"), None, topic, b"v1");
+    let assignment = encode_assignment_partitions(topic, &[1, 2]);
+    let _sync = sync_group(
+        bootstrap,
+        &format!("group.{topic}"),
+        join.generation_id,
+        &join.member_id,
+        &join.member_id,
+        &[(&join.member_id, assignment)],
+    );
+
+    let commit_one = offset_commit(
+        bootstrap,
+        &format!("group.{topic}"),
+        join.generation_id,
+        &join.member_id,
+        topic,
+        1,
+        11,
+    );
+    let commit_two = offset_commit(
+        bootstrap,
+        &format!("group.{topic}"),
+        join.generation_id,
+        &join.member_id,
+        topic,
+        2,
+        22,
+    );
+    assert_eq!(commit_one.topics[0].partitions[0].error_code, 0);
+    assert_eq!(commit_two.topics[0].partitions[0].error_code, 0);
+
+    let fetched = offset_fetch(bootstrap, &format!("group.{topic}"), topic, &[1, 2]);
+    MultiPartitionOffsetFetchSnapshot {
+        partition_1_offset: fetched.topics[0].partitions[0].committed_offset,
+        partition_2_offset: fetched.topics[0].partitions[1].committed_offset,
     }
 }
 
@@ -666,6 +810,7 @@ fn offset_commit(
     generation_id: i32,
     member_id: &str,
     topic: &str,
+    partition: i32,
     next_offset: i64,
 ) -> OffsetCommitResponse {
     send_request::<OffsetCommitRequest, OffsetCommitResponse>(
@@ -682,14 +827,19 @@ fn offset_commit(
                     .with_name(TopicName(StrBytes::from(topic.to_string())))
                     .with_partitions(vec![
                         OffsetCommitRequestPartition::default()
-                            .with_partition_index(0)
+                            .with_partition_index(partition)
                             .with_committed_offset(next_offset),
                     ]),
             ]),
     )
 }
 
-fn offset_fetch(bootstrap: &str, group_id: &str, topic: &str) -> OffsetFetchResponse {
+fn offset_fetch(
+    bootstrap: &str,
+    group_id: &str,
+    topic: &str,
+    partitions: &[i32],
+) -> OffsetFetchResponse {
     send_request::<OffsetFetchRequest, OffsetFetchResponse>(
         bootstrap,
         ApiKey::OffsetFetch,
@@ -699,7 +849,7 @@ fn offset_fetch(bootstrap: &str, group_id: &str, topic: &str) -> OffsetFetchResp
             .with_topics(Some(vec![
                 OffsetFetchRequestTopic::default()
                     .with_name(TopicName(StrBytes::from(topic.to_string())))
-                    .with_partition_indexes(vec![0]),
+                    .with_partition_indexes(partitions.to_vec()),
             ])),
     )
 }
@@ -756,10 +906,14 @@ fn encode_subscription(topic: &str, user_data: &[u8]) -> Vec<u8> {
 }
 
 fn encode_assignment(topic: &str) -> Vec<u8> {
+    encode_assignment_partitions(topic, &[0])
+}
+
+fn encode_assignment_partitions(topic: &str, partitions: &[i32]) -> Vec<u8> {
     let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(vec![
         AssignmentTopicPartition::default()
             .with_topic(TopicName(StrBytes::from(topic.to_string())))
-            .with_partitions(vec![0]),
+            .with_partitions(partitions.to_vec()),
     ]);
     let mut bytes = BytesMut::new();
     assignment.encode(&mut bytes, 3).unwrap();
