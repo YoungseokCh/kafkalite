@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASE="${1:-$ROOT_DIR/.benchmarks/baseline/result.json}"
-NEW="${2:-$ROOT_DIR/.benchmarks/latest/result.json}"
-OUTPUT="$ROOT_DIR/.benchmarks/latest/compare.md"
+BASE="${1:-}"
+NEW="${2:-}"
+OUTPUT="${3:-}"
+
+if [[ -z "$BASE" || -z "$NEW" ]]; then
+  echo "usage: $0 BASE_RESULT_JSON NEW_RESULT_JSON [OUTPUT_MARKDOWN]" >&2
+  exit 1
+fi
 
 if [[ ! -f "$BASE" ]]; then
   echo "missing base benchmark file: $BASE" >&2
@@ -16,10 +20,19 @@ if [[ ! -f "$NEW" ]]; then
   exit 1
 fi
 
-python3 - "$BASE" "$NEW" "$OUTPUT" <<'PY'
-import json, sys
+OUTPUT_ARGS=()
+if [[ -n "$OUTPUT" ]]; then
+  OUTPUT_ARGS=("$OUTPUT")
+fi
+
+python3 - "$BASE" "$NEW" "${OUTPUT_ARGS[@]}" <<'PY'
+import json
+import sys
+
 base = json.load(open(sys.argv[1]))
 new = json.load(open(sys.argv[2]))
+output = sys.argv[3] if len(sys.argv) > 3 else None
+
 out = []
 out.append("# Benchmark Comparison\n")
 out.append(f"- base: {sys.argv[1]}")
@@ -46,5 +59,6 @@ for name in sorted(set(base_map) | set(new_map)):
     out.append(f"- total_bytes: {b['storage']['total_bytes']} -> {n['storage']['total_bytes']}\n")
 text = "\n".join(out) + "\n"
 print(text, end="")
-open(sys.argv[3], "w").write(text)
+if output:
+    open(output, "w").write(text)
 PY

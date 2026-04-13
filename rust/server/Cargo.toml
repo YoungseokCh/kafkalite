@@ -1,16 +1,33 @@
 [package]
 name = "kafkalite-server"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.87"
 authors = ["Youngseok Choi"]
 description = "Broker-owned file-log Kafka wire protocol server"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/YoungseokCh/kafkalite"
+keywords = ["kafka", "broker", "streaming", "log", "server"]
+categories = ["network-programming", "command-line-utilities"]
+autobins = false
+
+[features]
+default = []
+bench-internal = []
 
 [[bin]]
 name = "kafkalite"
 path = "src/main.rs"
+
+[[bin]]
+name = "store_tool"
+path = "src/bin/store_tool.rs"
+
+[[bin]]
+name = "bench_runner"
+path = "src/bin/bench_runner.rs"
+required-features = ["bench-internal"]
 
 [dependencies]
 anyhow = "1.0"

@@ -1,3 +1,6 @@
+#![doc = "Server-first Kafka-compatible broker crate with `kafkalite` and `store_tool` binaries."]
+
+#[doc(hidden)]
 pub mod bench;
 pub mod broker;
 pub mod config;
