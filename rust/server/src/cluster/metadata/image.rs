@@ -131,6 +131,36 @@ impl ClusterMetadataImage {
             .map(|partition| partition.high_watermark)
     }
 
+    pub fn partition_state_view(
+        &self,
+        topic_name: &str,
+        partition_index: i32,
+    ) -> Option<(i32, i32, i64, i64)> {
+        self.topics
+            .iter()
+            .find(|topic| topic.name == topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.partition == partition_index)
+            })
+            .map(|partition| {
+                let leader_log_end_offset = partition
+                    .replica_progress
+                    .iter()
+                    .find(|progress| progress.broker_id == partition.leader_id)
+                    .map(|progress| progress.log_end_offset)
+                    .unwrap_or(0);
+                (
+                    partition.leader_id,
+                    partition.leader_epoch,
+                    partition.high_watermark,
+                    leader_log_end_offset,
+                )
+            })
+    }
+
     pub fn update_partition_leader(
         &mut self,
         topic_name: &str,

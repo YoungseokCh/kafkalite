@@ -8,10 +8,10 @@ use crate::cluster::metadata::{BrokerMetadata, ClusterMetadataImage, MetadataSto
 use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
-    UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
-    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
-    UpdateReplicaProgressResponse,
+    GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
+    RegisterBrokerResponse, UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse,
+    UpdatePartitionReplicationRequest, UpdatePartitionReplicationResponse,
+    UpdateReplicaProgressRequest, UpdateReplicaProgressResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -248,6 +248,31 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_get_partition_state(
+        &self,
+        request: GetPartitionStateRequest,
+    ) -> Result<GetPartitionStateResponse> {
+        let Some((leader_id, leader_epoch, high_watermark, leader_log_end_offset)) = self
+            .metadata_image()
+            .partition_state_view(&request.topic_name, request.partition_index)
+        else {
+            return Ok(GetPartitionStateResponse {
+                found: false,
+                leader_id: -1,
+                leader_epoch: -1,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+            });
+        };
+        Ok(GetPartitionStateResponse {
+            found: true,
+            leader_id,
+            leader_epoch,
+            high_watermark,
+            leader_log_end_offset,
+        })
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
@@ -269,6 +294,9 @@ impl ClusterRuntime {
                     self.handle_update_replica_progress(request)?,
                 ))
             }
+            ClusterRpcRequest::GetPartitionState(request) => Ok(
+                ClusterRpcResponse::GetPartitionState(self.handle_get_partition_state(request)?),
+            ),
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
             )),

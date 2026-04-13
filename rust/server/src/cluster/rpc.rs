@@ -100,3 +100,18 @@ pub struct UpdateReplicaProgressResponse {
     pub metadata_offset: i64,
     pub high_watermark: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetPartitionStateRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetPartitionStateResponse {
+    pub found: bool,
+    pub leader_id: i32,
+    pub leader_epoch: i32,
+    pub high_watermark: i64,
+    pub leader_log_end_offset: i64,
+}

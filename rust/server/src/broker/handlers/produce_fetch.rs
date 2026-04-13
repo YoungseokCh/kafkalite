@@ -61,7 +61,14 @@ pub async fn handle_produce(
                     .store()
                     .append_records(&topic_name, partition_data.index, &flattened, now);
             let (error_code, base_offset) = match produce_result {
-                Ok((base_offset, _)) => (0, base_offset),
+                Ok((base_offset, _)) => {
+                    let _ = broker.update_local_replica_progress(
+                        &topic_name,
+                        partition_data.index,
+                        now,
+                    );
+                    (0, base_offset)
+                }
                 Err(StoreError::UnknownTopicOrPartition { .. }) => (UNKNOWN_TOPIC_OR_PARTITION, -1),
                 Err(StoreError::InvalidProducerSequence { .. }) => {
                     (OUT_OF_ORDER_SEQUENCE_NUMBER, -1)

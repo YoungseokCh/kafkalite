@@ -5,10 +5,10 @@ use anyhow::{Result, bail};
 
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
-    UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
-    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
-    UpdateReplicaProgressResponse,
+    GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
+    RegisterBrokerResponse, UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse,
+    UpdatePartitionReplicationRequest, UpdatePartitionReplicationResponse,
+    UpdateReplicaProgressRequest, UpdateReplicaProgressResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
 
@@ -20,6 +20,7 @@ pub enum ClusterRpcRequest {
     UpdatePartitionLeader(UpdatePartitionLeaderRequest),
     UpdatePartitionReplication(UpdatePartitionReplicationRequest),
     UpdateReplicaProgress(UpdateReplicaProgressRequest),
+    GetPartitionState(GetPartitionStateRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub enum ClusterRpcResponse {
     UpdatePartitionLeader(UpdatePartitionLeaderResponse),
     UpdatePartitionReplication(UpdatePartitionReplicationResponse),
     UpdateReplicaProgress(UpdateReplicaProgressResponse),
+    GetPartitionState(GetPartitionStateResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,16 @@ pub trait ClusterRpcTransport {
     ) -> Result<UpdateReplicaProgressResponse> {
         match self.send(ClusterRpcRequest::UpdateReplicaProgress(request))? {
             ClusterRpcResponse::UpdateReplicaProgress(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn get_partition_state(
+        &self,
+        request: GetPartitionStateRequest,
+    ) -> Result<GetPartitionStateResponse> {
+        match self.send(ClusterRpcRequest::GetPartitionState(request))? {
+            ClusterRpcResponse::GetPartitionState(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
@@ -179,6 +191,10 @@ impl InMemoryRemoteClusterRpcTransport {
             remote: RemoteClusterRpcTransport::new(config),
             network,
         }
+    }
+
+    pub fn resolve_target(&self, node_id: i32) -> Result<ClusterRpcTarget> {
+        self.remote.resolve_target(node_id)
     }
 }
 
