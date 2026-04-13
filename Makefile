@@ -1,6 +1,6 @@
 SERVER_DIR := rust/server
 
-.PHONY: test test-server test-python test-differential fmt clippy verify publish-dry-run bench bench-runtime bench-compare
+.PHONY: test test-server test-python test-differential fmt clippy verify publish-dry-run publish-dry-run-dirty bench bench-runtime bench-compare
 
 test: test-server
 
@@ -16,6 +16,9 @@ clippy:
 verify: fmt clippy test
 
 publish-dry-run:
+	cargo publish --manifest-path $(SERVER_DIR)/Cargo.toml --dry-run
+
+publish-dry-run-dirty:
 	cargo publish --manifest-path $(SERVER_DIR)/Cargo.toml --dry-run --allow-dirty
 
 test-python:
@@ -25,11 +28,10 @@ test-differential:
 	bash scripts/run-differential.sh
 
 bench:
-	bash scripts/run-bench.sh full
+	bash scripts/run-bench.sh full "$(LABEL)"
 
 bench-runtime:
-	bash scripts/run-bench.sh runtime
+	bash scripts/run-bench.sh runtime "$(LABEL)"
 
 bench-compare:
-	test -n "$(BASE)" && test -n "$(NEW)"
 	bash scripts/compare-bench.sh "$(BASE)" "$(NEW)" "$(OUTPUT)"

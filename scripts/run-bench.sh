@@ -7,19 +7,21 @@ SERVER_DIR="$ROOT_DIR/rust/server"
 BENCH_ROOT="$ROOT_DIR/.benchmarks"
 
 GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf unknown)"
-RUN_LABEL="${2:-$(date -u +%Y%m%dT%H%M%SZ)-$GIT_SHA}"
+RUN_LABEL="${2:-$(date -u +%Y%m%dT%H%M%SZ)-$GIT_SHA-$$}"
 RUN_DIR="$BENCH_ROOT/$RUN_LABEL"
-DIRTY=false
-if [[ -n "$(git -C "$ROOT_DIR" status --short)" ]]; then
-  DIRTY=true
+DIRTY_STATUS="$(git -C "$ROOT_DIR" status --short)"
+
+if [[ -n "$DIRTY_STATUS" ]]; then
+  echo "benchmark runs require a clean git tree; commit or stash changes first" >&2
+  exit 1
+fi
+
+if [[ -e "$RUN_DIR" ]]; then
+  echo "benchmark output directory already exists: $RUN_DIR" >&2
+  exit 1
 fi
 
 mkdir -p "$RUN_DIR"
-
-DIRTY_ARG=()
-if [[ "$DIRTY" == true ]]; then
-  DIRTY_ARG=(--dirty)
-fi
 
 pushd "$SERVER_DIR" >/dev/null
 cargo build --release --features bench-internal --bin kafkalite --bin bench_runner
@@ -28,7 +30,7 @@ BENCH_BIN="$SERVER_DIR/target/release/bench_runner"
 BINARY_BYTES="$(stat -c %s "$BROKER_BIN")"
 PACKAGE_BYTES=0
 if [[ "$MODE" == "full" || "$MODE" == "runtime" ]]; then
-  cargo package --allow-dirty --no-verify >/dev/null
+  cargo package >/dev/null
   PACKAGE_BYTES="$(stat -c %s "$SERVER_DIR/target/package/kafkalite-server-"*.crate | tail -n 1)"
 fi
 "$BENCH_BIN" \
@@ -37,6 +39,5 @@ fi
   --mode "$MODE" \
   --binary-bytes "$BINARY_BYTES" \
   --package-bytes "$PACKAGE_BYTES" \
-  --git-sha "$GIT_SHA" \
-  "${DIRTY_ARG[@]}"
+  --git-sha "$GIT_SHA"
 popd >/dev/null

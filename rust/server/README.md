@@ -93,6 +93,7 @@ make test
 make test-python
 make test-differential
 make publish-dry-run
+make publish-dry-run-dirty
 ```
 
 - `make fmt` checks Rust formatting
@@ -100,7 +101,8 @@ make publish-dry-run
 - `make test` runs the Rust server/client suites, including the fast local `tests/contract.rs` contract layer
 - `make test-python` provisions a temporary virtualenv and runs the Python compatibility smoke test
 - `make test-differential` starts a temporary single-node Kafka container and compares supported roundtrips against the local broker
-- `make publish-dry-run` validates the package that would be uploaded to crates.io
+- `make publish-dry-run` validates the clean release candidate that would be uploaded to crates.io
+- `make publish-dry-run-dirty` is a local-only escape hatch for package iteration before committing
 
 ## Benchmark commands
 
@@ -109,11 +111,13 @@ From the repository root:
 ```bash
 make bench
 make bench-runtime
+make bench-runtime LABEL=v1.0.0
 make bench-compare BASE=.benchmarks/<old>/result.json NEW=.benchmarks/<new>/result.json
 ```
 
 - benchmark outputs are written under `.benchmarks/`
-- each run is stored in its own directory so history can be committed over time
+- each run stores only `result.json`, `metrics.csv`, and `summary.md`, so history stays reviewable and portable
+- benchmark runs require a clean git tree
 - `make bench-runtime` and `make bench` include the multi-partition scenarios `bench.produce.multi_partition` and `bench.fetch.multi_partition` alongside `bench.mixed.handoff`
 
 ## Store inspection and repair

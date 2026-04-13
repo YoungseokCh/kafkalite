@@ -200,19 +200,19 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
 
     let mut reports = Vec::new();
     for spec in specs {
-        let scenario_root = args
-            .output_dir
-            .join(format!("scenario-{}", spec.name.replace('.', "-")));
+        let scenario_root = tempfile::Builder::new()
+            .prefix(&format!("{}-", spec.name.replace('.', "-")))
+            .tempdir()?;
         let report = if spec.name.contains("fetch.tail") {
-            run_fetch_tail(&scenario_root, &args.broker_bin, &spec).await?
+            run_fetch_tail(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("roundtrip") {
-            run_roundtrip(&scenario_root, &args.broker_bin, &spec).await?
+            run_roundtrip(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("commit.resume") {
-            run_commit_resume(&scenario_root, &args.broker_bin, &spec).await?
+            run_commit_resume(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("mixed.handoff") {
-            run_mixed_handoff(&scenario_root, &args.broker_bin, &spec).await?
+            run_mixed_handoff(scenario_root.path(), &args.broker_bin, &spec).await?
         } else {
-            run_produce_only(&scenario_root, &args.broker_bin, &spec).await?
+            run_produce_only(scenario_root.path(), &args.broker_bin, &spec).await?
         };
         reports.push(report);
     }

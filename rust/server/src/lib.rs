@@ -1,5 +1,6 @@
 #![doc = "Server-first Kafka-compatible broker crate with `kafkalite` and `store_tool` binaries."]
 
+#[cfg(feature = "bench-internal")]
 #[doc(hidden)]
 pub mod bench;
 pub mod broker;
