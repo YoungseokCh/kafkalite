@@ -159,11 +159,8 @@ impl KafkaBroker {
             return Ok(-1);
         }
         if latest.offset > fetched.leader_log_end_offset {
-            return Err(anyhow::anyhow!(
-                "replica divergence requires truncate: follower offset {} > leader offset {}",
-                latest.offset,
-                fetched.leader_log_end_offset
-            ));
+            self.store
+                .truncate_partition(topic, partition, fetched.leader_log_end_offset)?;
         }
         if !fetched.records.is_empty() {
             let _ =
@@ -499,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follower_detects_divergence_when_ahead_of_leader() {
+    async fn follower_reconciles_divergence_when_ahead_of_leader() {
         let harness = TwoNodeClusterHarness::new_controller_pair();
         let voters = voter_pair();
         let leader = test_broker_with_voters(1, 19092, voters.clone());
@@ -542,12 +539,17 @@ mod tests {
             InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
         let target = transport.resolve_target(1).unwrap();
 
-        let err = follower
+        let high_watermark = follower
             .fetch_and_apply_from_remote_leader(&transport, &target, "diverge.topic", 0, 200)
-            .unwrap_err()
-            .to_string();
+            .unwrap();
+        let fetched = follower
+            .store()
+            .fetch_records("diverge.topic", 0, 0, 10)
+            .unwrap();
 
-        assert!(err.contains("replica divergence requires truncate"));
+        assert_eq!(high_watermark, 0);
+        assert_eq!(fetched.records.len(), 1);
+        assert_eq!(fetched.records[0].offset, 0);
     }
 
     fn test_broker(node_id: i32, port: u16) -> KafkaBroker {

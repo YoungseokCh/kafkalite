@@ -252,6 +252,62 @@ impl RecordLog {
         Ok(())
     }
 
+    pub fn truncate_to_offset(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()> {
+        if !self.segment_path(topic, partition).exists() {
+            return Ok(());
+        }
+        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
+        let mut rewritten = Vec::new();
+        loop {
+            let mut len = [0_u8; 4];
+            if reader.read_exact(&mut len).is_err() {
+                break;
+            }
+            let payload_len = u32::from_le_bytes(len) as usize;
+            let mut payload = vec![0_u8; payload_len];
+            reader.read_exact(&mut payload)?;
+            let mut batch = StoredBatch::decode_binary(&payload)?;
+            if batch.base_offset >= next_offset {
+                break;
+            }
+            if batch.last_offset >= next_offset {
+                batch.records.retain(|record| record.offset < next_offset);
+                if batch.records.is_empty() {
+                    break;
+                }
+                batch.base_offset = batch
+                    .records
+                    .first()
+                    .map(|record| record.offset)
+                    .unwrap_or(0);
+                batch.last_offset = batch
+                    .records
+                    .last()
+                    .map(|record| record.offset)
+                    .unwrap_or(batch.base_offset);
+                batch.max_timestamp_ms = batch
+                    .records
+                    .iter()
+                    .map(|record| record.timestamp_ms)
+                    .max()
+                    .unwrap_or(0);
+            }
+            let encoded = batch.encode_binary()?;
+            rewritten.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            rewritten.extend_from_slice(&encoded);
+            if batch.last_offset + 1 >= next_offset {
+                break;
+            }
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(self.segment_path(topic, partition))?;
+        file.set_len(0)?;
+        file.write_all(&rewritten)?;
+        file.sync_all()?;
+        self.rebuild_indexes_for_partition(topic, partition)
+    }
+
     fn rebuild_indexes_for_partition(&self, topic: &str, partition: i32) -> Result<()> {
         if !self.segment_path(topic, partition).exists() {
             return Ok(());

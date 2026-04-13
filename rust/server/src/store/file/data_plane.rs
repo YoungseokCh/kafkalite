@@ -205,6 +205,23 @@ impl DataPlaneState {
         self.high_watermark(topic, partition)
     }
 
+    pub fn reconcile_partition_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<()> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        runtime.state.next_offset = next_offset;
+        runtime.producer_sequences.clear();
+        Ok(())
+    }
+
     pub fn topic_count(&self) -> usize {
         self.catalog.topic_count()
     }

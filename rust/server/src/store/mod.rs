@@ -59,6 +59,7 @@ pub trait Storage: Send + Sync {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<i64>;
+    fn truncate_partition(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()>;
     fn list_offsets(
         &self,
         topic: &str,

@@ -262,6 +262,13 @@ impl Storage for FileStore {
         data.latest_offset(topic, partition)
     }
 
+    fn truncate_partition(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()> {
+        self.logs
+            .truncate_to_offset(topic, partition, next_offset)?;
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        data.reconcile_partition_offset(topic, partition, next_offset)
+    }
+
     fn list_offsets(
         &self,
         topic: &str,
