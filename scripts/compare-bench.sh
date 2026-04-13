@@ -22,6 +22,15 @@ fi
 
 OUTPUT_ARGS=()
 if [[ -n "$OUTPUT" ]]; then
+  PARENT_DIR="$(dirname "$OUTPUT")"
+  if [[ ! -d "$PARENT_DIR" ]]; then
+    echo "output parent directory does not exist: $PARENT_DIR" >&2
+    exit 1
+  fi
+  if [[ -d "$OUTPUT" ]]; then
+    echo "output path is a directory: $OUTPUT" >&2
+    exit 1
+  fi
   OUTPUT_ARGS=("$OUTPUT")
 fi
 

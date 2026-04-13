@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::config::{BrokerConfig, Config, StorageConfig};
+use kafkalite_server::config::{BrokerConfig, Config, StorageConfig};
 
 pub struct BrokerProcess {
     pub bootstrap: String,

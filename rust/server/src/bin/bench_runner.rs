@@ -2,9 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
-use kafkalite_server::bench::mixed::run_mixed_handoff;
-use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
-use kafkalite_server::bench::scenarios::{
+
+mod bench_support;
+
+use bench_support::mixed::run_mixed_handoff;
+use bench_support::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
+use bench_support::scenarios::{
     ScenarioSpec, run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
 };
 
