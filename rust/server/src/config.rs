@@ -87,9 +87,17 @@ impl Config {
     }
 
     pub fn single_node(data_dir: PathBuf, port: u16, default_partitions: i32) -> Self {
+        let host = default_host();
+        let listener = ListenerConfig {
+            name: ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
+            host: host.clone(),
+            port,
+        };
         Self {
             broker: BrokerConfig {
+                host: host.clone(),
                 port,
+                advertised_host: host.clone(),
                 advertised_port: port,
                 ..BrokerConfig::default()
             },
@@ -97,7 +105,23 @@ impl Config {
                 data_dir,
                 default_partitions,
             },
-            cluster: ClusterConfig::default(),
+            cluster: ClusterConfig {
+                node_id: default_broker_id(),
+                process_roles: vec![ProcessRole::Broker],
+                listeners: [(
+                    ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
+                    listener.clone(),
+                )]
+                .into_iter()
+                .collect(),
+                advertised_listeners: [(
+                    ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
+                    listener,
+                )]
+                .into_iter()
+                .collect(),
+                ..ClusterConfig::default()
+            },
         }
     }
 
@@ -105,33 +129,10 @@ impl Config {
         self.client_listener().socket_addr()
     }
 
-    pub fn client_listener(&self) -> ListenerConfig {
+    pub fn client_listener(&self) -> &ListenerConfig {
         self.cluster
             .client_listener()
-            .cloned()
-            .unwrap_or_else(|| ListenerConfig {
-                name: ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
-                host: self.broker.host.clone(),
-                port: self.broker.port,
-            })
-    }
-
-    pub fn ensure_cluster_defaults(&mut self) {
-        if self.cluster.node_id == 0 {
-            self.cluster.node_id = self.broker.broker_id;
-        }
-        if self.cluster.process_roles.is_empty() {
-            self.cluster.process_roles = vec![ProcessRole::Broker];
-        }
-        let fallback_listener = ListenerConfig {
-            name: ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
-            host: self.broker.host.clone(),
-            port: self.broker.port,
-        };
-        self.cluster
-            .listeners
-            .entry(ProcessRole::BROKER_DEFAULT_LISTENER.to_string())
-            .or_insert(fallback_listener);
+            .expect("client listener must be configured")
     }
 }
 
@@ -267,6 +268,18 @@ mod tests {
         let err = Config::load(path.to_str()).unwrap_err().to_string();
 
         assert!(err.contains("missing from listeners"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn broker_role_requires_listeners_in_strict_mode() {
+        let path = temp_config_path("server.properties");
+        std::fs::write(&path, "process.roles=broker\n").unwrap();
+
+        let err = Config::load(path.to_str()).unwrap_err().to_string();
+
+        assert!(err.contains("PLAINTEXT listener"));
 
         std::fs::remove_file(path).unwrap();
     }

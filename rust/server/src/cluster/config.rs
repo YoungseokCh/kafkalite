@@ -51,6 +51,11 @@ impl ClusterConfig {
         self.listeners.get(ProcessRole::BROKER_DEFAULT_LISTENER)
     }
 
+    pub fn advertised_client_listener(&self) -> Option<&ListenerConfig> {
+        self.advertised_listeners
+            .get(ProcessRole::BROKER_DEFAULT_LISTENER)
+    }
+
     pub fn has_role(&self, role: ProcessRole) -> bool {
         self.process_roles.contains(&role)
     }
@@ -82,15 +87,6 @@ pub fn load_properties_config(config_path: Option<&str>) -> Result<Config> {
 
     if let Some(value) = properties.get("listeners") {
         config.cluster.listeners = parse_named_listeners("listeners", value)?;
-    } else {
-        config.cluster.listeners.insert(
-            ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
-            ListenerConfig {
-                name: ProcessRole::BROKER_DEFAULT_LISTENER.to_string(),
-                host: default_host(),
-                port: default_port(),
-            },
-        );
     }
 
     if let Some(listener) = config.cluster.client_listener() {
@@ -104,16 +100,9 @@ pub fn load_properties_config(config_path: Option<&str>) -> Result<Config> {
         config.cluster.advertised_listeners = config.cluster.listeners.clone();
     }
 
-    if let Some(listener) = config
-        .cluster
-        .advertised_listeners
-        .get(ProcessRole::BROKER_DEFAULT_LISTENER)
-    {
+    if let Some(listener) = config.cluster.advertised_client_listener() {
         config.broker.advertised_host = listener.host.clone();
         config.broker.advertised_port = listener.port;
-    } else {
-        config.broker.advertised_host = config.broker.host.clone();
-        config.broker.advertised_port = config.broker.port;
     }
 
     if let Some(value) = properties.get("controller.listener.names") {
@@ -284,12 +273,4 @@ fn parse_positive_i32(key: &str, value: &str) -> Result<i32> {
 
 fn default_broker_id() -> i32 {
     BrokerConfig::default().broker_id
-}
-
-fn default_host() -> String {
-    BrokerConfig::default().host
-}
-
-fn default_port() -> u16 {
-    BrokerConfig::default().port
 }

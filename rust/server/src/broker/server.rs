@@ -18,8 +18,7 @@ pub struct KafkaBroker {
 }
 
 impl KafkaBroker {
-    pub fn new(mut config: Config, store: Arc<dyn Storage>) -> Result<Self> {
-        config.ensure_cluster_defaults();
+    pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
         let cluster = ClusterRuntime::from_config(&config)?;
         Ok(Self {
             config,
