@@ -37,25 +37,25 @@ impl MetadataStore {
         &self.image
     }
 
+    pub fn metadata_offset(&self) -> i64 {
+        self.image.metadata_offset
+    }
+
     pub fn sync_topics(&mut self, topics: &[TopicMetadata], broker_id: i32) -> Result<bool> {
         let mut changed = false;
         for topic in topics {
             let next = TopicMetadataImage::from_store_topic(topic, broker_id);
             if self.image.upsert_topic(next.clone()) {
-                self.append_record(&MetadataRecord::UpsertTopic(next))?;
+                self.append_records(&[MetadataRecord::UpsertTopic(next)])?;
                 changed = true;
             }
-        }
-        if changed {
-            self.persist_snapshot()?;
         }
         Ok(changed)
     }
 
     pub fn sync_broker(&mut self, broker: BrokerMetadata) -> Result<bool> {
         if self.image.upsert_broker(broker.clone()) {
-            self.append_record(&MetadataRecord::RegisterBroker(broker))?;
-            self.persist_snapshot()?;
+            self.append_records(&[MetadataRecord::RegisterBroker(broker)])?;
             return Ok(true);
         }
         Ok(false)
@@ -66,25 +66,48 @@ impl MetadataStore {
             return Ok(false);
         }
         self.image.controller_id = controller_id;
-        self.append_record(&MetadataRecord::SetController { controller_id })?;
-        self.persist_snapshot()?;
+        self.append_records(&[MetadataRecord::SetController { controller_id }])?;
         Ok(true)
     }
 
-    fn append_record(&self, record: &MetadataRecord) -> Result<()> {
+    pub fn append_remote_records(
+        &mut self,
+        prev_metadata_offset: i64,
+        records: &[MetadataRecord],
+    ) -> Result<bool> {
+        if self.metadata_offset() != prev_metadata_offset {
+            return Ok(false);
+        }
+        self.append_records(records)?;
+        Ok(true)
+    }
+
+    fn append_records(&mut self, records: &[MetadataRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.root.join(LOG_FILE))?;
-        serde_json::to_writer(&mut file, record)?;
-        file.write_all(b"\n")?;
+        for record in records {
+            serde_json::to_writer(&mut file, record)?;
+            file.write_all(b"\n")?;
+            self.image.apply(record.clone());
+        }
         file.sync_data()?;
-        Ok(())
+        self.persist_snapshot()?;
+        self.truncate_log()
     }
 
     fn persist_snapshot(&self) -> Result<()> {
         let path = self.root.join(SNAPSHOT_FILE);
         serde_json::to_writer_pretty(File::create(path)?, &self.image)?;
+        Ok(())
+    }
+
+    fn truncate_log(&self) -> Result<()> {
+        File::create(self.root.join(LOG_FILE))?;
         Ok(())
     }
 }
@@ -149,6 +172,7 @@ mod tests {
 
         let reopened = MetadataStore::open(dir.path(), &config).unwrap();
         assert_eq!(reopened.image().controller_id, 7);
+        assert_eq!(reopened.metadata_offset(), 1);
         assert_eq!(reopened.image().brokers.len(), 1);
         assert_eq!(reopened.image().topics.len(), 1);
         assert_eq!(reopened.image().topics[0].partitions[0].leader_id, 7);
@@ -184,5 +208,25 @@ mod tests {
         let reopened = MetadataStore::open(dir.path(), &config).unwrap();
         assert_eq!(reopened.image().topics.len(), 1);
         assert_eq!(reopened.image().topics[0].partitions.len(), 2);
+        assert_eq!(reopened.metadata_offset(), 1);
+    }
+
+    #[test]
+    fn append_remote_records_checks_previous_offset() {
+        let dir = tempdir().unwrap();
+        let config = Config::single_node(dir.path().join("data"), 29092, 1);
+        let mut store = MetadataStore::open(dir.path(), &config).unwrap();
+
+        let accepted = store
+            .append_remote_records(-1, &[MetadataRecord::SetController { controller_id: 3 }])
+            .unwrap();
+        let rejected = store
+            .append_remote_records(-1, &[MetadataRecord::SetController { controller_id: 4 }])
+            .unwrap();
+
+        assert!(accepted);
+        assert!(!rejected);
+        assert_eq!(store.image().controller_id, 3);
+        assert_eq!(store.metadata_offset(), 0);
     }
 }

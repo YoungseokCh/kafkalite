@@ -7,7 +7,8 @@ use crate::cluster::controller::{BrokerHeartbeat, ControllerSnapshot, Controller
 use crate::cluster::metadata::{BrokerMetadata, ClusterMetadataImage, MetadataStore};
 use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
-    BrokerHeartbeatRequest, BrokerHeartbeatResponse, RegisterBrokerRequest, RegisterBrokerResponse,
+    AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -136,9 +137,34 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_append_metadata(
+        &self,
+        request: AppendMetadataRequest,
+    ) -> Result<AppendMetadataResponse> {
+        let snapshot = {
+            let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+            quorum.follow_leader(request.leader_id, request.term);
+            quorum.snapshot()
+        };
+        let mut metadata = self
+            .metadata
+            .lock()
+            .expect("cluster metadata mutex poisoned");
+        let accepted =
+            metadata.append_remote_records(request.prev_metadata_offset, &request.records)?;
+        Ok(AppendMetadataResponse {
+            term: snapshot.current_term,
+            accepted,
+            last_metadata_offset: metadata.metadata_offset(),
+        })
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
+            ClusterRpcRequest::AppendMetadata(request) => Ok(ClusterRpcResponse::AppendMetadata(
+                self.handle_append_metadata(request)?,
+            )),
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
             )),
@@ -281,5 +307,29 @@ mod tests {
         let metadata = runtime.metadata_image();
         assert_eq!(metadata.controller_id, 4);
         assert!(metadata.brokers.iter().any(|broker| broker.node_id == 9));
+    }
+
+    #[test]
+    fn append_metadata_updates_offset_and_term() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let initial_offset = runtime.metadata_image().metadata_offset;
+        let response = runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 9,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 9 }],
+            })
+            .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(response.term, 2);
+        assert_eq!(runtime.metadata_image().controller_id, 9);
+        assert_eq!(runtime.metadata_image().metadata_offset, initial_offset + 1);
     }
 }

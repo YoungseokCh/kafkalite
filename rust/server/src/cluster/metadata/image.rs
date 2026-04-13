@@ -8,6 +8,7 @@ use super::record::MetadataRecord;
 pub struct ClusterMetadataImage {
     pub cluster_id: String,
     pub controller_id: i32,
+    pub metadata_offset: i64,
     pub brokers: Vec<BrokerMetadata>,
     pub topics: Vec<TopicMetadataImage>,
 }
@@ -17,12 +18,14 @@ impl ClusterMetadataImage {
         Self {
             cluster_id,
             controller_id,
+            metadata_offset: -1,
             brokers: Vec::new(),
             topics: Vec::new(),
         }
     }
 
     pub fn apply(&mut self, record: MetadataRecord) {
+        self.metadata_offset += 1;
         match record {
             MetadataRecord::SetController { controller_id } => {
                 self.controller_id = controller_id;

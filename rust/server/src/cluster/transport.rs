@@ -3,18 +3,21 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 
 use crate::cluster::rpc::{
-    BrokerHeartbeatRequest, BrokerHeartbeatResponse, RegisterBrokerRequest, RegisterBrokerResponse,
+    AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterRpcRequest {
+    AppendMetadata(AppendMetadataRequest),
     RegisterBroker(RegisterBrokerRequest),
     BrokerHeartbeat(BrokerHeartbeatRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterRpcResponse {
+    AppendMetadata(AppendMetadataResponse),
     RegisterBroker(RegisterBrokerResponse),
     BrokerHeartbeat(BrokerHeartbeatResponse),
 }
@@ -40,6 +43,13 @@ pub trait ClusterRpcTransport {
     fn register_broker(&self, request: RegisterBrokerRequest) -> Result<RegisterBrokerResponse> {
         match self.send(ClusterRpcRequest::RegisterBroker(request))? {
             ClusterRpcResponse::RegisterBroker(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn append_metadata(&self, request: AppendMetadataRequest) -> Result<AppendMetadataResponse> {
+        match self.send(ClusterRpcRequest::AppendMetadata(request))? {
+            ClusterRpcResponse::AppendMetadata(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
@@ -170,6 +180,31 @@ mod tests {
                 .brokers
                 .iter()
                 .any(|broker| broker.node_id == 9)
+        );
+    }
+
+    #[test]
+    fn local_transport_dispatches_append_metadata() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let transport = LocalClusterRpcTransport::new(runtime.clone());
+
+        let response = transport
+            .append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 4,
+                prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 4 }],
+            })
+            .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(
+            response.last_metadata_offset,
+            runtime.metadata_image().metadata_offset
         );
     }
 
