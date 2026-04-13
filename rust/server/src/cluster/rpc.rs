@@ -84,3 +84,19 @@ pub struct UpdatePartitionReplicationResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateReplicaProgressRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub broker_id: i32,
+    pub log_end_offset: i64,
+    pub last_caught_up_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateReplicaProgressResponse {
+    pub accepted: bool,
+    pub metadata_offset: i64,
+    pub high_watermark: i64,
+}

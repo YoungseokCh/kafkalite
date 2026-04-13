@@ -19,7 +19,8 @@ pub use rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
     UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
-    UpdatePartitionReplicationResponse, VoteRequest, VoteResponse,
+    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
+    UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
 };
 pub use runtime::ClusterRuntime;
 pub use transport::{

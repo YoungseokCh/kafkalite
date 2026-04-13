@@ -74,6 +74,12 @@ impl KafkaBroker {
             .partition_leader_id(topic, partition)
             .is_none_or(|leader_id| leader_id == self.config.broker.broker_id)
     }
+
+    pub fn partition_high_watermark(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.cluster()
+            .metadata_image()
+            .partition_high_watermark(topic, partition)
+    }
 }
 
 fn is_expected_disconnect(err: &anyhow::Error) -> bool {

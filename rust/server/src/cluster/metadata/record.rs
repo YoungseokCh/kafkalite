@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::cluster::ReplicaProgress;
+
 use super::image::{BrokerMetadata, TopicMetadataImage};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +22,11 @@ pub enum MetadataRecord {
         replicas: Vec<i32>,
         isr: Vec<i32>,
         leader_epoch: i32,
+    },
+    UpdateReplicaProgress {
+        topic_name: String,
+        partition_index: i32,
+        progress: ReplicaProgress,
     },
     UpsertTopic(TopicMetadataImage),
 }

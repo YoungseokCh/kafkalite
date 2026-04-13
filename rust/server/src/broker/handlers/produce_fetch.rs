@@ -121,12 +121,15 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
             ) {
                 Ok(fetched) => {
                     let records = encode_records(&fetched.records)?;
+                    let high_watermark = broker
+                        .partition_high_watermark(&topic_name, partition.partition)
+                        .unwrap_or(fetched.high_watermark);
                     partitions.push(
                         PartitionData::default()
                             .with_partition_index(partition.partition)
                             .with_error_code(0)
-                            .with_high_watermark(fetched.high_watermark)
-                            .with_last_stable_offset(fetched.high_watermark)
+                            .with_high_watermark(high_watermark)
+                            .with_last_stable_offset(high_watermark)
                             .with_log_start_offset(0)
                             .with_aborted_transactions(None)
                             .with_preferred_read_replica(BrokerId(-1))
@@ -410,8 +413,10 @@ mod tests {
                             partition: 0,
                             leader_id: 9,
                             leader_epoch: 1,
+                            high_watermark: 0,
                             replicas: vec![9],
                             isr: vec![9],
+                            replica_progress: vec![],
                         }],
                     },
                 )],
@@ -451,8 +456,10 @@ mod tests {
                             partition: 0,
                             leader_id: 9,
                             leader_epoch: 1,
+                            high_watermark: 0,
                             replicas: vec![9],
                             isr: vec![9],
+                            replica_progress: vec![],
                         }],
                     },
                 )],
@@ -498,6 +505,73 @@ mod tests {
             offsets.topics[0].partitions[0].error_code,
             NOT_LEADER_OR_FOLLOWER
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_uses_metadata_high_watermark_when_replication_progress_exists() {
+        let broker = test_broker();
+        broker.store().ensure_topic("hw.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["hw.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+
+        let _ = handle_produce(&broker, produce_request("hw.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        broker
+            .cluster()
+            .handle_update_partition_replication(
+                crate::cluster::UpdatePartitionReplicationRequest {
+                    topic_name: "hw.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![1, 2],
+                    isr: vec![1, 2],
+                    leader_epoch: 1,
+                },
+            )
+            .unwrap();
+        broker
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "hw.topic".to_string(),
+                partition_index: 0,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        broker
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "hw.topic".to_string(),
+                partition_index: 0,
+                broker_id: 2,
+                log_end_offset: 0,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("hw.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fetch.responses[0].partitions[0].high_watermark, 0);
+        assert_eq!(fetch.responses[0].partitions[0].last_stable_offset, 0);
     }
 
     fn test_broker() -> KafkaBroker {
