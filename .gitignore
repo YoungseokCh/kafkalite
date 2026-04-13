@@ -1,7 +1,2 @@
 /target/
 **/target/
-.benchmarks/latest/
-.benchmarks/runs/
-.benchmarks/baseline/result.json
-.benchmarks/baseline/metrics.csv
-.benchmarks/baseline/summary.md

@@ -2,9 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
-use kafkalite_server::bench::mixed::run_mixed_handoff;
-use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
-use kafkalite_server::bench::scenarios::{
+
+mod bench_support;
+
+use bench_support::mixed::run_mixed_handoff;
+use bench_support::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
+use bench_support::scenarios::{
     ScenarioSpec, run_cluster_replication_metadata, run_commit_resume, run_fetch_tail,
     run_produce_only, run_roundtrip,
 };
@@ -213,21 +216,21 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
 
     let mut reports = Vec::new();
     for spec in specs {
-        let scenario_root = args
-            .output_dir
-            .join(format!("scenario-{}", spec.name.replace('.', "-")));
+        let scenario_root = tempfile::Builder::new()
+            .prefix(&format!("{}-", spec.name.replace('.', "-")))
+            .tempdir()?;
         let report = if spec.name.contains("fetch.tail") {
-            run_fetch_tail(&scenario_root, &args.broker_bin, &spec).await?
+            run_fetch_tail(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("roundtrip") {
-            run_roundtrip(&scenario_root, &args.broker_bin, &spec).await?
+            run_roundtrip(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("commit.resume") {
-            run_commit_resume(&scenario_root, &args.broker_bin, &spec).await?
+            run_commit_resume(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("mixed.handoff") {
-            run_mixed_handoff(&scenario_root, &args.broker_bin, &spec).await?
+            run_mixed_handoff(scenario_root.path(), &args.broker_bin, &spec).await?
         } else if spec.name.contains("cluster.replication.metadata") {
-            run_cluster_replication_metadata(&scenario_root, &spec).await?
+            run_cluster_replication_metadata(scenario_root.path(), &spec).await?
         } else {
-            run_produce_only(&scenario_root, &args.broker_bin, &spec).await?
+            run_produce_only(scenario_root.path(), &args.broker_bin, &spec).await?
         };
         reports.push(report);
     }

@@ -2,6 +2,17 @@
 
 Broker-owned file-log Kafka wire-protocol server.
 
+## Install
+
+```bash
+cargo install kafkalite-server
+```
+
+Installed binaries:
+
+- `kafkalite` — run the broker
+- `store_tool` — inspect and repair on-disk storage
+
 ## Current scope
 
 - single broker
@@ -47,7 +58,13 @@ The server reads a Kafka-style `.properties` file.
 
 See `server.properties.example` for a ready-to-copy sample.
 
-Run the broker with:
+Run the installed broker with:
+
+```bash
+kafkalite --config ./server.properties
+```
+
+Run from this repository with:
 
 ```bash
 cargo run --manifest-path rust/server/Cargo.toml --bin kafkalite -- --config rust/server/server.properties.example
@@ -70,14 +87,22 @@ num.partitions=3
 From the repository root:
 
 ```bash
+make fmt
+make clippy
 make test
 make test-python
 make test-differential
+make publish-dry-run
+make publish-dry-run-dirty
 ```
 
+- `make fmt` checks Rust formatting
+- `make clippy` runs lint checks with warnings denied
 - `make test` runs the Rust server/client suites, including the fast local `tests/contract.rs` contract layer
 - `make test-python` provisions a temporary virtualenv and runs the Python compatibility smoke test
 - `make test-differential` starts a temporary single-node Kafka container and compares supported roundtrips against the local broker
+- `make publish-dry-run` validates the clean release candidate that would be uploaded to crates.io
+- `make publish-dry-run-dirty` is a local-only escape hatch for package iteration before committing
 
 ## Benchmark commands
 
@@ -85,19 +110,15 @@ From the repository root:
 
 ```bash
 make bench
-make bench-quick
-make bench-size
 make bench-runtime
-make bench-memory
-make bench-storage
-make bench-baseline
-make bench-compare
+make bench-runtime LABEL=v1.0.0
+make bench-compare BASE=.benchmarks/<old>/result.json NEW=.benchmarks/<new>/result.json
 ```
 
 - benchmark outputs are written under `.benchmarks/`
+- each run stores only `result.json`, `metrics.csv`, and `summary.md`, so history stays reviewable and portable
+- benchmark runs require a clean git tree
 - `make bench-runtime` and `make bench` include the multi-partition scenarios `bench.produce.multi_partition` and `bench.fetch.multi_partition` alongside `bench.mixed.handoff`
-- `make bench-baseline` promotes the latest run to the comparison baseline
-- `make bench-compare` compares the current baseline and latest benchmark JSON reports
 
 ## Store inspection and repair
 
@@ -112,52 +133,3 @@ cargo run --manifest-path rust/server/Cargo.toml --bin store_tool -- --data-dir 
 - `storage-summary` prints aggregate topic/group/byte totals
 - `topic-summary` prints partition offsets for one topic
 - `rebuild-indexes` recreates `.index` and `.timeindex` files from the `.log` data for a topic
-
-## Current benchmark snapshot
-
-Latest recorded benchmark snapshot from `.benchmarks/latest/result.json`:
-
-- git sha: `592d416`
-- release binary size: `5,324,152` bytes
-- package size: `0` bytes
-- host: `linux/x86_64`
-- run shape: `make bench-runtime`
-
-| scenario | partitions | workload | elapsed | throughput | peak RSS | storage total |
-|---|---:|---:|---:|---:|---:|---:|
-| `bench.produce.small` | 1 | 1,000 msgs × 100B | 47,727 ms | 20.95 msgs/s | 5,884 KB | 369,895 B |
-| `bench.produce.multi_partition` | 3 | 1,000 msgs × 100B | 47,675 ms | 20.98 msgs/s | 5,992 KB | 643,973 B |
-| `bench.roundtrip` | 1 | 200 msgs × 512B | 10,484 ms | 19.08 msgs/s | 6,180 KB | 155,295 B |
-| `bench.fetch.multi_partition` | 3 | 500 msgs × 512B | 24,909 ms | 20.07 msgs/s | 5,916 KB | 522,919 B |
-| `bench.fetch.tail` | 1 | 500 msgs × 512B | 85 ms | 5861.54 msgs/s | 5,976 KB | 389,283 B |
-| `bench.commit.resume` | 1 | 4 msgs × 256B | 1,546 ms | 2.59 msgs/s | 5,944 KB | 2,231 B |
-| `bench.mixed.handoff` | 1 | 200 msgs × 256B | 11,383 ms | 17.57 msgs/s | 6,112 KB | 106,206 B |
-
-For reproducibility, rerun either:
-
-```bash
-make bench-runtime
-make bench
-```
-
-## Historical benchmark notes
-
-Reference SQLite-backed benchmark captured from commit `acaa3fe` and stored at:
-
-- `.benchmarks/runs/sqlite-acaa3fe/result.json`
-
-SQLite-backed snapshot (normalized to the same shape as the current benchmark snapshot):
-
-- git sha: `acaa3fe`
-- release binary size: `6,887,736` bytes
-- package size: `35,266` bytes
-- host: `linux/x86_64`
-
-| scenario | workload | elapsed | throughput | peak RSS | storage total | storage breakdown |
-|---|---:|---:|---:|---:|---:|---|
-| `bench.produce.small` | 1,000 msgs × 100B | 47,634 ms | 20.99 msgs/s | 7,796 KB | 253,952 B | sqlite db 253,952 |
-| `bench.produce.medium` | 500 msgs × 1,024B | 23,954 ms | 20.87 msgs/s | 8,260 KB | 638,976 B | sqlite db 638,976 |
-| `bench.roundtrip` | 200 msgs × 512B | 10,442 ms | 19.15 msgs/s | 7,536 KB | 4,096 B | sqlite db 4,096 |
-| `bench.commit.resume` | 4 msgs × 256B | 1,593 ms | 2.51 msgs/s | 7,584 KB | 4,096 B | sqlite db 4,096 |
-
-This section is intended to be updated over time as new benchmark runs are captured.

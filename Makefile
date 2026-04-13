@@ -1,11 +1,25 @@
 SERVER_DIR := rust/server
 
-.PHONY: test test-server test-python test-differential bench bench-quick bench-size bench-runtime bench-memory bench-storage bench-baseline bench-compare
+.PHONY: test test-server test-python test-differential fmt clippy verify publish-dry-run publish-dry-run-dirty bench bench-runtime bench-compare
 
 test: test-server
 
 test-server:
 	cargo test --manifest-path $(SERVER_DIR)/Cargo.toml
+
+fmt:
+	cargo fmt --manifest-path $(SERVER_DIR)/Cargo.toml --check
+
+clippy:
+	cargo clippy --manifest-path $(SERVER_DIR)/Cargo.toml --all-targets --all-features -- -D warnings
+
+verify: fmt clippy test
+
+publish-dry-run:
+	cargo publish --manifest-path $(SERVER_DIR)/Cargo.toml --dry-run
+
+publish-dry-run-dirty:
+	cargo publish --manifest-path $(SERVER_DIR)/Cargo.toml --dry-run --allow-dirty
 
 test-python:
 	bash scripts/run-python-compat.sh
@@ -14,25 +28,10 @@ test-differential:
 	bash scripts/run-differential.sh
 
 bench:
-	bash scripts/run-bench.sh full
-
-bench-quick:
-	bash scripts/run-bench.sh quick
-
-bench-size:
-	bash scripts/run-bench.sh size
+	bash scripts/run-bench.sh full "$(LABEL)"
 
 bench-runtime:
-	bash scripts/run-bench.sh runtime
-
-bench-memory:
-	bash scripts/run-bench.sh memory
-
-bench-storage:
-	bash scripts/run-bench.sh storage
-
-bench-baseline:
-	bash scripts/run-bench.sh baseline
+	bash scripts/run-bench.sh runtime "$(LABEL)"
 
 bench-compare:
-	bash scripts/compare-bench.sh $(BASE) $(NEW)
+	bash scripts/compare-bench.sh "$(BASE)" "$(NEW)" "$(OUTPUT)"
