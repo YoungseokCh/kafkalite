@@ -238,7 +238,9 @@ impl ClusterRpcTransport for LocalClusterRpcTransport {
 mod tests {
     use tempfile::tempdir;
 
-    use crate::cluster::{ClusterRuntime, ControllerQuorumVoter, ProcessRole};
+    use crate::cluster::{
+        ClusterRuntime, ControllerQuorumVoter, ProcessRole, test_support::TwoNodeClusterHarness,
+    };
     use crate::config::Config;
 
     use super::*;
@@ -461,7 +463,9 @@ mod tests {
 
     #[test]
     fn in_memory_remote_transport_dispatches_to_registered_runtime() {
-        let mut config1 = Config::single_node(tempdir().unwrap().path().join("node1"), 19092, 1);
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let mut config1 =
+            Config::single_node(tempdir().unwrap().path().join("node1-client"), 19092, 1);
         config1.cluster.node_id = 1;
         config1.cluster.process_roles = vec![ProcessRole::Controller];
         config1.cluster.controller_quorum_voters = vec![
@@ -476,15 +480,7 @@ mod tests {
                 port: 9093,
             },
         ];
-        let mut config2 = Config::single_node(tempdir().unwrap().path().join("node2"), 19093, 1);
-        config2.cluster.node_id = 2;
-        config2.cluster.process_roles = vec![ProcessRole::Controller];
-        config2.cluster.controller_quorum_voters = config1.cluster.controller_quorum_voters.clone();
-
-        let runtime2 = ClusterRuntime::from_config(&config2).unwrap();
-        let network = InMemoryClusterNetwork::default();
-        network.register(2, runtime2.clone());
-        let transport = InMemoryRemoteClusterRpcTransport::new(&config1.cluster, network);
+        let transport = InMemoryRemoteClusterRpcTransport::new(&config1.cluster, harness.network);
         let target = transport.remote.resolve_target(2).unwrap();
 
         let response = transport
@@ -493,7 +489,7 @@ mod tests {
                 ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
                     term: 2,
                     leader_id: 1,
-                    prev_metadata_offset: runtime2.metadata_image().metadata_offset,
+                    prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
                     records: vec![crate::cluster::MetadataRecord::SetController {
                         controller_id: 1,
                     }],
@@ -502,6 +498,102 @@ mod tests {
             .unwrap();
 
         assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
-        assert_eq!(runtime2.metadata_image().controller_id, 1);
+        assert_eq!(harness.node2.runtime.metadata_image().controller_id, 1);
+    }
+
+    #[test]
+    fn in_memory_remote_transport_propagates_replication_scenario() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        harness
+            .node2
+            .runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "replicated.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                2,
+            )
+            .unwrap();
+
+        let mut config1 =
+            Config::single_node(tempdir().unwrap().path().join("node1-client"), 19092, 1);
+        config1.cluster.node_id = 1;
+        config1.cluster.process_roles = vec![ProcessRole::Controller];
+        config1.cluster.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+        ];
+        let transport = InMemoryRemoteClusterRpcTransport::new(&config1.cluster, harness.network);
+        let target = transport.remote.resolve_target(2).unwrap();
+
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::UpdatePartitionLeader(UpdatePartitionLeaderRequest {
+                    topic_name: "replicated.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 1,
+                    leader_epoch: 1,
+                }),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::UpdatePartitionReplication(UpdatePartitionReplicationRequest {
+                    topic_name: "replicated.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![1, 2],
+                    isr: vec![1, 2],
+                    leader_epoch: 1,
+                }),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                    topic_name: "replicated.topic".to_string(),
+                    partition_index: 0,
+                    broker_id: 1,
+                    log_end_offset: 11,
+                    last_caught_up_ms: 100,
+                }),
+            )
+            .unwrap();
+        let response = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                    topic_name: "replicated.topic".to_string(),
+                    partition_index: 0,
+                    broker_id: 2,
+                    log_end_offset: 9,
+                    last_caught_up_ms: 100,
+                }),
+            )
+            .unwrap();
+
+        let ClusterRpcResponse::UpdateReplicaProgress(response) = response else {
+            panic!("unexpected response variant");
+        };
+        assert_eq!(response.high_watermark, 9);
+        assert_eq!(
+            harness
+                .node2
+                .runtime
+                .metadata_image()
+                .partition_high_watermark("replicated.topic", 0),
+            Some(9)
+        );
     }
 }

@@ -5,6 +5,8 @@ pub mod quorum;
 pub mod replication;
 pub mod rpc;
 pub mod runtime;
+#[cfg(test)]
+pub mod test_support;
 pub mod transport;
 
 pub use config::{ClusterConfig, ControllerQuorumVoter, ListenerConfig, ProcessRole};
