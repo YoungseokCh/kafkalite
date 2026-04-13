@@ -131,3 +131,23 @@ pub struct ReplicaFetchResponse {
     pub leader_log_end_offset: i64,
     pub records: Vec<crate::store::BrokerRecord>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginPartitionReassignmentRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub target_replicas: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancePartitionReassignmentRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub step: crate::cluster::ReassignmentStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionReassignmentResponse {
+    pub accepted: bool,
+    pub metadata_offset: i64,
+}

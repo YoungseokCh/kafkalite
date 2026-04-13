@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, bail};
 
 use crate::cluster::rpc::{
-    AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
+    BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
+    GetPartitionStateRequest, GetPartitionStateResponse, PartitionReassignmentResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
     UpdateReplicaProgressResponse,
@@ -24,6 +25,8 @@ pub enum ClusterRpcRequest {
     UpdateReplicaProgress(UpdateReplicaProgressRequest),
     GetPartitionState(GetPartitionStateRequest),
     ReplicaFetch(ReplicaFetchRequest),
+    BeginPartitionReassignment(BeginPartitionReassignmentRequest),
+    AdvancePartitionReassignment(AdvancePartitionReassignmentRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub enum ClusterRpcResponse {
     UpdateReplicaProgress(UpdateReplicaProgressResponse),
     GetPartitionState(GetPartitionStateResponse),
     ReplicaFetch(ReplicaFetchResponse),
+    BeginPartitionReassignment(PartitionReassignmentResponse),
+    AdvancePartitionReassignment(PartitionReassignmentResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +129,26 @@ pub trait ClusterRpcTransport {
     ) -> Result<ReplicaFetchResponse> {
         match self.send_to(target, ClusterRpcRequest::ReplicaFetch(request))? {
             ClusterRpcResponse::ReplicaFetch(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn begin_partition_reassignment(
+        &self,
+        request: BeginPartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        match self.send(ClusterRpcRequest::BeginPartitionReassignment(request))? {
+            ClusterRpcResponse::BeginPartitionReassignment(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn advance_partition_reassignment(
+        &self,
+        request: AdvancePartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        match self.send(ClusterRpcRequest::AdvancePartitionReassignment(request))? {
+            ClusterRpcResponse::AdvancePartitionReassignment(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
@@ -833,6 +858,74 @@ mod tests {
         assert_eq!(before_failover.leader_log_end_offset, 7);
         assert_eq!(after_failover, before_failover);
         assert_eq!(harness.node2.runtime.metadata_image().controller_id, 2);
+    }
+
+    #[test]
+    fn in_memory_remote_transport_advances_reassignment_lifecycle() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        harness
+            .node2
+            .runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "reassign.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+        let transport = harness.transport_from_node1();
+        let target = transport.resolve_target(2).unwrap();
+
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::BeginPartitionReassignment(BeginPartitionReassignmentRequest {
+                    topic_name: "reassign.topic".to_string(),
+                    partition_index: 0,
+                    target_replicas: vec![2, 3],
+                }),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AdvancePartitionReassignment(
+                    AdvancePartitionReassignmentRequest {
+                        topic_name: "reassign.topic".to_string(),
+                        partition_index: 0,
+                        step: crate::cluster::ReassignmentStep::ExpandingIsr,
+                    },
+                ),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AdvancePartitionReassignment(
+                    AdvancePartitionReassignmentRequest {
+                        topic_name: "reassign.topic".to_string(),
+                        partition_index: 0,
+                        step: crate::cluster::ReassignmentStep::LeaderSwitch,
+                    },
+                ),
+            )
+            .unwrap();
+
+        let reassignment = harness
+            .node2
+            .runtime
+            .metadata_image()
+            .partition_reassignment("reassign.topic", 0)
+            .unwrap();
+        assert_eq!(
+            reassignment.step,
+            crate::cluster::ReassignmentStep::LeaderSwitch
+        );
+        assert_eq!(
+            harness.node2.runtime.metadata_image().topics[0].partitions[0].leader_id,
+            2
+        );
     }
 
     #[test]

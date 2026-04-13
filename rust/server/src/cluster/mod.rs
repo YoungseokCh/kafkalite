@@ -13,14 +13,15 @@ pub use config::{ClusterConfig, ControllerQuorumVoter, ListenerConfig, ProcessRo
 pub use controller::{BrokerHeartbeat, BrokerRegistration, ControllerSnapshot, ControllerState};
 pub use metadata::{
     BrokerMetadata, ClusterMetadataImage, MetadataRecord, MetadataStore, PartitionMetadataImage,
-    TopicMetadataImage,
+    PartitionReassignment, ReassignmentStep, TopicMetadataImage,
 };
 pub use quorum::{QuorumSnapshot, QuorumState};
 pub use replication::{PartitionReplicationState, ReplicaProgress};
 pub use rpc::{
-    AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
+    BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
+    GetPartitionStateRequest, GetPartitionStateResponse, PartitionReassignmentResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
     UpdateReplicaProgressResponse, VoteRequest, VoteResponse,

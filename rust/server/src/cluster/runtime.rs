@@ -7,9 +7,10 @@ use crate::cluster::controller::{BrokerHeartbeat, ControllerSnapshot, Controller
 use crate::cluster::metadata::{BrokerMetadata, ClusterMetadataImage, MetadataStore};
 use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
-    AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
+    BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
+    GetPartitionStateRequest, GetPartitionStateResponse, PartitionReassignmentResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
     UpdateReplicaProgressResponse,
@@ -281,6 +282,62 @@ impl ClusterRuntime {
         anyhow::bail!("replica fetch requires broker data-plane transport")
     }
 
+    pub fn handle_begin_partition_reassignment(
+        &self,
+        request: BeginPartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        let prev_metadata_offset = self.metadata_image().metadata_offset;
+        let response = self.handle_append_metadata(AppendMetadataRequest {
+            term: self.quorum_snapshot().current_term,
+            leader_id: self
+                .quorum_snapshot()
+                .leader_id
+                .unwrap_or(self.config.node_id),
+            prev_metadata_offset,
+            records: vec![crate::cluster::MetadataRecord::BeginPartitionReassignment {
+                topic_name: request.topic_name,
+                partition_index: request.partition_index,
+                target_replicas: request.target_replicas,
+            }],
+        })?;
+        Ok(PartitionReassignmentResponse {
+            accepted: response.accepted,
+            metadata_offset: response.last_metadata_offset,
+        })
+    }
+
+    pub fn handle_advance_partition_reassignment(
+        &self,
+        request: AdvancePartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        let prev_metadata_offset = self.metadata_image().metadata_offset;
+        let record = if request.step == crate::cluster::ReassignmentStep::Complete {
+            crate::cluster::MetadataRecord::CompletePartitionReassignment {
+                topic_name: request.topic_name,
+                partition_index: request.partition_index,
+            }
+        } else {
+            crate::cluster::MetadataRecord::AdvancePartitionReassignment {
+                topic_name: request.topic_name,
+                partition_index: request.partition_index,
+                step: request.step,
+            }
+        };
+        let response = self.handle_append_metadata(AppendMetadataRequest {
+            term: self.quorum_snapshot().current_term,
+            leader_id: self
+                .quorum_snapshot()
+                .leader_id
+                .unwrap_or(self.config.node_id),
+            prev_metadata_offset,
+            records: vec![record],
+        })?;
+        Ok(PartitionReassignmentResponse {
+            accepted: response.accepted,
+            metadata_offset: response.last_metadata_offset,
+        })
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
@@ -308,6 +365,16 @@ impl ClusterRuntime {
             ClusterRpcRequest::ReplicaFetch(request) => Ok(ClusterRpcResponse::ReplicaFetch(
                 self.handle_replica_fetch(request)?,
             )),
+            ClusterRpcRequest::BeginPartitionReassignment(request) => {
+                Ok(ClusterRpcResponse::BeginPartitionReassignment(
+                    self.handle_begin_partition_reassignment(request)?,
+                ))
+            }
+            ClusterRpcRequest::AdvancePartitionReassignment(request) => {
+                Ok(ClusterRpcResponse::AdvancePartitionReassignment(
+                    self.handle_advance_partition_reassignment(request)?,
+                ))
+            }
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
             )),
@@ -656,5 +723,63 @@ mod tests {
         let image = runtime.metadata_image();
         assert_eq!(image.topics[0].partitions[0].isr, vec![1, 2]);
         assert_eq!(image.topics[0].partitions[0].high_watermark, 10);
+    }
+
+    #[test]
+    fn reassignment_lifecycle_updates_partition_metadata() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "reassign.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+
+        let begin = runtime
+            .handle_begin_partition_reassignment(BeginPartitionReassignmentRequest {
+                topic_name: "reassign.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![2, 3],
+            })
+            .unwrap();
+        assert!(begin.accepted);
+        assert_eq!(
+            runtime
+                .metadata_image()
+                .partition_reassignment("reassign.topic", 0)
+                .unwrap()
+                .step,
+            crate::cluster::ReassignmentStep::Planned
+        );
+
+        for step in [
+            crate::cluster::ReassignmentStep::Copying,
+            crate::cluster::ReassignmentStep::ExpandingIsr,
+            crate::cluster::ReassignmentStep::LeaderSwitch,
+            crate::cluster::ReassignmentStep::Shrinking,
+            crate::cluster::ReassignmentStep::Complete,
+        ] {
+            runtime
+                .handle_advance_partition_reassignment(AdvancePartitionReassignmentRequest {
+                    topic_name: "reassign.topic".to_string(),
+                    partition_index: 0,
+                    step,
+                })
+                .unwrap();
+        }
+
+        let image = runtime.metadata_image();
+        let partition = &image.topics[0].partitions[0];
+        assert_eq!(partition.replicas, vec![2, 3]);
+        assert_eq!(partition.leader_id, 2);
+        assert!(partition.reassignment.is_none());
     }
 }

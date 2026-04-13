@@ -66,6 +66,26 @@ impl ClusterMetadataImage {
             } => {
                 self.update_replica_progress(&topic_name, partition_index, progress);
             }
+            MetadataRecord::BeginPartitionReassignment {
+                topic_name,
+                partition_index,
+                target_replicas,
+            } => {
+                self.begin_partition_reassignment(&topic_name, partition_index, target_replicas);
+            }
+            MetadataRecord::AdvancePartitionReassignment {
+                topic_name,
+                partition_index,
+                step,
+            } => {
+                self.advance_partition_reassignment(&topic_name, partition_index, step);
+            }
+            MetadataRecord::CompletePartitionReassignment {
+                topic_name,
+                partition_index,
+            } => {
+                self.complete_partition_reassignment(&topic_name, partition_index);
+            }
             MetadataRecord::UpsertTopic(topic) => {
                 self.upsert_topic(topic);
             }
@@ -161,6 +181,23 @@ impl ClusterMetadataImage {
                     leader_log_end_offset,
                 )
             })
+    }
+
+    pub fn partition_reassignment(
+        &self,
+        topic_name: &str,
+        partition_index: i32,
+    ) -> Option<PartitionReassignment> {
+        self.topics
+            .iter()
+            .find(|topic| topic.name == topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|p| p.partition == partition_index)
+            })
+            .and_then(|partition| partition.reassignment.clone())
     }
 
     pub fn update_partition_leader(
@@ -271,6 +308,94 @@ impl ClusterMetadataImage {
                 .unwrap_or(partition.high_watermark);
         true
     }
+
+    pub fn begin_partition_reassignment(
+        &mut self,
+        topic_name: &str,
+        partition_index: i32,
+        target_replicas: Vec<i32>,
+    ) -> bool {
+        let Some(partition) = self.partition_mut(topic_name, partition_index) else {
+            return false;
+        };
+        if partition.reassignment.is_some() {
+            return false;
+        }
+        partition.reassignment = Some(PartitionReassignment {
+            target_replicas,
+            step: ReassignmentStep::Planned,
+        });
+        true
+    }
+
+    pub fn advance_partition_reassignment(
+        &mut self,
+        topic_name: &str,
+        partition_index: i32,
+        step: ReassignmentStep,
+    ) -> bool {
+        let Some(partition) = self.partition_mut(topic_name, partition_index) else {
+            return false;
+        };
+        let Some(reassignment) = partition.reassignment.as_mut() else {
+            return false;
+        };
+        if reassignment.step == step {
+            return false;
+        }
+        reassignment.step = step.clone();
+        match step {
+            ReassignmentStep::ExpandingIsr => {
+                partition.replicas = reassignment.target_replicas.clone();
+                partition.isr = reassignment.target_replicas.clone();
+            }
+            ReassignmentStep::LeaderSwitch => {
+                if let Some(new_leader) = reassignment.target_replicas.first().copied() {
+                    partition.leader_id = new_leader;
+                    partition.leader_epoch += 1;
+                }
+            }
+            ReassignmentStep::Shrinking => {
+                partition.replicas = reassignment.target_replicas.clone();
+                partition
+                    .isr
+                    .retain(|id| reassignment.target_replicas.contains(id));
+            }
+            ReassignmentStep::Complete => {
+                partition.replicas = reassignment.target_replicas.clone();
+                partition
+                    .isr
+                    .retain(|id| reassignment.target_replicas.contains(id));
+                partition.reassignment = None;
+            }
+            ReassignmentStep::Planned | ReassignmentStep::Copying => {}
+        }
+        true
+    }
+
+    pub fn complete_partition_reassignment(
+        &mut self,
+        topic_name: &str,
+        partition_index: i32,
+    ) -> bool {
+        self.advance_partition_reassignment(topic_name, partition_index, ReassignmentStep::Complete)
+    }
+
+    fn partition_mut(
+        &mut self,
+        topic_name: &str,
+        partition_index: i32,
+    ) -> Option<&mut PartitionMetadataImage> {
+        self.topics
+            .iter_mut()
+            .find(|topic| topic.name == topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter_mut()
+                    .find(|p| p.partition == partition_index)
+            })
+    }
 }
 
 fn compute_high_watermark(isr: &[i32], replica_progress: &[ReplicaProgress]) -> Option<i64> {
@@ -339,6 +464,7 @@ impl TopicMetadataImage {
                     replicas: vec![broker_id],
                     isr: vec![broker_id],
                     replica_progress: vec![],
+                    reassignment: None,
                 })
                 .collect(),
         }
@@ -354,4 +480,21 @@ pub struct PartitionMetadataImage {
     pub replicas: Vec<i32>,
     pub isr: Vec<i32>,
     pub replica_progress: Vec<ReplicaProgress>,
+    pub reassignment: Option<PartitionReassignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionReassignment {
+    pub target_replicas: Vec<i32>,
+    pub step: ReassignmentStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReassignmentStep {
+    Planned,
+    Copying,
+    ExpandingIsr,
+    LeaderSwitch,
+    Shrinking,
+    Complete,
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cluster::ReplicaProgress;
 
-use super::image::{BrokerMetadata, TopicMetadataImage};
+use super::image::{BrokerMetadata, ReassignmentStep, TopicMetadataImage};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataRecord {
@@ -27,6 +27,20 @@ pub enum MetadataRecord {
         topic_name: String,
         partition_index: i32,
         progress: ReplicaProgress,
+    },
+    BeginPartitionReassignment {
+        topic_name: String,
+        partition_index: i32,
+        target_replicas: Vec<i32>,
+    },
+    AdvancePartitionReassignment {
+        topic_name: String,
+        partition_index: i32,
+        step: ReassignmentStep,
+    },
+    CompletePartitionReassignment {
+        topic_name: String,
+        partition_index: i32,
     },
     UpsertTopic(TopicMetadataImage),
 }
