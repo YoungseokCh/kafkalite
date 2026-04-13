@@ -612,4 +612,88 @@ mod tests {
             Some(9)
         );
     }
+
+    #[test]
+    fn in_memory_remote_transport_applies_controller_failover() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let transport = harness.transport_from_node1();
+        let target = transport.resolve_target(2).unwrap();
+
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 1,
+                    prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 1,
+                    }],
+                }),
+            )
+            .unwrap();
+        let after_first = harness.node2.runtime.quorum_snapshot();
+        assert_eq!(after_first.leader_id, Some(1));
+        assert_eq!(after_first.current_term, 2);
+
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 3,
+                    leader_id: 2,
+                    prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .unwrap();
+        let after_failover = harness.node2.runtime.quorum_snapshot();
+        assert_eq!(after_failover.leader_id, Some(2));
+        assert_eq!(after_failover.current_term, 3);
+        assert_eq!(harness.node2.runtime.metadata_image().controller_id, 2);
+    }
+
+    #[test]
+    fn in_memory_remote_transport_rejects_stale_append_after_failover() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let transport = harness.transport_from_node1();
+        let target = transport.resolve_target(2).unwrap();
+
+        let initial_offset = harness.node2.runtime.metadata_image().metadata_offset;
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 3,
+                    leader_id: 2,
+                    prev_metadata_offset: initial_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .unwrap();
+
+        let response = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 1,
+                    prev_metadata_offset: initial_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 1,
+                    }],
+                }),
+            )
+            .unwrap();
+
+        let ClusterRpcResponse::AppendMetadata(response) = response else {
+            panic!("unexpected response variant");
+        };
+        assert!(!response.accepted);
+        assert_eq!(harness.node2.runtime.metadata_image().controller_id, 2);
+    }
 }

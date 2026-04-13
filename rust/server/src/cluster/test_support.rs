@@ -1,6 +1,9 @@
 use tempfile::tempdir;
 
-use crate::cluster::{ClusterRuntime, ControllerQuorumVoter, InMemoryClusterNetwork, ProcessRole};
+use crate::cluster::{
+    ClusterRuntime, ControllerQuorumVoter, InMemoryClusterNetwork,
+    InMemoryRemoteClusterRpcTransport, ProcessRole,
+};
 use crate::config::Config;
 
 #[derive(Clone)]
@@ -42,6 +45,10 @@ impl TwoNodeClusterHarness {
             network,
         }
     }
+
+    pub fn transport_from_node1(&self) -> InMemoryRemoteClusterRpcTransport {
+        InMemoryRemoteClusterRpcTransport::new(&node1_client_config().cluster, self.network.clone())
+    }
 }
 
 fn build_node(node_id: i32, port: u16, voters: Vec<ControllerQuorumVoter>) -> TestClusterNode {
@@ -54,4 +61,23 @@ fn build_node(node_id: i32, port: u16, voters: Vec<ControllerQuorumVoter>) -> Te
         node_id,
         runtime: ClusterRuntime::from_config(&config).unwrap(),
     }
+}
+
+fn node1_client_config() -> Config {
+    let mut config = Config::single_node(tempdir().unwrap().keep().join("node1-client"), 19092, 1);
+    config.cluster.node_id = 1;
+    config.cluster.process_roles = vec![ProcessRole::Controller];
+    config.cluster.controller_quorum_voters = vec![
+        ControllerQuorumVoter {
+            node_id: 1,
+            host: "node1".to_string(),
+            port: 9093,
+        },
+        ControllerQuorumVoter {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        },
+    ];
+    config
 }
