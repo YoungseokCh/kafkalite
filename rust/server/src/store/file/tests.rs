@@ -515,6 +515,45 @@ fn truncated_tail_is_recovered_on_restart() {
 }
 
 #[test]
+fn truncated_index_tail_is_rebuilt_on_restart() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = (0..4)
+        .map(|sequence| BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10 + i64::from(sequence),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: b"[]".to_vec(),
+        })
+        .collect::<Vec<_>>();
+    store
+        .append_records("recover.index", 0, &records, 10)
+        .unwrap();
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(
+            dir.path()
+                .join("topics/recover.index/partitions/0/00000000000000000000.index"),
+        )
+        .unwrap()
+        .write_all(&[1, 2, 3])
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let fetched = reopened.fetch_records("recover.index", 0, 2, 10).unwrap();
+
+    assert_eq!(fetched.records.len(), 2);
+    assert_eq!(fetched.records[0].offset, 2);
+    assert_eq!(fetched.records[1].offset, 3);
+}
+
+#[test]
 fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();

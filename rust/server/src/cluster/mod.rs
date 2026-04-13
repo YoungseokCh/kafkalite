@@ -5,7 +5,7 @@ pub mod quorum;
 pub mod replication;
 pub mod rpc;
 pub mod runtime;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-internal"))]
 pub mod test_support;
 pub mod transport;
 

@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::store::TopicMetadata;
@@ -11,6 +12,7 @@ use super::image::{BrokerMetadata, ClusterMetadataImage, TopicMetadataImage};
 use super::record::MetadataRecord;
 
 const SNAPSHOT_FILE: &str = "metadata.snapshot";
+const SNAPSHOT_TMP_FILE: &str = "metadata.snapshot.tmp";
 const LOG_FILE: &str = "metadata.log";
 
 #[derive(Debug)]
@@ -91,7 +93,13 @@ impl MetadataStore {
             .append(true)
             .open(self.root.join(LOG_FILE))?;
         for record in records {
-            serde_json::to_writer(&mut file, record)?;
+            serde_json::to_writer(
+                &mut file,
+                &MetadataLogEntry {
+                    metadata_offset: Some(self.image.metadata_offset + 1),
+                    record: record.clone(),
+                },
+            )?;
             file.write_all(b"\n")?;
             self.image.apply(record.clone());
         }
@@ -102,7 +110,11 @@ impl MetadataStore {
 
     fn persist_snapshot(&self) -> Result<()> {
         let path = self.root.join(SNAPSHOT_FILE);
-        serde_json::to_writer_pretty(File::create(path)?, &self.image)?;
+        let tmp_path = self.root.join(SNAPSHOT_TMP_FILE);
+        let mut file = File::create(&tmp_path)?;
+        serde_json::to_writer_pretty(&mut file, &self.image)?;
+        file.sync_all()?;
+        fs::rename(tmp_path, path)?;
         Ok(())
     }
 
@@ -125,19 +137,73 @@ fn replay_log(root: &Path, image: &mut ClusterMetadataImage) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let reader = BufReader::new(File::open(path)?);
-    for line in reader.lines() {
-        let line = line?;
+    let mut reader = BufReader::new(OpenOptions::new().read(true).write(true).open(&path)?);
+    let file_len = reader.get_ref().metadata()?.len();
+    let mut safe_len = 0_u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let line = trim_line_endings(&line);
+        let Ok(line) = std::str::from_utf8(line) else {
+            break;
+        };
         if line.trim().is_empty() {
+            safe_len += read as u64;
             continue;
         }
-        image.apply(serde_json::from_str(&line)?);
+        let Ok(entry) = parse_log_entry(line) else {
+            break;
+        };
+        if entry
+            .metadata_offset
+            .is_none_or(|offset| offset > image.metadata_offset)
+        {
+            image.apply(entry.record);
+        }
+        safe_len += read as u64;
+    }
+    let file = reader.into_inner();
+    if safe_len < file_len {
+        file.set_len(safe_len)?;
+        file.sync_all()?;
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MetadataLogEntry {
+    metadata_offset: Option<i64>,
+    record: MetadataRecord,
+}
+
+fn parse_log_entry(line: &str) -> Result<MetadataLogEntry> {
+    if let Ok(entry) = serde_json::from_str::<MetadataLogEntry>(line) {
+        return Ok(entry);
+    }
+    Ok(MetadataLogEntry {
+        metadata_offset: None,
+        record: serde_json::from_str(line)?,
+    })
+}
+
+fn trim_line_endings(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\n")
+        .unwrap_or(line)
+        .strip_suffix(b"\r")
+        .unwrap_or(line.strip_suffix(b"\n").unwrap_or(line))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use tempfile::tempdir;
 
     use crate::config::Config;
@@ -228,5 +294,79 @@ mod tests {
         assert!(!rejected);
         assert_eq!(store.image().controller_id, 3);
         assert_eq!(store.metadata_offset(), 0);
+    }
+
+    #[test]
+    fn replay_skips_log_entries_already_in_snapshot() {
+        let dir = tempdir().unwrap();
+        let config = Config::single_node(dir.path().join("data"), 29092, 1);
+        let mut store = MetadataStore::open(dir.path(), &config).unwrap();
+        store.sync_controller(3).unwrap();
+
+        let mut file = File::create(dir.path().join(LOG_FILE)).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &MetadataLogEntry {
+                metadata_offset: Some(0),
+                record: MetadataRecord::SetController { controller_id: 3 },
+            },
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &MetadataLogEntry {
+                metadata_offset: Some(1),
+                record: MetadataRecord::RegisterBroker(BrokerMetadata {
+                    node_id: 9,
+                    host: "broker-9.local".to_string(),
+                    port: 39092,
+                }),
+            },
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+
+        let reopened = MetadataStore::open(dir.path(), &config).unwrap();
+        assert_eq!(reopened.image().controller_id, 3);
+        assert_eq!(reopened.image().brokers.len(), 1);
+        assert_eq!(reopened.metadata_offset(), 1);
+
+        let reopened_again = MetadataStore::open(dir.path(), &config).unwrap();
+        assert_eq!(reopened_again.metadata_offset(), 1);
+        assert_eq!(reopened_again.image().brokers.len(), 1);
+    }
+
+    #[test]
+    fn replay_truncates_partial_metadata_log_tail_after_valid_records() {
+        let dir = tempdir().unwrap();
+        let config = Config::single_node(dir.path().join("data"), 29092, 1);
+        let mut store = MetadataStore::open(dir.path(), &config).unwrap();
+        store.sync_controller(3).unwrap();
+
+        let mut file = File::create(dir.path().join(LOG_FILE)).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &MetadataLogEntry {
+                metadata_offset: Some(1),
+                record: MetadataRecord::RegisterBroker(BrokerMetadata {
+                    node_id: 9,
+                    host: "broker-9.local".to_string(),
+                    port: 39092,
+                }),
+            },
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(b"{\"metadata_offset\":2").unwrap();
+        file.sync_all().unwrap();
+
+        let reopened = MetadataStore::open(dir.path(), &config).unwrap();
+        assert_eq!(reopened.metadata_offset(), 1);
+        assert_eq!(reopened.image().brokers.len(), 1);
+
+        let log_contents = std::fs::read_to_string(dir.path().join(LOG_FILE)).unwrap();
+        assert_eq!(log_contents.lines().count(), 1);
+        assert!(log_contents.ends_with('\n'));
     }
 }

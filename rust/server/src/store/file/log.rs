@@ -210,8 +210,9 @@ impl RecordLog {
         if safe_len < file_len {
             file.set_len(safe_len)?;
             file.sync_all()?;
-            self.rebuild_indexes_for_partition(topic, partition)?;
         }
+        drop(file);
+        self.rebuild_indexes_for_partition(topic, partition)?;
         Ok(())
     }
 
