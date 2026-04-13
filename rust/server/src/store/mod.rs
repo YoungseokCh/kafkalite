@@ -52,6 +52,13 @@ pub trait Storage: Send + Sync {
         start_offset: i64,
         limit: usize,
     ) -> Result<FetchResult>;
+    fn append_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        now_ms: i64,
+    ) -> Result<i64>;
     fn list_offsets(
         &self,
         topic: &str,

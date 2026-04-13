@@ -156,6 +156,42 @@ impl DataPlaneState {
         self.persist_producers(now_ms)
     }
 
+    pub fn prepare_replica_append(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+    ) -> Result<Option<PreparedAppend>> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        let next_offset = runtime.state.next_offset;
+        let appended = records
+            .iter()
+            .filter(|record| record.offset >= next_offset)
+            .cloned()
+            .collect::<Vec<_>>();
+        if appended.is_empty() {
+            return Ok(None);
+        }
+        validate_replica_offsets(next_offset, &appended)?;
+        let base_offset = appended[0].offset;
+        let last_offset = appended
+            .last()
+            .map(|record| record.offset)
+            .unwrap_or(base_offset);
+        Ok(Some(PreparedAppend {
+            topic: topic.to_string(),
+            partition,
+            base_offset,
+            last_offset,
+            records: appended,
+        }))
+    }
+
     pub fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
         self.partition_state(topic, partition)
             .map(|partition| partition.state.next_offset)
@@ -276,6 +312,27 @@ fn duplicate_append_result(
     } else {
         None
     }
+}
+
+fn validate_replica_offsets(next_offset: i64, records: &[BrokerRecord]) -> Result<()> {
+    let Some(first) = records.first() else {
+        return Ok(());
+    };
+    if first.offset != next_offset {
+        return Err(StoreError::Protocol(format!(
+            "replica append expected offset {next_offset} but started at {}",
+            first.offset
+        )));
+    }
+    for window in records.windows(2) {
+        if window[1].offset != window[0].offset + 1 {
+            return Err(StoreError::Protocol(format!(
+                "replica append offsets must be contiguous: {} followed by {}",
+                window[0].offset, window[1].offset
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ProducerBatchInfo {

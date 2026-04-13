@@ -18,20 +18,16 @@ pub struct TwoNodeClusterHarness {
     pub network: InMemoryClusterNetwork,
 }
 
+pub struct ThreeNodeClusterHarness {
+    pub node1: TestClusterNode,
+    pub node2: TestClusterNode,
+    pub node3: TestClusterNode,
+    pub network: InMemoryClusterNetwork,
+}
+
 impl TwoNodeClusterHarness {
     pub fn new_controller_pair() -> Self {
-        let voters = vec![
-            ControllerQuorumVoter {
-                node_id: 1,
-                host: "node1".to_string(),
-                port: 9093,
-            },
-            ControllerQuorumVoter {
-                node_id: 2,
-                host: "node2".to_string(),
-                port: 9093,
-            },
-        ];
+        let voters = controller_voters(&[1, 2]);
 
         let node1 = build_node(1, 19092, voters.clone());
         let node2 = build_node(2, 19093, voters);
@@ -47,7 +43,38 @@ impl TwoNodeClusterHarness {
     }
 
     pub fn transport_from_node1(&self) -> InMemoryRemoteClusterRpcTransport {
-        InMemoryRemoteClusterRpcTransport::new(&node1_client_config().cluster, self.network.clone())
+        InMemoryRemoteClusterRpcTransport::new(
+            &client_config(1, &[1, 2]).cluster,
+            self.network.clone(),
+        )
+    }
+}
+
+impl ThreeNodeClusterHarness {
+    pub fn new_controller_triplet() -> Self {
+        let voters = controller_voters(&[1, 2, 3]);
+
+        let node1 = build_node(1, 19092, voters.clone());
+        let node2 = build_node(2, 19093, voters.clone());
+        let node3 = build_node(3, 19094, voters);
+        let network = InMemoryClusterNetwork::default();
+        network.register(node1.node_id, node1.runtime.clone());
+        network.register(node2.node_id, node2.runtime.clone());
+        network.register(node3.node_id, node3.runtime.clone());
+
+        Self {
+            node1,
+            node2,
+            node3,
+            network,
+        }
+    }
+
+    pub fn transport_from_node(&self, node_id: i32) -> InMemoryRemoteClusterRpcTransport {
+        InMemoryRemoteClusterRpcTransport::new(
+            &client_config(node_id, &[1, 2, 3]).cluster,
+            self.network.clone(),
+        )
     }
 }
 
@@ -63,21 +90,28 @@ fn build_node(node_id: i32, port: u16, voters: Vec<ControllerQuorumVoter>) -> Te
     }
 }
 
-fn node1_client_config() -> Config {
-    let mut config = Config::single_node(tempdir().unwrap().keep().join("node1-client"), 19092, 1);
-    config.cluster.node_id = 1;
+fn client_config(node_id: i32, voters: &[i32]) -> Config {
+    let mut config = Config::single_node(
+        tempdir()
+            .unwrap()
+            .keep()
+            .join(format!("node-{node_id}-client")),
+        19092,
+        1,
+    );
+    config.cluster.node_id = node_id;
     config.cluster.process_roles = vec![ProcessRole::Controller];
-    config.cluster.controller_quorum_voters = vec![
-        ControllerQuorumVoter {
-            node_id: 1,
-            host: "node1".to_string(),
-            port: 9093,
-        },
-        ControllerQuorumVoter {
-            node_id: 2,
-            host: "node2".to_string(),
-            port: 9093,
-        },
-    ];
+    config.cluster.controller_quorum_voters = controller_voters(voters);
     config
+}
+
+fn controller_voters(node_ids: &[i32]) -> Vec<ControllerQuorumVoter> {
+    node_ids
+        .iter()
+        .map(|node_id| ControllerQuorumVoter {
+            node_id: *node_id,
+            host: format!("node{node_id}"),
+            port: 9093,
+        })
+        .collect()
 }

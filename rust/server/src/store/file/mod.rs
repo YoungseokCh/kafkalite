@@ -233,6 +233,35 @@ impl Storage for FileStore {
         })
     }
 
+    fn append_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        now_ms: i64,
+    ) -> Result<i64> {
+        let prepared = {
+            let mut data = self.data.lock().expect("file store mutex poisoned");
+            data.prepare_replica_append(topic, partition, records)?
+        };
+        let Some(prepared) = prepared else {
+            return self
+                .data
+                .lock()
+                .expect("file store mutex poisoned")
+                .latest_offset(topic, partition);
+        };
+        self.logs.ensure_partition(topic, partition)?;
+        self.logs.append_batch(
+            topic,
+            partition,
+            &StoredBatch::from_records(&prepared.records),
+        )?;
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        data.finish_append(&prepared, now_ms)?;
+        data.latest_offset(topic, partition)
+    }
+
     fn list_offsets(
         &self,
         topic: &str,

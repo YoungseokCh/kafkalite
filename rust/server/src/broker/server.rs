@@ -170,10 +170,10 @@ mod tests {
     use crate::broker::handlers::produce_fetch::handle_produce;
     use crate::cluster::{
         ControllerQuorumVoter, InMemoryRemoteClusterRpcTransport, ProcessRole,
-        test_support::TwoNodeClusterHarness,
+        test_support::{ThreeNodeClusterHarness, TwoNodeClusterHarness},
     };
     use crate::config::Config;
-    use crate::store::FileStore;
+    use crate::store::{BrokerRecord, FileStore};
 
     use super::*;
 
@@ -289,6 +289,104 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn follower_syncs_progress_from_remote_state_in_three_node_isr() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let voters = voter_trio();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker
+                .store()
+                .ensure_topic("replicated.topic", 1, 0)
+                .unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            broker
+                .cluster()
+                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
+                    topic_name: "replicated.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 1,
+                    leader_epoch: 1,
+                })
+                .unwrap();
+            broker
+                .cluster()
+                .handle_update_partition_replication(
+                    crate::cluster::UpdatePartitionReplicationRequest {
+                        topic_name: "replicated.topic".to_string(),
+                        partition_index: 0,
+                        replicas: vec![1, 2, 3],
+                        isr: vec![1, 2, 3],
+                        leader_epoch: 1,
+                    },
+                )
+                .unwrap();
+        }
+
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 1))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 2))
+            .await
+            .unwrap();
+
+        follower
+            .store()
+            .append_replica_records(
+                "replicated.topic",
+                0,
+                &[replica_record(0, 100), replica_record(1, 101)],
+                101,
+            )
+            .unwrap();
+        follower
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "replicated.topic".to_string(),
+                partition_index: 0,
+                broker_id: 1,
+                log_end_offset: 3,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        follower
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "replicated.topic".to_string(),
+                partition_index: 0,
+                broker_id: 3,
+                log_end_offset: 3,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+        let high_watermark = follower
+            .sync_follower_progress_from_remote(&transport, &target, "replicated.topic", 0, 200)
+            .unwrap();
+
+        assert_eq!(high_watermark, 2);
+        let image = follower.cluster().metadata_image();
+        let partition = &image.topics[0].partitions[0];
+        assert_eq!(partition.high_watermark, 2);
+        assert_eq!(partition.replica_progress.len(), 3);
+        assert_eq!(partition.replica_progress[0].log_end_offset, 3);
+        assert_eq!(partition.replica_progress[1].log_end_offset, 2);
+        assert_eq!(partition.replica_progress[2].log_end_offset, 3);
+    }
+
     fn test_broker(node_id: i32, port: u16) -> KafkaBroker {
         test_broker_with_voters(node_id, port, voter_pair())
     }
@@ -321,6 +419,39 @@ mod tests {
                 port: 9093,
             },
         ]
+    }
+
+    fn voter_trio() -> Vec<ControllerQuorumVoter> {
+        vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 3,
+                host: "node3".to_string(),
+                port: 9093,
+            },
+        ]
+    }
+
+    fn replica_record(offset: i64, timestamp_ms: i64) -> BrokerRecord {
+        BrokerRecord {
+            offset,
+            timestamp_ms,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: offset as i32,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: vec![],
+        }
     }
 
     fn produce_request(
