@@ -55,3 +55,17 @@ pub struct BrokerHeartbeatResponse {
     pub controller_epoch: i64,
     pub leader_id: Option<i32>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePartitionLeaderRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub leader_id: i32,
+    pub leader_epoch: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePartitionLeaderResponse {
+    pub accepted: bool,
+    pub metadata_offset: i64,
+}

@@ -8,7 +8,8 @@ use crate::cluster::metadata::{BrokerMetadata, ClusterMetadataImage, MetadataSto
 use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
+    UpdatePartitionLeaderResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -159,12 +160,42 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_update_partition_leader(
+        &self,
+        request: UpdatePartitionLeaderRequest,
+    ) -> Result<UpdatePartitionLeaderResponse> {
+        let prev_metadata_offset = self.metadata_image().metadata_offset;
+        let response = self.handle_append_metadata(AppendMetadataRequest {
+            term: self.quorum_snapshot().current_term,
+            leader_id: self
+                .quorum_snapshot()
+                .leader_id
+                .unwrap_or(request.leader_id),
+            prev_metadata_offset,
+            records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
+                topic_name: request.topic_name,
+                partition_index: request.partition_index,
+                leader_id: request.leader_id,
+                leader_epoch: request.leader_epoch,
+            }],
+        })?;
+        Ok(UpdatePartitionLeaderResponse {
+            accepted: response.accepted,
+            metadata_offset: response.last_metadata_offset,
+        })
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
             ClusterRpcRequest::AppendMetadata(request) => Ok(ClusterRpcResponse::AppendMetadata(
                 self.handle_append_metadata(request)?,
             )),
+            ClusterRpcRequest::UpdatePartitionLeader(request) => {
+                Ok(ClusterRpcResponse::UpdatePartitionLeader(
+                    self.handle_update_partition_leader(request)?,
+                ))
+            }
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
             )),
@@ -331,5 +362,38 @@ mod tests {
         assert_eq!(response.term, 2);
         assert_eq!(runtime.metadata_image().controller_id, 9);
         assert_eq!(runtime.metadata_image().metadata_offset, initial_offset + 1);
+    }
+
+    #[test]
+    fn update_partition_leader_changes_metadata_image() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "leader.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+
+        let response = runtime
+            .handle_update_partition_leader(UpdatePartitionLeaderRequest {
+                topic_name: "leader.topic".to_string(),
+                partition_index: 0,
+                leader_id: 9,
+                leader_epoch: 1,
+            })
+            .unwrap();
+
+        assert!(response.accepted);
+        let image = runtime.metadata_image();
+        assert_eq!(image.partition_leader_id("leader.topic", 0), Some(9));
+        assert_eq!(image.topics[0].partitions[0].leader_epoch, 1);
     }
 }

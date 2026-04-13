@@ -15,7 +15,8 @@ pub use metadata::{
 pub use quorum::{QuorumSnapshot, QuorumState};
 pub use rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse, VoteRequest, VoteResponse,
+    RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
+    UpdatePartitionLeaderResponse, VoteRequest, VoteResponse,
 };
 pub use runtime::ClusterRuntime;
 pub use transport::{
