@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
 
-use crate::cluster::ClusterRuntime;
 use crate::cluster::rpc::{
     BrokerHeartbeatRequest, BrokerHeartbeatResponse, RegisterBrokerRequest, RegisterBrokerResponse,
 };
+use crate::cluster::{ClusterConfig, ClusterRuntime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterRpcRequest {
@@ -17,8 +19,23 @@ pub enum ClusterRpcResponse {
     BrokerHeartbeat(BrokerHeartbeatResponse),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterRpcTarget {
+    pub node_id: i32,
+    pub host: String,
+    pub port: u16,
+}
+
 pub trait ClusterRpcTransport {
     fn send(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse>;
+
+    fn send_to(
+        &self,
+        _target: &ClusterRpcTarget,
+        request: ClusterRpcRequest,
+    ) -> Result<ClusterRpcResponse> {
+        self.send(request)
+    }
 
     fn register_broker(&self, request: RegisterBrokerRequest) -> Result<RegisterBrokerResponse> {
         match self.send(ClusterRpcRequest::RegisterBroker(request))? {
@@ -32,6 +49,66 @@ pub trait ClusterRpcTransport {
             ClusterRpcResponse::BrokerHeartbeat(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteClusterRpcTransport {
+    local_node_id: i32,
+    routes: BTreeMap<i32, ClusterRpcTarget>,
+}
+
+impl RemoteClusterRpcTransport {
+    pub fn new(config: &ClusterConfig) -> Self {
+        let routes = config
+            .controller_quorum_voters
+            .iter()
+            .map(|voter| {
+                (
+                    voter.node_id,
+                    ClusterRpcTarget {
+                        node_id: voter.node_id,
+                        host: voter.host.clone(),
+                        port: voter.port,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            local_node_id: config.node_id,
+            routes,
+        }
+    }
+
+    pub fn resolve_target(&self, node_id: i32) -> Result<ClusterRpcTarget> {
+        self.routes
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown cluster RPC target node {node_id}"))
+    }
+
+    pub fn local_node_id(&self) -> i32 {
+        self.local_node_id
+    }
+}
+
+impl ClusterRpcTransport for RemoteClusterRpcTransport {
+    fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+        bail!("remote cluster rpc requires a target node")
+    }
+
+    fn send_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: ClusterRpcRequest,
+    ) -> Result<ClusterRpcResponse> {
+        bail!(
+            "remote cluster rpc not implemented yet for target {}@{}:{} and request {:?}",
+            target.node_id,
+            target.host,
+            target.port,
+            request
+        )
     }
 }
 
@@ -56,7 +133,7 @@ impl ClusterRpcTransport for LocalClusterRpcTransport {
 mod tests {
     use tempfile::tempdir;
 
-    use crate::cluster::{ClusterRuntime, ProcessRole};
+    use crate::cluster::{ClusterRuntime, ControllerQuorumVoter, ProcessRole};
     use crate::config::Config;
 
     use super::*;
@@ -94,5 +171,41 @@ mod tests {
                 .iter()
                 .any(|broker| broker.node_id == 9)
         );
+    }
+
+    #[test]
+    fn remote_transport_resolves_target_from_quorum_voters() {
+        let mut config = ClusterConfig {
+            node_id: 1,
+            ..ClusterConfig::default()
+        };
+        config.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+        ];
+
+        let transport = RemoteClusterRpcTransport::new(&config);
+        let target = transport.resolve_target(2).unwrap();
+
+        assert_eq!(transport.local_node_id(), 1);
+        assert_eq!(target.node_id, 2);
+        assert_eq!(target.host, "node2");
+        assert_eq!(target.port, 9093);
+    }
+
+    #[test]
+    fn remote_transport_rejects_unknown_target() {
+        let transport = RemoteClusterRpcTransport::new(&ClusterConfig::default());
+        let err = transport.resolve_target(99).unwrap_err().to_string();
+
+        assert!(err.contains("unknown cluster RPC target node 99"));
     }
 }

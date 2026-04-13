@@ -11,6 +11,7 @@ use crate::cluster::rpc::{
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
+    RemoteClusterRpcTransport,
 };
 use crate::config::Config;
 use crate::store::TopicMetadata;
@@ -149,6 +150,10 @@ impl ClusterRuntime {
 
     pub fn local_transport(&self) -> LocalClusterRpcTransport {
         LocalClusterRpcTransport::new(self.clone())
+    }
+
+    pub fn remote_transport(&self) -> RemoteClusterRpcTransport {
+        RemoteClusterRpcTransport::new(&self.config)
     }
 
     pub fn quorum_snapshot(&self) -> QuorumSnapshot {

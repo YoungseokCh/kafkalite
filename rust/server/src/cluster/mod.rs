@@ -19,5 +19,6 @@ pub use rpc::{
 };
 pub use runtime::ClusterRuntime;
 pub use transport::{
-    ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
+    ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget, ClusterRpcTransport,
+    LocalClusterRpcTransport, RemoteClusterRpcTransport,
 };
