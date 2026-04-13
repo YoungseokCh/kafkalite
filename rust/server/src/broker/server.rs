@@ -67,6 +67,13 @@ impl KafkaBroker {
         self.cluster
             .sync_local_topics(topics, self.config.broker.broker_id)
     }
+
+    pub fn is_local_partition_leader(&self, topic: &str, partition: i32) -> bool {
+        self.cluster()
+            .metadata_image()
+            .partition_leader_id(topic, partition)
+            .is_none_or(|leader_id| leader_id == self.config.broker.broker_id)
+    }
 }
 
 fn is_expected_disconnect(err: &anyhow::Error) -> bool {

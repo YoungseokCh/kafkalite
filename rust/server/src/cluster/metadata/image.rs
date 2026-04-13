@@ -73,6 +73,19 @@ impl ClusterMetadataImage {
             }
         }
     }
+
+    pub fn partition_leader_id(&self, topic_name: &str, partition_index: i32) -> Option<i32> {
+        self.topics
+            .iter()
+            .find(|topic| topic.name == topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.partition == partition_index)
+            })
+            .map(|partition| partition.leader_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,6 +19,7 @@ use crate::store::{BrokerRecord, StoreError};
 use super::super::KafkaBroker;
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const UNKNOWN_PRODUCER_ID: i16 = 59;
@@ -42,6 +43,19 @@ pub async fn handle_produce(
                 .collect::<Vec<_>>();
             let now = chrono::Utc::now().timestamp_millis();
             maybe_auto_create_topic(broker, &topic_name, partition_data.index, now)?;
+            if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
+                partitions.push(
+                    PartitionProduceResponse::default()
+                        .with_index(partition_data.index)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_base_offset(-1)
+                        .with_log_append_time_ms(-1)
+                        .with_log_start_offset(0)
+                        .with_record_errors(vec![])
+                        .with_error_message(None),
+                );
+                continue;
+            }
             let produce_result =
                 broker
                     .store()
@@ -85,6 +99,20 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
         let mut partitions = Vec::new();
         let topic_name = topic.topic.to_string();
         for partition in topic.partitions {
+            if !broker.is_local_partition_leader(&topic_name, partition.partition) {
+                partitions.push(
+                    PartitionData::default()
+                        .with_partition_index(partition.partition)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_high_watermark(-1)
+                        .with_last_stable_offset(-1)
+                        .with_log_start_offset(-1)
+                        .with_aborted_transactions(None)
+                        .with_preferred_read_replica(BrokerId(-1))
+                        .with_records(None),
+                );
+                continue;
+            }
             match broker.store().fetch_records(
                 &topic_name,
                 partition.partition,
@@ -144,6 +172,17 @@ pub async fn handle_list_offsets(
         let topic_name = topic.name.to_string();
         let mut partitions = Vec::new();
         for partition in topic.partitions {
+            if !broker.is_local_partition_leader(&topic_name, partition.partition_index) {
+                partitions.push(
+                    ListOffsetsPartitionResponse::default()
+                        .with_partition_index(partition.partition_index)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_timestamp(-1)
+                        .with_offset(-1)
+                        .with_leader_epoch(-1),
+                );
+                continue;
+            }
             match broker
                 .store()
                 .list_offsets(&topic_name, partition.partition_index)
@@ -346,6 +385,119 @@ mod tests {
         let partition = &stale.responses[0].partition_responses[0];
         assert_eq!(partition.error_code, INVALID_PRODUCER_EPOCH);
         assert_eq!(partition.base_offset, -1);
+    }
+
+    #[tokio::test]
+    async fn produce_is_rejected_when_local_broker_is_not_leader() {
+        let broker = test_broker();
+        broker.store().ensure_topic("remote.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["remote.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 9,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "remote.topic".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 0,
+                            leader_id: 9,
+                            leader_epoch: 1,
+                            replicas: vec![9],
+                            isr: vec![9],
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let response = handle_produce(&broker, produce_request("remote.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.responses[0].partition_responses[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_and_list_offsets_are_rejected_when_local_broker_is_not_leader() {
+        let broker = test_broker();
+        broker.store().ensure_topic("remote.fetch", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["remote.fetch".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 9,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "remote.fetch".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 0,
+                            leader_id: 9,
+                            leader_epoch: 1,
+                            replicas: vec![9],
+                            isr: vec![9],
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("remote.fetch".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fetch.responses[0].partitions[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+
+        let offsets = handle_list_offsets(
+            &broker,
+            ListOffsetsRequest::default().with_topics(vec![
+                kafka_protocol::messages::list_offsets_request::ListOffsetsTopic::default()
+                    .with_name(TopicName(StrBytes::from("remote.fetch".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::list_offsets_request::ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_timestamp(-1),
+                    ]),
+            ]),
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offsets.topics[0].partitions[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
     }
 
     fn test_broker() -> KafkaBroker {
