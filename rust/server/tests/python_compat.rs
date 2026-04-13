@@ -3,10 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kafkalite_server::{
-    Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
-};
+use kafkalite_server::{Config, FileStore, KafkaBroker};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -25,19 +22,9 @@ async fn aiokafka_smoke_script() {
 
     let tempdir = tempdir().unwrap();
     let port = free_port();
-    let config = Config {
-        broker: BrokerConfig {
-            port,
-            advertised_port: port,
-            ..BrokerConfig::default()
-        },
-        storage: StorageConfig {
-            data_dir: tempdir.path().join("kafkalite-data"),
-            ..StorageConfig::default()
-        },
-    };
+    let config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 1);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store);
+    let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
 

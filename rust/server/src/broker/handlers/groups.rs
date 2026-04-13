@@ -290,7 +290,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use crate::config::{BrokerConfig, Config, StorageConfig};
+    use crate::config::Config;
     use crate::store::FileStore;
 
     use super::*;
@@ -394,14 +394,8 @@ mod tests {
 
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
-        let config = Config {
-            broker: BrokerConfig::default(),
-            storage: StorageConfig {
-                data_dir: dir.join("data"),
-                ..StorageConfig::default()
-            },
-        };
+        let config = Config::single_node(dir.join("data"), 9092, 1);
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-        KafkaBroker::new(config, store)
+        KafkaBroker::new(config, store).unwrap()
     }
 }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::config::{BrokerConfig, Config, StorageConfig};
+use crate::config::Config;
 
 pub struct BrokerProcess {
     pub bootstrap: String,
@@ -21,17 +21,7 @@ impl BrokerProcess {
     pub fn start(broker_bin: &Path, root: &Path, default_partitions: i32) -> Result<Self> {
         fs::create_dir_all(root)?;
         let port = free_port()?;
-        let config = Config {
-            broker: BrokerConfig {
-                port,
-                advertised_port: port,
-                ..BrokerConfig::default()
-            },
-            storage: StorageConfig {
-                data_dir: root.join("data"),
-                default_partitions,
-            },
-        };
+        let config = Config::single_node(root.join("data"), port, default_partitions);
         let config_path = root.join("server.properties");
         let config_text = format!(
             "node.id={}\nlisteners=PLAINTEXT://{}:{}\nadvertised.listeners=PLAINTEXT://{}:{}\ncluster.id={}\nlog.dirs={}\nnum.partitions={}\n",

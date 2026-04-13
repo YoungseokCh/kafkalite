@@ -17,11 +17,7 @@ use kafka_protocol::messages::{
     SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
-use kafkalite_server::{
-    Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
-    protocol,
-};
+use kafkalite_server::{Config, FileStore, KafkaBroker, protocol};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -636,19 +632,9 @@ async fn start_local_broker() -> (
 ) {
     let tempdir = tempdir().unwrap();
     let port = free_port();
-    let config = Config {
-        broker: BrokerConfig {
-            port,
-            advertised_port: port,
-            ..BrokerConfig::default()
-        },
-        storage: StorageConfig {
-            data_dir: tempdir.path().join("kafkalite-data"),
-            ..StorageConfig::default()
-        },
-    };
+    let config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 1);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store);
+    let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
     (format!("127.0.0.1:{port}"), handle, tempdir)

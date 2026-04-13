@@ -2,10 +2,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kafkalite_server::{
-    Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
-};
+use kafkalite_server::{Config, FileStore, KafkaBroker};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -338,6 +335,47 @@ async fn multi_partition_metadata_and_direct_fetch_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_remains_available_after_broker_restart() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let topic = "compat.meta.persist";
+
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let producer = producer(&bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("p1").key("k").partition(1),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    let consumer = base_consumer(&bootstrap, "compat-meta-persist-1");
+    let metadata = consumer
+        .fetch_metadata(Some(topic), Duration::from_secs(5))
+        .unwrap();
+    let topic_metadata = find_topic(&metadata, topic);
+    assert_eq!(topic_metadata.partitions().len(), 3);
+
+    handle.abort();
+    let _ = handle.await;
+
+    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
+    let consumer = base_consumer(&bootstrap, "compat-meta-persist-2");
+    let metadata = consumer
+        .fetch_metadata(Some(topic), Duration::from_secs(5))
+        .unwrap();
+    let topic_metadata = find_topic(&metadata, topic);
+    assert_eq!(topic_metadata.partitions().len(), 3);
+    assert_eq!(topic_metadata.partitions()[0].id(), 0);
+    assert_eq!(topic_metadata.partitions()[1].id(), 1);
+    assert_eq!(topic_metadata.partitions()[2].id(), 2);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_offsets_are_partition_scoped() {
     init_test_logging();
     let tempdir = tempdir().unwrap();
@@ -435,19 +473,13 @@ async fn start_broker_in_dir_with_partitions(
     default_partitions: i32,
 ) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let port = free_port();
-    let config = Config {
-        broker: BrokerConfig {
-            port,
-            advertised_port: port,
-            ..BrokerConfig::default()
-        },
-        storage: StorageConfig {
-            data_dir: tempdir.path().join("kafkalite-data"),
-            default_partitions,
-        },
-    };
+    let config = Config::single_node(
+        tempdir.path().join("kafkalite-data"),
+        port,
+        default_partitions,
+    );
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store);
+    let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
     (format!("127.0.0.1:{port}"), handle)

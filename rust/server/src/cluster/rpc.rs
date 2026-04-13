@@ -1,0 +1,57 @@
+use crate::cluster::metadata::MetadataRecord;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoteRequest {
+    pub term: i64,
+    pub candidate_id: i32,
+    pub last_metadata_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoteResponse {
+    pub term: i64,
+    pub vote_granted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendMetadataRequest {
+    pub term: i64,
+    pub leader_id: i32,
+    pub prev_metadata_offset: i64,
+    pub records: Vec<MetadataRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendMetadataResponse {
+    pub term: i64,
+    pub accepted: bool,
+    pub last_metadata_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterBrokerRequest {
+    pub node_id: i32,
+    pub advertised_host: String,
+    pub advertised_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterBrokerResponse {
+    pub broker_epoch: i64,
+    pub controller_epoch: i64,
+    pub leader_id: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerHeartbeatRequest {
+    pub node_id: i32,
+    pub broker_epoch: i64,
+    pub timestamp_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerHeartbeatResponse {
+    pub accepted: bool,
+    pub controller_epoch: i64,
+    pub leader_id: Option<i32>,
+}

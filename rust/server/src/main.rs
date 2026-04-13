@@ -31,7 +31,10 @@ async fn main() {
         }),
     );
 
-    let broker = KafkaBroker::new(config.clone(), store);
+    let broker = KafkaBroker::new(config.clone(), store).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize kafkalite broker: {err}");
+        std::process::exit(1);
+    });
     if let Err(err) = broker.run().await {
         eprintln!("Kafka broker failed: {err}");
         std::process::exit(1);

@@ -4,6 +4,7 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
+use crate::cluster::ClusterRuntime;
 use crate::config::Config;
 use crate::store::Storage;
 
@@ -12,12 +13,19 @@ use super::dispatcher;
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: Config,
+    cluster: ClusterRuntime,
     store: Arc<dyn Storage>,
 }
 
 impl KafkaBroker {
-    pub fn new(config: Config, store: Arc<dyn Storage>) -> Self {
-        Self { config, store }
+    pub fn new(mut config: Config, store: Arc<dyn Storage>) -> Result<Self> {
+        config.ensure_cluster_defaults();
+        let cluster = ClusterRuntime::from_config(&config)?;
+        Ok(Self {
+            config,
+            cluster,
+            store,
+        })
     }
 
     pub async fn run(self) -> Result<()> {
@@ -50,6 +58,15 @@ impl KafkaBroker {
 
     pub fn store(&self) -> &Arc<dyn Storage> {
         &self.store
+    }
+
+    pub fn cluster(&self) -> &ClusterRuntime {
+        &self.cluster
+    }
+
+    pub fn sync_topic_metadata(&self, topics: &[crate::store::TopicMetadata]) -> Result<()> {
+        self.cluster
+            .sync_local_topics(topics, self.config.broker.broker_id)
     }
 }
 

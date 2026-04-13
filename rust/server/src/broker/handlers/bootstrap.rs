@@ -9,6 +9,7 @@ use kafka_protocol::messages::{
 };
 use kafka_protocol::protocol::StrBytes;
 
+use crate::cluster::{ClusterMetadataImage, TopicMetadataImage};
 use crate::protocol;
 
 use super::super::KafkaBroker;
@@ -67,57 +68,48 @@ pub async fn handle_metadata(
         }
     }
     let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
-    let known_topics = metadata
-        .into_iter()
-        .map(|topic| (topic.name.clone(), topic))
-        .collect::<std::collections::BTreeMap<_, _>>();
-
-    let node_id = BrokerId(broker.config().broker.broker_id);
+    broker.sync_topic_metadata(&metadata)?;
+    let image = broker.cluster().metadata_image();
 
     let topics = if let Some(requested) = names {
         requested
             .into_iter()
-            .map(|name| match known_topics.get(&name) {
-                Some(topic) => MetadataResponseTopic::default()
-                    .with_error_code(0)
-                    .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
-                    .with_is_internal(false)
-                    .with_partitions(topic_partitions(topic, node_id)),
-                None => MetadataResponseTopic::default()
-                    .with_error_code(3)
-                    .with_name(Some(TopicName(StrBytes::from(name))))
-                    .with_is_internal(false)
-                    .with_partitions(vec![]),
-            })
+            .map(
+                |name| match image.topics.iter().find(|topic| topic.name == name) {
+                    Some(topic) => MetadataResponseTopic::default()
+                        .with_error_code(0)
+                        .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
+                        .with_is_internal(false)
+                        .with_partitions(topic_partitions(topic)),
+                    None => MetadataResponseTopic::default()
+                        .with_error_code(3)
+                        .with_name(Some(TopicName(StrBytes::from(name))))
+                        .with_is_internal(false)
+                        .with_partitions(vec![]),
+                },
+            )
             .collect()
     } else {
-        known_topics
-            .into_values()
+        image
+            .topics
+            .iter()
             .map(|topic| {
                 MetadataResponseTopic::default()
                     .with_error_code(0)
                     .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
                     .with_is_internal(false)
-                    .with_partitions(topic_partitions(&topic, node_id))
+                    .with_partitions(topic_partitions(topic))
             })
             .collect()
     };
 
-    let broker_node = MetadataResponseBroker::default()
-        .with_node_id(node_id)
-        .with_host(StrBytes::from(
-            broker.config().broker.advertised_host.clone(),
-        ))
-        .with_port(i32::from(broker.config().broker.advertised_port))
-        .with_rack(None);
+    let brokers = metadata_brokers(&image);
 
     Ok(MetadataResponse::default()
         .with_throttle_time_ms(0)
-        .with_brokers(vec![broker_node])
-        .with_cluster_id(Some(StrBytes::from(
-            broker.config().broker.cluster_id.clone(),
-        )))
-        .with_controller_id(node_id)
+        .with_brokers(brokers)
+        .with_cluster_id(Some(StrBytes::from(image.cluster_id.clone())))
+        .with_controller_id(BrokerId(image.controller_id))
         .with_topics(topics))
 }
 
@@ -139,10 +131,21 @@ fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {
         .with_max_version(max_version)
 }
 
-fn topic_partitions(
-    topic: &crate::store::TopicMetadata,
-    node_id: BrokerId,
-) -> Vec<MetadataResponsePartition> {
+fn metadata_brokers(image: &ClusterMetadataImage) -> Vec<MetadataResponseBroker> {
+    image
+        .brokers
+        .iter()
+        .map(|broker| {
+            MetadataResponseBroker::default()
+                .with_node_id(BrokerId(broker.node_id))
+                .with_host(StrBytes::from(broker.host.clone()))
+                .with_port(i32::from(broker.port))
+                .with_rack(None)
+        })
+        .collect()
+}
+
+fn topic_partitions(topic: &TopicMetadataImage) -> Vec<MetadataResponsePartition> {
     topic
         .partitions
         .iter()
@@ -150,10 +153,10 @@ fn topic_partitions(
             MetadataResponsePartition::default()
                 .with_error_code(0)
                 .with_partition_index(partition.partition)
-                .with_leader_id(node_id)
-                .with_leader_epoch(0)
-                .with_replica_nodes(vec![node_id])
-                .with_isr_nodes(vec![node_id])
+                .with_leader_id(BrokerId(partition.leader_id))
+                .with_leader_epoch(partition.leader_epoch)
+                .with_replica_nodes(partition.replicas.iter().copied().map(BrokerId).collect())
+                .with_isr_nodes(partition.isr.iter().copied().map(BrokerId).collect())
                 .with_offline_replicas(vec![])
         })
         .collect()

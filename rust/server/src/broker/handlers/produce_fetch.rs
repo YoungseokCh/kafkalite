@@ -205,6 +205,10 @@ fn maybe_auto_create_topic(
     broker
         .store()
         .ensure_topic(topic, broker.config().storage.default_partitions, now_ms)?;
+    let metadata = broker
+        .store()
+        .topic_metadata(Some(&[topic.to_string()]), now_ms)?;
+    broker.sync_topic_metadata(&metadata)?;
     Ok(())
 }
 
@@ -268,7 +272,7 @@ mod tests {
     use kafka_protocol::messages::{ProduceRequest, TopicName};
     use tempfile::tempdir;
 
-    use crate::config::{BrokerConfig, Config, StorageConfig};
+    use crate::config::Config;
     use crate::store::FileStore;
 
     use super::*;
@@ -346,15 +350,9 @@ mod tests {
 
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
-        let config = Config {
-            broker: BrokerConfig::default(),
-            storage: StorageConfig {
-                data_dir: dir.join("data"),
-                ..StorageConfig::default()
-            },
-        };
+        let config = Config::single_node(dir.join("data"), 9092, 1);
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-        KafkaBroker::new(config, store)
+        KafkaBroker::new(config, store).unwrap()
     }
 
     fn produce_request(
