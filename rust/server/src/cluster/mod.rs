@@ -20,9 +20,10 @@ pub use replication::{PartitionReplicationState, ReplicaProgress};
 pub use rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse,
-    UpdatePartitionReplicationRequest, UpdatePartitionReplicationResponse,
-    UpdateReplicaProgressRequest, UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
+    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
+    UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
 };
 pub use runtime::ClusterRuntime;
 pub use transport::{

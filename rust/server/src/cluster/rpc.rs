@@ -115,3 +115,19 @@ pub struct GetPartitionStateResponse {
     pub high_watermark: i64,
     pub leader_log_end_offset: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaFetchRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub start_offset: i64,
+    pub max_records: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaFetchResponse {
+    pub found: bool,
+    pub high_watermark: i64,
+    pub leader_log_end_offset: i64,
+    pub records: Vec<crate::store::BrokerRecord>,
+}

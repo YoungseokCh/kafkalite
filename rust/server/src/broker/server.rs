@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::cluster::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget, ClusterRpcTransport, ClusterRuntime,
-    GetPartitionStateRequest, UpdateReplicaProgressRequest,
+    GetPartitionStateRequest, ReplicaFetchRequest, UpdateReplicaProgressRequest,
 };
 use crate::config::Config;
 use crate::store::Storage;
@@ -132,6 +132,53 @@ impl KafkaBroker {
                     partition_index: partition,
                     broker_id: self.config.broker.broker_id,
                     log_end_offset: latest.offset.min(state.leader_log_end_offset),
+                    last_caught_up_ms: now_ms,
+                })?;
+        Ok(response.high_watermark)
+    }
+
+    pub fn fetch_and_apply_from_remote_leader<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        target: &ClusterRpcTarget,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+    ) -> Result<i64> {
+        let (_, latest) = self.store.list_offsets(topic, partition)?;
+        let fetched = transport.replica_fetch_to(
+            target,
+            ReplicaFetchRequest {
+                topic_name: topic.to_string(),
+                partition_index: partition,
+                start_offset: latest.offset,
+                max_records: 1_000,
+            },
+        )?;
+        if !fetched.found {
+            return Ok(-1);
+        }
+        if latest.offset > fetched.leader_log_end_offset {
+            return Err(anyhow::anyhow!(
+                "replica divergence requires truncate: follower offset {} > leader offset {}",
+                latest.offset,
+                fetched.leader_log_end_offset
+            ));
+        }
+        if !fetched.records.is_empty() {
+            let _ =
+                self.store
+                    .append_replica_records(topic, partition, &fetched.records, now_ms)?;
+        }
+        let response =
+            self.cluster
+                .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: topic.to_string(),
+                    partition_index: partition,
+                    broker_id: self.config.broker.broker_id,
+                    log_end_offset: fetched
+                        .leader_log_end_offset
+                        .min(self.store.list_offsets(topic, partition)?.1.offset),
                     last_caught_up_ms: now_ms,
                 })?;
         Ok(response.high_watermark)
@@ -385,6 +432,122 @@ mod tests {
         assert_eq!(partition.replica_progress[0].log_end_offset, 3);
         assert_eq!(partition.replica_progress[1].log_end_offset, 2);
         assert_eq!(partition.replica_progress[2].log_end_offset, 3);
+    }
+
+    #[tokio::test]
+    async fn follower_fetches_and_applies_remote_records() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let voters = voter_trio();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            broker
+                .cluster()
+                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
+                    topic_name: "rf.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 1,
+                    leader_epoch: 1,
+                })
+                .unwrap();
+            broker
+                .cluster()
+                .handle_update_partition_replication(
+                    crate::cluster::UpdatePartitionReplicationRequest {
+                        topic_name: "rf.topic".to_string(),
+                        partition_index: 0,
+                        replicas: vec![1, 2, 3],
+                        isr: vec![1, 2, 3],
+                        leader_epoch: 1,
+                    },
+                )
+                .unwrap();
+        }
+
+        let _ = handle_produce(&leader, produce_request("rf.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("rf.topic", -1, -1, 1))
+            .await
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        harness.network.register_store(1, leader.store().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+
+        let high_watermark = follower
+            .fetch_and_apply_from_remote_leader(&transport, &target, "rf.topic", 0, 200)
+            .unwrap();
+
+        let fetched = follower
+            .store()
+            .fetch_records("rf.topic", 0, 0, 10)
+            .unwrap();
+        assert_eq!(fetched.records.len(), 2);
+        assert_eq!(fetched.records[0].offset, 0);
+        assert_eq!(fetched.records[1].offset, 1);
+        assert_eq!(high_watermark, 0);
+    }
+
+    #[tokio::test]
+    async fn follower_detects_divergence_when_ahead_of_leader() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let voters = voter_pair();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker.store().ensure_topic("diverge.topic", 1, 0).unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["diverge.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            broker
+                .cluster()
+                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
+                    topic_name: "diverge.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 1,
+                    leader_epoch: 1,
+                })
+                .unwrap();
+        }
+
+        let _ = handle_produce(&leader, produce_request("diverge.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        follower
+            .store()
+            .append_replica_records(
+                "diverge.topic",
+                0,
+                &[replica_record(0, 100), replica_record(1, 101)],
+                101,
+            )
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        harness.network.register_store(1, leader.store().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+
+        let err = follower
+            .fetch_and_apply_from_remote_leader(&transport, &target, "diverge.topic", 0, 200)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("replica divergence requires truncate"));
     }
 
     fn test_broker(node_id: i32, port: u16) -> KafkaBroker {

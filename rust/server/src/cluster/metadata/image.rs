@@ -5,6 +5,8 @@ use crate::store::TopicMetadata;
 
 use super::record::MetadataRecord;
 
+const ISR_LAG_TOLERANCE: i64 = 1;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterMetadataImage {
     pub cluster_id: String,
@@ -263,6 +265,7 @@ impl ClusterMetadataImage {
         partition
             .replica_progress
             .sort_by_key(|entry| entry.broker_id);
+        reconcile_isr(partition);
         partition.high_watermark =
             compute_high_watermark(&partition.isr, &partition.replica_progress)
                 .unwrap_or(partition.high_watermark);
@@ -279,6 +282,33 @@ fn compute_high_watermark(isr: &[i32], replica_progress: &[ReplicaProgress]) -> 
                 .map(|progress| progress.log_end_offset)
         })
         .min()
+}
+
+fn reconcile_isr(partition: &mut PartitionMetadataImage) {
+    let leader_leo = partition
+        .replica_progress
+        .iter()
+        .find(|progress| progress.broker_id == partition.leader_id)
+        .map(|progress| progress.log_end_offset);
+    let Some(leader_leo) = leader_leo else {
+        partition.isr = vec![partition.leader_id];
+        return;
+    };
+    partition.isr = partition
+        .replicas
+        .iter()
+        .copied()
+        .filter(|broker_id| {
+            *broker_id == partition.leader_id
+                || partition
+                    .replica_progress
+                    .iter()
+                    .find(|progress| progress.broker_id == *broker_id)
+                    .is_some_and(|progress| {
+                        leader_leo - progress.log_end_offset <= ISR_LAG_TOLERANCE
+                    })
+        })
+        .collect();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

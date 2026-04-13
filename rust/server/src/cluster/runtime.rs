@@ -9,9 +9,10 @@ use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse,
-    UpdatePartitionReplicationRequest, UpdatePartitionReplicationResponse,
-    UpdateReplicaProgressRequest, UpdateReplicaProgressResponse,
+    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
+    UpdateReplicaProgressResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -273,6 +274,13 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_replica_fetch(
+        &self,
+        _request: ReplicaFetchRequest,
+    ) -> Result<ReplicaFetchResponse> {
+        anyhow::bail!("replica fetch requires broker data-plane transport")
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
@@ -297,6 +305,9 @@ impl ClusterRuntime {
             ClusterRpcRequest::GetPartitionState(request) => Ok(
                 ClusterRpcResponse::GetPartitionState(self.handle_get_partition_state(request)?),
             ),
+            ClusterRpcRequest::ReplicaFetch(request) => Ok(ClusterRpcResponse::ReplicaFetch(
+                self.handle_replica_fetch(request)?,
+            )),
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
             )),
@@ -579,12 +590,71 @@ mod tests {
             .unwrap();
 
         assert!(response.accepted);
-        assert_eq!(response.high_watermark, 8);
+        assert_eq!(response.high_watermark, 10);
         assert_eq!(
             runtime
                 .metadata_image()
                 .partition_high_watermark("progress.topic", 0),
-            Some(8)
+            Some(10)
         );
+    }
+
+    #[test]
+    fn replica_progress_reconciles_isr_by_lag() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "isr.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+        runtime
+            .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+                topic_name: "isr.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+                leader_epoch: 1,
+            })
+            .unwrap();
+        runtime
+            .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                topic_name: "isr.topic".to_string(),
+                partition_index: 0,
+                broker_id: 1,
+                log_end_offset: 10,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        runtime
+            .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                topic_name: "isr.topic".to_string(),
+                partition_index: 0,
+                broker_id: 2,
+                log_end_offset: 10,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        runtime
+            .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                topic_name: "isr.topic".to_string(),
+                partition_index: 0,
+                broker_id: 3,
+                log_end_offset: 5,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+
+        let image = runtime.metadata_image();
+        assert_eq!(image.topics[0].partitions[0].isr, vec![1, 2]);
+        assert_eq!(image.topics[0].partitions[0].high_watermark, 10);
     }
 }

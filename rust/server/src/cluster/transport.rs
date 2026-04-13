@@ -6,11 +6,13 @@ use anyhow::{Result, bail};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     GetPartitionStateRequest, GetPartitionStateResponse, RegisterBrokerRequest,
-    RegisterBrokerResponse, UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse,
-    UpdatePartitionReplicationRequest, UpdatePartitionReplicationResponse,
-    UpdateReplicaProgressRequest, UpdateReplicaProgressResponse,
+    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
+    UpdateReplicaProgressResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
+use crate::store::{BrokerRecord, Storage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterRpcRequest {
@@ -21,6 +23,7 @@ pub enum ClusterRpcRequest {
     UpdatePartitionReplication(UpdatePartitionReplicationRequest),
     UpdateReplicaProgress(UpdateReplicaProgressRequest),
     GetPartitionState(GetPartitionStateRequest),
+    ReplicaFetch(ReplicaFetchRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,7 @@ pub enum ClusterRpcResponse {
     UpdatePartitionReplication(UpdatePartitionReplicationResponse),
     UpdateReplicaProgress(UpdateReplicaProgressResponse),
     GetPartitionState(GetPartitionStateResponse),
+    ReplicaFetch(ReplicaFetchResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +116,17 @@ pub trait ClusterRpcTransport {
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
+
+    fn replica_fetch_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: ReplicaFetchRequest,
+    ) -> Result<ReplicaFetchResponse> {
+        match self.send_to(target, ClusterRpcRequest::ReplicaFetch(request))? {
+            ClusterRpcResponse::ReplicaFetch(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,9 +169,10 @@ impl RemoteClusterRpcTransport {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct InMemoryClusterNetwork {
     runtimes: Arc<Mutex<BTreeMap<i32, ClusterRuntime>>>,
+    stores: Arc<Mutex<BTreeMap<i32, Arc<dyn Storage>>>>,
 }
 
 impl InMemoryClusterNetwork {
@@ -167,7 +183,17 @@ impl InMemoryClusterNetwork {
             .insert(node_id, runtime);
     }
 
+    pub fn register_store(&self, node_id: i32, store: Arc<dyn Storage>) {
+        self.stores
+            .lock()
+            .expect("in-memory cluster network store mutex poisoned")
+            .insert(node_id, store);
+    }
+
     fn dispatch(&self, node_id: i32, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+        if let ClusterRpcRequest::ReplicaFetch(request) = request {
+            return self.dispatch_replica_fetch(node_id, request);
+        }
         let runtime = self
             .runtimes
             .lock()
@@ -177,9 +203,56 @@ impl InMemoryClusterNetwork {
             .ok_or_else(|| anyhow::anyhow!("unregistered cluster runtime for node {node_id}"))?;
         runtime.dispatch(request)
     }
+
+    fn dispatch_replica_fetch(
+        &self,
+        node_id: i32,
+        request: ReplicaFetchRequest,
+    ) -> Result<ClusterRpcResponse> {
+        let Some(store) = self
+            .stores
+            .lock()
+            .expect("in-memory cluster network store mutex poisoned")
+            .get(&node_id)
+            .cloned()
+        else {
+            return Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                found: false,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+                records: Vec::<BrokerRecord>::new(),
+            }));
+        };
+        match store.fetch_records(
+            &request.topic_name,
+            request.partition_index,
+            request.start_offset,
+            request.max_records,
+        ) {
+            Ok(fetched) => {
+                let (_, latest) =
+                    store.list_offsets(&request.topic_name, request.partition_index)?;
+                Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                    found: true,
+                    high_watermark: fetched.high_watermark,
+                    leader_log_end_offset: latest.offset,
+                    records: fetched.records,
+                }))
+            }
+            Err(crate::store::StoreError::UnknownTopicOrPartition { .. }) => {
+                Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                    found: false,
+                    high_watermark: -1,
+                    leader_log_end_offset: -1,
+                    records: Vec::new(),
+                }))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InMemoryRemoteClusterRpcTransport {
     remote: RemoteClusterRpcTransport,
     network: InMemoryClusterNetwork,
@@ -438,7 +511,7 @@ mod tests {
             .unwrap();
 
         assert!(response.accepted);
-        assert_eq!(response.high_watermark, 8);
+        assert_eq!(response.high_watermark, 10);
     }
 
     #[test]
@@ -602,14 +675,14 @@ mod tests {
         let ClusterRpcResponse::UpdateReplicaProgress(response) = response else {
             panic!("unexpected response variant");
         };
-        assert_eq!(response.high_watermark, 9);
+        assert_eq!(response.high_watermark, 11);
         assert_eq!(
             harness
                 .node2
                 .runtime
                 .metadata_image()
                 .partition_high_watermark("replicated.topic", 0),
-            Some(9)
+            Some(11)
         );
     }
 
@@ -756,7 +829,7 @@ mod tests {
 
         assert!(before_failover.found);
         assert_eq!(before_failover.leader_id, 1);
-        assert_eq!(before_failover.high_watermark, 5);
+        assert_eq!(before_failover.high_watermark, 7);
         assert_eq!(before_failover.leader_log_end_offset, 7);
         assert_eq!(after_failover, before_failover);
         assert_eq!(harness.node2.runtime.metadata_image().controller_id, 2);
