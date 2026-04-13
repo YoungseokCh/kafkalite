@@ -2,6 +2,7 @@ pub mod config;
 pub mod controller;
 pub mod metadata;
 pub mod quorum;
+pub mod replication;
 pub mod rpc;
 pub mod runtime;
 pub mod transport;
@@ -13,10 +14,12 @@ pub use metadata::{
     TopicMetadataImage,
 };
 pub use quorum::{QuorumSnapshot, QuorumState};
+pub use replication::{PartitionReplicationState, ReplicaProgress};
 pub use rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
-    UpdatePartitionLeaderResponse, VoteRequest, VoteResponse,
+    UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse, VoteRequest, VoteResponse,
 };
 pub use runtime::ClusterRuntime;
 pub use transport::{

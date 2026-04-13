@@ -9,7 +9,8 @@ use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
-    UpdatePartitionLeaderResponse,
+    UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -185,6 +186,32 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_update_partition_replication(
+        &self,
+        request: UpdatePartitionReplicationRequest,
+    ) -> Result<UpdatePartitionReplicationResponse> {
+        let prev_metadata_offset = self.metadata_image().metadata_offset;
+        let response = self.handle_append_metadata(AppendMetadataRequest {
+            term: self.quorum_snapshot().current_term,
+            leader_id: self
+                .quorum_snapshot()
+                .leader_id
+                .unwrap_or(self.config.node_id),
+            prev_metadata_offset,
+            records: vec![crate::cluster::MetadataRecord::UpdatePartitionReplication {
+                topic_name: request.topic_name,
+                partition_index: request.partition_index,
+                replicas: request.replicas,
+                isr: request.isr,
+                leader_epoch: request.leader_epoch,
+            }],
+        })?;
+        Ok(UpdatePartitionReplicationResponse {
+            accepted: response.accepted,
+            metadata_offset: response.last_metadata_offset,
+        })
+    }
+
     pub fn dispatch(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match request {
@@ -194,6 +221,11 @@ impl ClusterRuntime {
             ClusterRpcRequest::UpdatePartitionLeader(request) => {
                 Ok(ClusterRpcResponse::UpdatePartitionLeader(
                     self.handle_update_partition_leader(request)?,
+                ))
+            }
+            ClusterRpcRequest::UpdatePartitionReplication(request) => {
+                Ok(ClusterRpcResponse::UpdatePartitionReplication(
+                    self.handle_update_partition_replication(request)?,
                 ))
             }
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
@@ -395,5 +427,40 @@ mod tests {
         let image = runtime.metadata_image();
         assert_eq!(image.partition_leader_id("leader.topic", 0), Some(9));
         assert_eq!(image.topics[0].partitions[0].leader_epoch, 1);
+    }
+
+    #[test]
+    fn update_partition_replication_changes_isr_and_replicas() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "replication.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+
+        let response = runtime
+            .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+                topic_name: "replication.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2],
+                leader_epoch: 2,
+            })
+            .unwrap();
+
+        assert!(response.accepted);
+        let image = runtime.metadata_image();
+        assert_eq!(image.topics[0].partitions[0].replicas, vec![1, 2, 3]);
+        assert_eq!(image.topics[0].partitions[0].isr, vec![1, 2]);
+        assert_eq!(image.topics[0].partitions[0].leader_epoch, 2);
     }
 }

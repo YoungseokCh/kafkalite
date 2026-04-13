@@ -69,3 +69,18 @@ pub struct UpdatePartitionLeaderResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePartitionReplicationRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub replicas: Vec<i32>,
+    pub isr: Vec<i32>,
+    pub leader_epoch: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePartitionReplicationResponse {
+    pub accepted: bool,
+    pub metadata_offset: i64,
+}

@@ -41,6 +41,21 @@ impl ClusterMetadataImage {
             } => {
                 self.update_partition_leader(&topic_name, partition_index, leader_id, leader_epoch);
             }
+            MetadataRecord::UpdatePartitionReplication {
+                topic_name,
+                partition_index,
+                replicas,
+                isr,
+                leader_epoch,
+            } => {
+                self.update_partition_replication(
+                    &topic_name,
+                    partition_index,
+                    replicas,
+                    isr,
+                    leader_epoch,
+                );
+            }
             MetadataRecord::UpsertTopic(topic) => {
                 self.upsert_topic(topic);
             }
@@ -123,6 +138,40 @@ impl ClusterMetadataImage {
         partition.leader_epoch = leader_epoch;
         partition.replicas = vec![leader_id];
         partition.isr = vec![leader_id];
+        true
+    }
+
+    pub fn update_partition_replication(
+        &mut self,
+        topic_name: &str,
+        partition_index: i32,
+        replicas: Vec<i32>,
+        isr: Vec<i32>,
+        leader_epoch: i32,
+    ) -> bool {
+        let Some(topic) = self
+            .topics
+            .iter_mut()
+            .find(|topic| topic.name == topic_name)
+        else {
+            return false;
+        };
+        let Some(partition) = topic
+            .partitions
+            .iter_mut()
+            .find(|partition| partition.partition == partition_index)
+        else {
+            return false;
+        };
+        if partition.replicas == replicas
+            && partition.isr == isr
+            && partition.leader_epoch == leader_epoch
+        {
+            return false;
+        }
+        partition.replicas = replicas;
+        partition.isr = isr;
+        partition.leader_epoch = leader_epoch;
         true
     }
 }

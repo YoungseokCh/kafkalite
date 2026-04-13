@@ -6,7 +6,8 @@ use anyhow::{Result, bail};
 use crate::cluster::rpc::{
     AppendMetadataRequest, AppendMetadataResponse, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
     RegisterBrokerRequest, RegisterBrokerResponse, UpdatePartitionLeaderRequest,
-    UpdatePartitionLeaderResponse,
+    UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
+    UpdatePartitionReplicationResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
 
@@ -16,6 +17,7 @@ pub enum ClusterRpcRequest {
     RegisterBroker(RegisterBrokerRequest),
     BrokerHeartbeat(BrokerHeartbeatRequest),
     UpdatePartitionLeader(UpdatePartitionLeaderRequest),
+    UpdatePartitionReplication(UpdatePartitionReplicationRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub enum ClusterRpcResponse {
     RegisterBroker(RegisterBrokerResponse),
     BrokerHeartbeat(BrokerHeartbeatResponse),
     UpdatePartitionLeader(UpdatePartitionLeaderResponse),
+    UpdatePartitionReplication(UpdatePartitionReplicationResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,16 @@ pub trait ClusterRpcTransport {
     ) -> Result<UpdatePartitionLeaderResponse> {
         match self.send(ClusterRpcRequest::UpdatePartitionLeader(request))? {
             ClusterRpcResponse::UpdatePartitionLeader(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn update_partition_replication(
+        &self,
+        request: UpdatePartitionReplicationRequest,
+    ) -> Result<UpdatePartitionReplicationResponse> {
+        match self.send(ClusterRpcRequest::UpdatePartitionReplication(request))? {
+            ClusterRpcResponse::UpdatePartitionReplication(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
@@ -311,6 +324,40 @@ mod tests {
                 .partition_leader_id("leader.topic", 0),
             Some(9)
         );
+    }
+
+    #[test]
+    fn local_transport_dispatches_partition_replication_update() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "replication.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+        let transport = LocalClusterRpcTransport::new(runtime.clone());
+
+        let response = transport
+            .update_partition_replication(UpdatePartitionReplicationRequest {
+                topic_name: "replication.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2],
+                leader_epoch: 2,
+            })
+            .unwrap();
+
+        assert!(response.accepted);
+        let image = runtime.metadata_image();
+        assert_eq!(image.topics[0].partitions[0].replicas, vec![1, 2, 3]);
+        assert_eq!(image.topics[0].partitions[0].isr, vec![1, 2]);
     }
 
     #[test]

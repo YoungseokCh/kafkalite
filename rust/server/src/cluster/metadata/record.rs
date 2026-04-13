@@ -14,5 +14,12 @@ pub enum MetadataRecord {
         leader_id: i32,
         leader_epoch: i32,
     },
+    UpdatePartitionReplication {
+        topic_name: String,
+        partition_index: i32,
+        replicas: Vec<i32>,
+        isr: Vec<i32>,
+        leader_epoch: i32,
+    },
     UpsertTopic(TopicMetadataImage),
 }
