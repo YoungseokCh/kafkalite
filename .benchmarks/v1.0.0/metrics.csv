@@ -1,0 +1,8 @@
+name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes
+bench.produce.small,1000,100,1,48128.53,20.78,2077.77,46.70,50.05,50.14,5516,5516,369895,185000,1764,1512,0,181619
+bench.produce.multi_partition,1000,100,3,48308.29,20.70,2070.04,46.71,50.06,50.12,5572,5572,643973,185000,1764,1512,0,455697
+bench.roundtrip,200,512,1,10550.89,18.96,9705.35,46.70,50.04,50.12,5432,5732,155295,119400,364,312,0,35219
+bench.fetch.multi_partition,500,512,3,24305.61,20.57,10532.55,46.70,50.06,50.14,5496,5496,522919,298500,924,792,0,222703
+bench.fetch.tail,500,512,1,88.60,5643.13,2889281.80,0.00,88.58,88.58,5396,5404,389283,298500,896,768,0,89119
+bench.commit.resume,4,256,1,1518.25,2.63,674.46,50.07,588.06,588.06,5660,5672,2231,1364,28,24,0,815
+bench.mixed.handoff,200,256,1,11489.33,17.41,4456.31,46.70,50.05,50.10,5568,5568,106206,68200,364,312,0,37330
