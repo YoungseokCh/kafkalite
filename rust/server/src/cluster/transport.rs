@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 
@@ -115,6 +116,46 @@ impl RemoteClusterRpcTransport {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryClusterNetwork {
+    runtimes: Arc<Mutex<BTreeMap<i32, ClusterRuntime>>>,
+}
+
+impl InMemoryClusterNetwork {
+    pub fn register(&self, node_id: i32, runtime: ClusterRuntime) {
+        self.runtimes
+            .lock()
+            .expect("in-memory cluster network mutex poisoned")
+            .insert(node_id, runtime);
+    }
+
+    fn dispatch(&self, node_id: i32, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+        let runtime = self
+            .runtimes
+            .lock()
+            .expect("in-memory cluster network mutex poisoned")
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unregistered cluster runtime for node {node_id}"))?;
+        runtime.dispatch(request)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InMemoryRemoteClusterRpcTransport {
+    remote: RemoteClusterRpcTransport,
+    network: InMemoryClusterNetwork,
+}
+
+impl InMemoryRemoteClusterRpcTransport {
+    pub fn new(config: &ClusterConfig, network: InMemoryClusterNetwork) -> Self {
+        Self {
+            remote: RemoteClusterRpcTransport::new(config),
+            network,
+        }
+    }
+}
+
 impl ClusterRpcTransport for RemoteClusterRpcTransport {
     fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         bail!("remote cluster rpc requires a target node")
@@ -132,6 +173,21 @@ impl ClusterRpcTransport for RemoteClusterRpcTransport {
             target.port,
             request
         )
+    }
+}
+
+impl ClusterRpcTransport for InMemoryRemoteClusterRpcTransport {
+    fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+        bail!("in-memory remote cluster rpc requires a target node")
+    }
+
+    fn send_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: ClusterRpcRequest,
+    ) -> Result<ClusterRpcResponse> {
+        let resolved = self.remote.resolve_target(target.node_id)?;
+        self.network.dispatch(resolved.node_id, request)
     }
 }
 
@@ -291,5 +347,51 @@ mod tests {
         let err = transport.resolve_target(99).unwrap_err().to_string();
 
         assert!(err.contains("unknown cluster RPC target node 99"));
+    }
+
+    #[test]
+    fn in_memory_remote_transport_dispatches_to_registered_runtime() {
+        let mut config1 = Config::single_node(tempdir().unwrap().path().join("node1"), 19092, 1);
+        config1.cluster.node_id = 1;
+        config1.cluster.process_roles = vec![ProcessRole::Controller];
+        config1.cluster.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+        ];
+        let mut config2 = Config::single_node(tempdir().unwrap().path().join("node2"), 19093, 1);
+        config2.cluster.node_id = 2;
+        config2.cluster.process_roles = vec![ProcessRole::Controller];
+        config2.cluster.controller_quorum_voters = config1.cluster.controller_quorum_voters.clone();
+
+        let runtime2 = ClusterRuntime::from_config(&config2).unwrap();
+        let network = InMemoryClusterNetwork::default();
+        network.register(2, runtime2.clone());
+        let transport = InMemoryRemoteClusterRpcTransport::new(&config1.cluster, network);
+        let target = transport.remote.resolve_target(2).unwrap();
+
+        let response = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 1,
+                    prev_metadata_offset: runtime2.metadata_image().metadata_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 1,
+                    }],
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+        assert_eq!(runtime2.metadata_image().controller_id, 1);
     }
 }
