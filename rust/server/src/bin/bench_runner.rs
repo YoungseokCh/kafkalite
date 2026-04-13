@@ -5,7 +5,8 @@ use clap::{ArgAction, Parser, ValueEnum};
 use kafkalite_server::bench::mixed::run_mixed_handoff;
 use kafkalite_server::bench::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
 use kafkalite_server::bench::scenarios::{
-    ScenarioSpec, run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
+    ScenarioSpec, run_cluster_replication_metadata, run_commit_resume, run_fetch_tail,
+    run_produce_only, run_roundtrip,
 };
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -119,6 +120,12 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 payload_bytes: 256,
                 default_partitions: 1,
             },
+            ScenarioSpec {
+                name: "bench.cluster.replication.metadata",
+                messages: 200,
+                payload_bytes: 1,
+                default_partitions: 1,
+            },
         ],
         BenchMode::Memory => vec![
             ScenarioSpec {
@@ -195,6 +202,12 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
                 payload_bytes: 256,
                 default_partitions: 1,
             },
+            ScenarioSpec {
+                name: "bench.cluster.replication.metadata",
+                messages: 200,
+                payload_bytes: 1,
+                default_partitions: 1,
+            },
         ],
     };
 
@@ -211,6 +224,8 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
             run_commit_resume(&scenario_root, &args.broker_bin, &spec).await?
         } else if spec.name.contains("mixed.handoff") {
             run_mixed_handoff(&scenario_root, &args.broker_bin, &spec).await?
+        } else if spec.name.contains("cluster.replication.metadata") {
+            run_cluster_replication_metadata(&scenario_root, &spec).await?
         } else {
             run_produce_only(&scenario_root, &args.broker_bin, &spec).await?
         };

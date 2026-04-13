@@ -7,9 +7,16 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+use tempfile::tempdir;
 
 use super::broker_process::BrokerProcess;
 use super::report::{MemoryMetrics, RuntimeMetrics, ScenarioReport, StorageMetrics};
+use crate::cluster::{
+    ClusterRpcRequest, ClusterRpcTransport, ControllerQuorumVoter, InMemoryClusterNetwork,
+    InMemoryRemoteClusterRpcTransport, ProcessRole, UpdatePartitionLeaderRequest,
+    UpdatePartitionReplicationRequest, UpdateReplicaProgressRequest,
+};
+use crate::config::Config;
 
 pub struct ScenarioSpec {
     pub name: &'static str,
@@ -190,6 +197,116 @@ pub async fn run_commit_resume(
         spec.messages,
         spec.payload_bytes,
     ))
+}
+
+pub async fn run_cluster_replication_metadata(
+    root: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
+    fs::create_dir_all(root)?;
+    let voters = vec![
+        ControllerQuorumVoter {
+            node_id: 1,
+            host: "node1".to_string(),
+            port: 9093,
+        },
+        ControllerQuorumVoter {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        },
+    ];
+    let mut config1 = Config::single_node(tempdir()?.path().join("bench-node-1"), 19092, 1);
+    config1.cluster.node_id = 1;
+    config1.cluster.process_roles = vec![ProcessRole::Controller];
+    config1.cluster.controller_quorum_voters = voters.clone();
+    let mut config2 = Config::single_node(tempdir()?.path().join("bench-node-2"), 19093, 1);
+    config2.cluster.node_id = 2;
+    config2.cluster.process_roles = vec![ProcessRole::Controller];
+    config2.cluster.controller_quorum_voters = voters;
+
+    let _runtime1 = crate::cluster::ClusterRuntime::from_config(&config1)?;
+    let runtime2 = crate::cluster::ClusterRuntime::from_config(&config2)?;
+    runtime2.sync_local_topics(
+        &[crate::store::TopicMetadata {
+            name: spec.name.to_string(),
+            partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+        }],
+        2,
+    )?;
+
+    let network = InMemoryClusterNetwork::default();
+    network.register(2, runtime2.clone());
+    let transport = InMemoryRemoteClusterRpcTransport::new(&config1.cluster, network);
+    let target = transport.resolve_target(2)?;
+
+    let started = Instant::now();
+    let mut latencies = Vec::with_capacity(spec.messages as usize);
+    for index in 0..spec.messages {
+        let op_started = Instant::now();
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdatePartitionLeader(UpdatePartitionLeaderRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: index as i32 + 1,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdatePartitionReplication(UpdatePartitionReplicationRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                leader_epoch: index as i32 + 1,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                broker_id: 1,
+                log_end_offset: index as i64 + 1,
+                last_caught_up_ms: index as i64,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                broker_id: 2,
+                log_end_offset: index as i64,
+                last_caught_up_ms: index as i64,
+            }),
+        )?;
+        latencies.push(op_started.elapsed());
+    }
+
+    let runtime = runtime_metrics(
+        started.elapsed(),
+        &latencies,
+        spec.messages,
+        spec.payload_bytes,
+    );
+    let storage = storage_metrics(root, spec.messages, spec.payload_bytes);
+    Ok(ScenarioReport {
+        name: spec.name.to_string(),
+        iterations: 1,
+        warmups: 0,
+        messages: spec.messages,
+        payload_bytes: spec.payload_bytes,
+        default_partitions: spec.default_partitions,
+        runtime,
+        memory: MemoryMetrics {
+            peak_rss_kb: 0,
+            final_rss_kb: 0,
+        },
+        storage,
+    })
 }
 
 fn build_report(
