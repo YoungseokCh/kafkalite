@@ -67,6 +67,12 @@ Still incomplete / experimental:
 - production-ready reassignment safety and observability
 - full multi-process distributed compatibility matrix
 
+For a fuller and maintained list, see `docs/LIMITATIONS.md`.
+
+## Implementation summary
+
+For a compact milestone/commit-group overview, see `docs/IMPLEMENTATION_SUMMARY.md`.
+
 ## Benchmarks
 
 Bench runner includes local broker scenarios and cluster metadata scenarios.
