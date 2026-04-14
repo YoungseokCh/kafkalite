@@ -3,6 +3,12 @@ name: Publish crate
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to publish, for example v1.0.1
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,6 +29,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.87
+          components: rustfmt, clippy
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -40,14 +47,16 @@ jobs:
 
       - name: Verify release tag matches Cargo.toml version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
 
           cargo_version="$(grep '^version = ' Cargo.toml | cut -d '"' -f2)"
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${RELEASE_TAG#v}"
 
           if [[ "$cargo_version" != "$tag_version" ]]; then
-            echo "Cargo.toml version ($cargo_version) does not match release tag ($GITHUB_REF_NAME)" >&2
+            echo "Cargo.toml version ($cargo_version) does not match release tag ($RELEASE_TAG)" >&2
             exit 1
           fi
 
