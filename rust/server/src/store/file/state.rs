@@ -57,6 +57,10 @@ pub struct GroupState {
     pub protocol_type: String,
     pub protocol_name: String,
     pub leader_member_id: Option<String>,
+    #[serde(default)]
+    pub assignments_ready: bool,
+    #[serde(default)]
+    pub assignments_failed: bool,
     pub members: BTreeMap<String, GroupMemberState>,
     pub updated_at_unix_ms: i64,
 }
@@ -68,6 +72,8 @@ impl GroupState {
             protocol_type: protocol_type.to_string(),
             protocol_name: protocol_name.to_string(),
             leader_member_id: None,
+            assignments_ready: false,
+            assignments_failed: false,
             members: BTreeMap::new(),
             updated_at_unix_ms: now_ms,
         }

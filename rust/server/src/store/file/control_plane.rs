@@ -65,6 +65,8 @@ impl ControlPlaneState {
                     member.generation_id = group.generation_id;
                     member.assignment = Vec::new();
                 }
+                group.assignments_ready = false;
+                group.assignments_failed = false;
             }
             group.leader_member_id = group.members.keys().next().cloned();
             (
@@ -116,16 +118,37 @@ impl ControlPlaneState {
         }
         ensure_generation(group, request.generation_id)?;
         if !request.assignments.is_empty() {
-            ensure_complete_assignments(group, request.group_id, request.assignments)?;
+            if let Err(err) =
+                ensure_complete_assignments(group, request.group_id, request.assignments)
+            {
+                group.assignments_ready = false;
+                group.assignments_failed = true;
+                return Err(err);
+            }
             for (assigned_member, assignment) in request.assignments {
                 if let Some(member) = group.members.get_mut(assigned_member) {
                     member.assignment = assignment.clone();
                     member.updated_at_unix_ms = request.now_ms;
                 }
             }
+            group.assignments_ready = true;
+            group.assignments_failed = false;
         } else if group.leader_member_id.as_deref() == Some(request.member_id) {
             maybe_build_assignments(group, request.topics)?;
+            group.assignments_ready = true;
+            group.assignments_failed = false;
         } else {
+            if group.assignments_failed {
+                return Err(StoreError::UnknownMember {
+                    group_id: request.group_id.to_string(),
+                    member_id: request.member_id.to_string(),
+                });
+            }
+            if !group.assignments_ready {
+                maybe_build_assignments(group, request.topics)?;
+                group.assignments_ready = true;
+                group.assignments_failed = false;
+            }
             ensure_assignment_ready(group, request.group_id, request.member_id)?;
         }
         let assignment = group

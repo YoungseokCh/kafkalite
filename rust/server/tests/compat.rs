@@ -260,7 +260,7 @@ async fn partition_assignment_moves_to_remaining_group_member() {
         .await
         .unwrap();
 
-    let consumer_one = group_consumer(&bootstrap, "handoff-group");
+    let consumer_one = group_consumer_with_session_timeout(&bootstrap, "handoff-group", 6_000);
     consumer_one.subscribe(&["handoff.events"]).unwrap();
     let first = poll_for_message(&consumer_one, Duration::from_secs(8));
     assert_eq!(first.payload(), Some(&b"first-owner"[..]));
@@ -269,12 +269,13 @@ async fn partition_assignment_moves_to_remaining_group_member() {
         .unwrap();
     drop(first);
 
-    let consumer_two = group_consumer(&bootstrap, "handoff-group");
+    let consumer_two = group_consumer_with_session_timeout(&bootstrap, "handoff-group", 6_000);
     consumer_two.subscribe(&["handoff.events"]).unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    drive_group_consumer(&consumer_two, Duration::from_secs(1));
 
+    consumer_one.unsubscribe();
     drop(consumer_one);
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    drive_group_consumer(&consumer_two, Duration::from_secs(7));
 
     producer
         .send(
@@ -472,11 +473,20 @@ fn base_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
 }
 
 fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
+    group_consumer_with_session_timeout(bootstrap, group_id, 45_000)
+}
+
+fn group_consumer_with_session_timeout(
+    bootstrap: &str,
+    group_id: &str,
+    session_timeout_ms: i32,
+) -> BaseConsumer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
         .set("group.id", group_id)
         .set("auto.offset.reset", "earliest")
         .set("enable.auto.commit", "false")
+        .set("session.timeout.ms", session_timeout_ms.to_string())
         .set("debug", "protocol,broker,cgrp,fetch")
         .create()
         .unwrap()
@@ -493,6 +503,13 @@ fn poll_for_message(
         }
     }
     panic!("expected a fetch result");
+}
+
+fn drive_group_consumer(consumer: &BaseConsumer, timeout: Duration) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        let _ = consumer.poll(Duration::from_millis(250));
+    }
 }
 
 fn free_port() -> u16 {
