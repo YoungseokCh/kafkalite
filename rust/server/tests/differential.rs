@@ -17,6 +17,9 @@ use kafka_protocol::messages::{
     SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
+use kafkalite_server::cluster::{
+    ControllerQuorumVoter, ProcessRole, UpdatePartitionReplicationRequest,
+};
 use kafkalite_server::{Config, FileStore, KafkaBroker, protocol};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -189,6 +192,76 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     )
     .await;
     assert_eq!(local_stale_sync, real_stale_sync);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_reads_are_side_effect_free_for_existing_topics() {
+    let tempdir = tempdir().unwrap();
+    let port = free_port();
+    let mut config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 1);
+    config.cluster.node_id = 1;
+    config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+    config.cluster.controller_quorum_voters = vec![
+        ControllerQuorumVoter {
+            node_id: 1,
+            host: "node1".to_string(),
+            port: 9093,
+        },
+        ControllerQuorumVoter {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9094,
+        },
+    ];
+    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+    let broker = KafkaBroker::new(config, store).unwrap();
+    let broker_handle = broker.clone();
+    let handle = tokio::spawn(async move { broker_handle.run().await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let bootstrap = format!("127.0.0.1:{port}");
+
+    broker
+        .store()
+        .ensure_topic("diff.side-effect", 1, 0)
+        .unwrap();
+    let metadata = broker
+        .store()
+        .topic_metadata(Some(&["diff.side-effect".to_string()]), 0)
+        .unwrap();
+    broker.sync_topic_metadata(&metadata).unwrap();
+    broker
+        .cluster()
+        .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+            topic_name: "diff.side-effect".to_string(),
+            partition_index: 0,
+            replicas: vec![1, 2],
+            isr: vec![1],
+            leader_epoch: 3,
+        })
+        .unwrap();
+    let before = broker.cluster().metadata_image();
+
+    let consumer = consumer(&bootstrap, "metadata-side-effect");
+    let _ = consumer
+        .fetch_metadata(Some("diff.side-effect"), Duration::from_secs(5))
+        .unwrap();
+
+    let after = broker.cluster().metadata_image();
+    assert_eq!(
+        before.topics[0].partitions[0].replicas,
+        after.topics[0].partitions[0].replicas
+    );
+    assert_eq!(
+        before.topics[0].partitions[0].isr,
+        after.topics[0].partitions[0].isr
+    );
+    assert_eq!(
+        before.topics[0].partitions[0].leader_epoch,
+        after.topics[0].partitions[0].leader_epoch
+    );
 
     handle.abort();
     let _ = handle.await;
