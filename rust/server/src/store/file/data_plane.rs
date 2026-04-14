@@ -282,6 +282,9 @@ impl DataPlaneState {
             })?;
         partition.state.next_offset = prepared.last_offset + 1;
         for record in &prepared.records {
+            if !tracks_producer_state(record.producer_id) {
+                continue;
+            }
             partition.producer_sequences.insert(
                 record.producer_id,
                 ProducerSequenceState {
@@ -369,6 +372,9 @@ fn duplicate_append_result(
     producer_sequences: &BTreeMap<i64, ProducerSequenceState>,
     batch: &ProducerBatchInfo,
 ) -> Option<(i64, i64)> {
+    if !tracks_producer_state(batch.producer_id) {
+        return None;
+    }
     let state = producer_sequences.get(&batch.producer_id)?;
     if batch.producer_epoch == state.producer_epoch
         && batch.first_sequence == state.first_sequence
@@ -378,6 +384,10 @@ fn duplicate_append_result(
     } else {
         None
     }
+}
+
+fn tracks_producer_state(producer_id: i64) -> bool {
+    producer_id >= 0
 }
 
 struct ProducerBatchInfo {

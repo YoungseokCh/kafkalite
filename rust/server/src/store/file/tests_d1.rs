@@ -77,6 +77,39 @@ fn topic_offsets_are_recovered_from_log_after_reopen() {
     assert_eq!(topic.partitions[0].next_offset, 2);
 }
 
+#[test]
+fn non_idempotent_producer_records_do_not_persist_sequence_state() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    store
+        .append_records("non-idempotent-state.events", 0, &records, 20)
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let journal = std::fs::read_to_string(dir.path().join("state/producers.snapshot"));
+
+    assert!(journal.is_err());
+    assert!(
+        reopened
+            .describe_topic("non-idempotent-state.events")
+            .is_some()
+    );
+    let state_journal = std::fs::read(dir.path().join("state/state.journal")).unwrap();
+    let text = String::from_utf8_lossy(&state_journal);
+    assert!(!text.contains("non-idempotent-state.events:0:-1"));
+}
+
 fn count_journal_entries(path: &std::path::Path) -> usize {
     let bytes = std::fs::read(path).unwrap();
     let mut cursor = 0;

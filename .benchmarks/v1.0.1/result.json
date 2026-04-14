@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-04-14T04:28:57.987863125+00:00",
+  "git_sha": "e89556b",
+  "dirty": false,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "build": {
+    "profile": "release",
+    "binary_bytes": 4596184,
+    "package_bytes": 56716,
+    "stripped_binary_bytes": null
+  },
+  "scenarios": [
+    {
+      "name": "bench.produce.small",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 1000,
+      "payload_bytes": 100,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 47951.350785999995,
+        "throughput_msgs_per_sec": 20.85446986598681,
+        "throughput_bytes_per_sec": 2085.446986598681,
+        "latency_p50_ms": 46.687971000000005,
+        "latency_p95_ms": 50.042238000000005,
+        "latency_p99_ms": 50.126633
+      },
+      "memory": {
+        "peak_rss_kb": 5424,
+        "final_rss_kb": 5424
+      },
+      "storage": {
+        "total_bytes": 369895,
+        "log_bytes": 185000,
+        "index_bytes": 1764,
+        "timeindex_bytes": 1512,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 181619,
+        "bytes_per_record": 369.895,
+        "bytes_per_payload_byte": 3.69895
+      }
+    }
+  ]
+}

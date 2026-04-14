@@ -543,6 +543,68 @@ fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
 }
 
 #[test]
+fn non_idempotent_producer_records_are_not_deduplicated() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let first = store
+        .append_records("non-idempotent.events", 0, &records, 10)
+        .unwrap();
+    let second = store
+        .append_records("non-idempotent.events", 0, &records, 20)
+        .unwrap();
+    let fetched = store
+        .fetch_records("non-idempotent.events", 0, 0, 10)
+        .unwrap();
+
+    assert_eq!(first, (0, 0));
+    assert_eq!(second, (1, 1));
+    assert_eq!(fetched.records.len(), 2);
+}
+
+#[test]
+fn non_idempotent_producer_records_append_after_restart() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let first = store
+        .append_records("non-idempotent-restart.events", 0, &records, 10)
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let second = reopened
+        .append_records("non-idempotent-restart.events", 0, &records, 20)
+        .unwrap();
+    let fetched = reopened
+        .fetch_records("non-idempotent-restart.events", 0, 0, 10)
+        .unwrap();
+
+    assert_eq!(first, (0, 0));
+    assert_eq!(second, (1, 1));
+    assert_eq!(fetched.records.len(), 2);
+}
+
+#[test]
 fn stale_producer_epoch_is_rejected() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
