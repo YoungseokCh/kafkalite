@@ -10,7 +10,7 @@ use crate::cluster::rpc::{
     RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
-    UpdateReplicaProgressResponse,
+    UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
 use crate::store::{BrokerRecord, Storage};
@@ -27,6 +27,7 @@ pub enum ClusterRpcRequest {
     ReplicaFetch(ReplicaFetchRequest),
     BeginPartitionReassignment(BeginPartitionReassignmentRequest),
     AdvancePartitionReassignment(AdvancePartitionReassignmentRequest),
+    Vote(VoteRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub enum ClusterRpcResponse {
     ReplicaFetch(ReplicaFetchResponse),
     BeginPartitionReassignment(PartitionReassignmentResponse),
     AdvancePartitionReassignment(PartitionReassignmentResponse),
+    Vote(VoteResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +151,13 @@ pub trait ClusterRpcTransport {
     ) -> Result<PartitionReassignmentResponse> {
         match self.send(ClusterRpcRequest::AdvancePartitionReassignment(request))? {
             ClusterRpcResponse::AdvancePartitionReassignment(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn vote_to(&self, target: &ClusterRpcTarget, request: VoteRequest) -> Result<VoteResponse> {
+        match self.send_to(target, ClusterRpcRequest::Vote(request))? {
+            ClusterRpcResponse::Vote(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }

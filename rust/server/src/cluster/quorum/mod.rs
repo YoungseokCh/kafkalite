@@ -32,10 +32,11 @@ impl QuorumState {
         }
     }
 
-    pub fn become_candidate(&mut self) {
+    pub fn become_candidate(&mut self) -> i64 {
         self.current_term += 1;
         self.voted_for = Some(self.local_node_id);
         self.leader_id = None;
+        self.current_term
     }
 
     pub fn record_vote(&mut self, candidate_id: i32, term: i64) -> bool {
@@ -80,6 +81,15 @@ impl QuorumState {
 
     pub fn current_term(&self) -> i64 {
         self.current_term
+    }
+
+    pub fn local_node_id(&self) -> i32 {
+        self.local_node_id
+    }
+
+    pub fn has_majority(&self, votes: usize) -> bool {
+        let voters = self.voters.len().max(1);
+        votes >= (voters / 2) + 1
     }
 }
 

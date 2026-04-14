@@ -13,7 +13,7 @@ use crate::cluster::rpc::{
     RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
-    UpdateReplicaProgressResponse,
+    UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
 };
 use crate::cluster::transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTransport, LocalClusterRpcTransport,
@@ -172,24 +172,110 @@ impl ClusterRuntime {
         })
     }
 
+    pub fn handle_vote(&self, request: VoteRequest) -> Result<VoteResponse> {
+        let current_offset = self.metadata_image().metadata_offset;
+        let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+        let vote_granted = request.last_metadata_offset >= current_offset
+            && quorum.record_vote(request.candidate_id, request.term);
+        Ok(VoteResponse {
+            term: quorum.current_term(),
+            vote_granted,
+        })
+    }
+
+    pub fn run_election<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        targets: &[crate::cluster::ClusterRpcTarget],
+    ) -> Result<bool> {
+        let (term, candidate_id, last_metadata_offset, majority_with_self) = {
+            let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+            let term = quorum.become_candidate();
+            (
+                term,
+                quorum.local_node_id(),
+                self.metadata_image().metadata_offset,
+                quorum.has_majority(1),
+            )
+        };
+        if majority_with_self {
+            let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+            quorum.become_leader();
+            if let Some(leader_id) = quorum.snapshot().leader_id {
+                self.metadata
+                    .lock()
+                    .expect("cluster metadata mutex poisoned")
+                    .sync_controller(leader_id)?;
+            }
+            return Ok(true);
+        }
+
+        let mut votes = 1_usize;
+        for target in targets {
+            let response = transport.vote_to(
+                target,
+                VoteRequest {
+                    term,
+                    candidate_id,
+                    last_metadata_offset,
+                },
+            )?;
+            if response.vote_granted {
+                votes += 1;
+            }
+        }
+        let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+        if quorum.has_majority(votes) {
+            quorum.become_leader();
+            if let Some(leader_id) = quorum.snapshot().leader_id {
+                self.metadata
+                    .lock()
+                    .expect("cluster metadata mutex poisoned")
+                    .sync_controller(leader_id)?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn append_with_retry(
+        &self,
+        build: impl Fn(i64, i64, i32) -> AppendMetadataRequest,
+    ) -> Result<AppendMetadataResponse> {
+        const MAX_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_ATTEMPTS {
+            let snapshot = self.quorum_snapshot();
+            let leader_id = snapshot.leader_id.unwrap_or(self.config.node_id);
+            let request = build(
+                self.metadata_image().metadata_offset,
+                snapshot.current_term,
+                leader_id,
+            );
+            let response = self.handle_append_metadata(request)?;
+            if response.accepted {
+                return Ok(response);
+            }
+        }
+        anyhow::bail!("metadata append rejected after retry budget")
+    }
+
     pub fn handle_update_partition_leader(
         &self,
         request: UpdatePartitionLeaderRequest,
     ) -> Result<UpdatePartitionLeaderResponse> {
-        let prev_metadata_offset = self.metadata_image().metadata_offset;
-        let response = self.handle_append_metadata(AppendMetadataRequest {
-            term: self.quorum_snapshot().current_term,
-            leader_id: self
-                .quorum_snapshot()
-                .leader_id
-                .unwrap_or(request.leader_id),
-            prev_metadata_offset,
-            records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
-                topic_name: request.topic_name,
-                partition_index: request.partition_index,
-                leader_id: request.leader_id,
-                leader_epoch: request.leader_epoch,
-            }],
+        let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
+            AppendMetadataRequest {
+                term,
+                leader_id: leader_id.max(request.leader_id),
+                prev_metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
+                    topic_name: request.topic_name.clone(),
+                    partition_index: request.partition_index,
+                    leader_id: request.leader_id,
+                    leader_epoch: request.leader_epoch,
+                }],
+            }
         })?;
         Ok(UpdatePartitionLeaderResponse {
             accepted: response.accepted,
@@ -201,21 +287,19 @@ impl ClusterRuntime {
         &self,
         request: UpdatePartitionReplicationRequest,
     ) -> Result<UpdatePartitionReplicationResponse> {
-        let prev_metadata_offset = self.metadata_image().metadata_offset;
-        let response = self.handle_append_metadata(AppendMetadataRequest {
-            term: self.quorum_snapshot().current_term,
-            leader_id: self
-                .quorum_snapshot()
-                .leader_id
-                .unwrap_or(self.config.node_id),
-            prev_metadata_offset,
-            records: vec![crate::cluster::MetadataRecord::UpdatePartitionReplication {
-                topic_name: request.topic_name,
-                partition_index: request.partition_index,
-                replicas: request.replicas,
-                isr: request.isr,
-                leader_epoch: request.leader_epoch,
-            }],
+        let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
+            AppendMetadataRequest {
+                term,
+                leader_id,
+                prev_metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionReplication {
+                    topic_name: request.topic_name.clone(),
+                    partition_index: request.partition_index,
+                    replicas: request.replicas.clone(),
+                    isr: request.isr.clone(),
+                    leader_epoch: request.leader_epoch,
+                }],
+            }
         })?;
         Ok(UpdatePartitionReplicationResponse {
             accepted: response.accepted,
@@ -229,23 +313,21 @@ impl ClusterRuntime {
     ) -> Result<UpdateReplicaProgressResponse> {
         let topic_name = request.topic_name.clone();
         let partition_index = request.partition_index;
-        let prev_metadata_offset = self.metadata_image().metadata_offset;
-        let response = self.handle_append_metadata(AppendMetadataRequest {
-            term: self.quorum_snapshot().current_term,
-            leader_id: self
-                .quorum_snapshot()
-                .leader_id
-                .unwrap_or(self.config.node_id),
-            prev_metadata_offset,
-            records: vec![crate::cluster::MetadataRecord::UpdateReplicaProgress {
-                topic_name: request.topic_name,
-                partition_index: request.partition_index,
-                progress: crate::cluster::ReplicaProgress {
-                    broker_id: request.broker_id,
-                    log_end_offset: request.log_end_offset,
-                    last_caught_up_ms: request.last_caught_up_ms,
-                },
-            }],
+        let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
+            AppendMetadataRequest {
+                term,
+                leader_id,
+                prev_metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::UpdateReplicaProgress {
+                    topic_name: request.topic_name.clone(),
+                    partition_index: request.partition_index,
+                    progress: crate::cluster::ReplicaProgress {
+                        broker_id: request.broker_id,
+                        log_end_offset: request.log_end_offset,
+                        last_caught_up_ms: request.last_caught_up_ms,
+                    },
+                }],
+            }
         })?;
         let image = self.metadata_image();
         let high_watermark = image
@@ -305,19 +387,17 @@ impl ClusterRuntime {
                 metadata_offset: preview.metadata_offset,
             });
         }
-        let prev_metadata_offset = self.metadata_image().metadata_offset;
-        let response = self.handle_append_metadata(AppendMetadataRequest {
-            term: self.quorum_snapshot().current_term,
-            leader_id: self
-                .quorum_snapshot()
-                .leader_id
-                .unwrap_or(self.config.node_id),
-            prev_metadata_offset,
-            records: vec![crate::cluster::MetadataRecord::BeginPartitionReassignment {
-                topic_name: request.topic_name,
-                partition_index: request.partition_index,
-                target_replicas: request.target_replicas,
-            }],
+        let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
+            AppendMetadataRequest {
+                term,
+                leader_id,
+                prev_metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::BeginPartitionReassignment {
+                    topic_name: request.topic_name.clone(),
+                    partition_index: request.partition_index,
+                    target_replicas: request.target_replicas.clone(),
+                }],
+            }
         })?;
         Ok(PartitionReassignmentResponse {
             accepted: response.accepted,
@@ -345,27 +425,25 @@ impl ClusterRuntime {
                 metadata_offset: preview.metadata_offset,
             });
         }
-        let prev_metadata_offset = self.metadata_image().metadata_offset;
         let record = if request.step == crate::cluster::ReassignmentStep::Complete {
             crate::cluster::MetadataRecord::CompletePartitionReassignment {
-                topic_name: request.topic_name,
+                topic_name: request.topic_name.clone(),
                 partition_index: request.partition_index,
             }
         } else {
             crate::cluster::MetadataRecord::AdvancePartitionReassignment {
-                topic_name: request.topic_name,
+                topic_name: request.topic_name.clone(),
                 partition_index: request.partition_index,
-                step: request.step,
+                step: request.step.clone(),
             }
         };
-        let response = self.handle_append_metadata(AppendMetadataRequest {
-            term: self.quorum_snapshot().current_term,
-            leader_id: self
-                .quorum_snapshot()
-                .leader_id
-                .unwrap_or(self.config.node_id),
-            prev_metadata_offset,
-            records: vec![record],
+        let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
+            AppendMetadataRequest {
+                term,
+                leader_id,
+                prev_metadata_offset,
+                records: vec![record.clone()],
+            }
         })?;
         Ok(PartitionReassignmentResponse {
             accepted: response.accepted,
@@ -409,6 +487,9 @@ impl ClusterRuntime {
                 Ok(ClusterRpcResponse::AdvancePartitionReassignment(
                     self.handle_advance_partition_reassignment(request)?,
                 ))
+            }
+            ClusterRpcRequest::Vote(request) => {
+                Ok(ClusterRpcResponse::Vote(self.handle_vote(request)?))
             }
             ClusterRpcRequest::RegisterBroker(request) => Ok(ClusterRpcResponse::RegisterBroker(
                 self.handle_register_broker(request, now_ms)?,
@@ -479,7 +560,7 @@ impl ClusterRuntime {
 mod tests {
     use tempfile::tempdir;
 
-    use crate::cluster::ProcessRole;
+    use crate::cluster::{ProcessRole, test_support::ThreeNodeClusterHarness};
     use crate::config::Config;
 
     use super::*;
@@ -543,6 +624,42 @@ mod tests {
         let runtime = ClusterRuntime::from_config(&config).unwrap();
 
         assert_eq!(runtime.quorum_snapshot().leader_id, None);
+    }
+
+    #[test]
+    fn three_node_election_requires_majority_votes() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let transport = harness.transport_from_node(1);
+        let targets = vec![
+            transport.resolve_target(2).unwrap(),
+            transport.resolve_target(3).unwrap(),
+        ];
+
+        let elected = harness
+            .node1
+            .runtime
+            .run_election(&transport, &targets)
+            .unwrap();
+
+        assert!(elected);
+        assert_eq!(harness.node1.runtime.quorum_snapshot().leader_id, Some(1));
+        assert_eq!(harness.node1.runtime.metadata_image().controller_id, 1);
+    }
+
+    #[test]
+    fn three_node_election_fails_without_majority() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let transport = harness.transport_from_node(1);
+        let targets = vec![];
+
+        let elected = harness
+            .node1
+            .runtime
+            .run_election(&transport, &targets)
+            .unwrap();
+
+        assert!(!elected);
+        assert_eq!(harness.node1.runtime.quorum_snapshot().leader_id, None);
     }
 
     #[test]
