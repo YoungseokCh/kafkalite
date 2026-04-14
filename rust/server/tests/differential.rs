@@ -90,6 +90,16 @@ struct StaleSyncSnapshot {
     stale_sync_assignment_len: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct EmptyAssignmentSnapshot {
+    empty_member_error: i16,
+    empty_member_assignment_len: usize,
+    empty_member_assignment_decodable: bool,
+    assigned_member_error: i16,
+    assigned_member_assignment_len: usize,
+    assigned_member_assignment_decodable: bool,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
@@ -194,11 +204,61 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     .await;
     assert_eq!(local_stale_sync, real_stale_sync);
 
+    let empty_assignment_topic = format!("diff.empty-assignment.{suffix}");
+    let real_empty_assignment = empty_assignment_sync_snapshot(
+        &real_bootstrap,
+        &empty_assignment_topic,
+        &format!("group.empty-assignment.{suffix}"),
+    )
+    .await;
+    let local_empty_assignment = empty_assignment_sync_snapshot(
+        &local_bootstrap,
+        &empty_assignment_topic,
+        &format!("group.empty-assignment.{suffix}"),
+    )
+    .await;
+    assert_eq!(local_empty_assignment, real_empty_assignment);
+
     handle.abort();
     let _ = handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_and_local_broker_match_empty_assignment_sync() {
+    let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
+        eprintln!(
+            "skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server"
+        );
+        return;
+    };
+
+    let (local_bootstrap, handle, _tempdir) = start_local_broker().await;
+    let real_bootstrap = real_bootstrap
+        .into_string()
+        .expect("bootstrap must be utf-8");
+    if !bootstrap_available(&real_bootstrap) {
+        eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
+        handle.abort();
+        let _ = handle.await;
+        return;
+    }
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let topic = format!("diff.empty-assignment-only.{suffix}");
+    let group_id = format!("group.empty-assignment-only.{suffix}");
+
+    let real_snapshot = empty_assignment_sync_snapshot(&real_bootstrap, &topic, &group_id).await;
+    let local_snapshot = empty_assignment_sync_snapshot(&local_bootstrap, &topic, &group_id).await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    assert_eq!(local_snapshot, real_snapshot);
+}
+
 async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPartitionSnapshot {
+    const INVALID_PARTITION: i32 = 3;
+
     let producer = producer(bootstrap);
     producer
         .send(
@@ -213,11 +273,11 @@ async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPart
             FutureRecord::to(topic)
                 .payload("bad")
                 .key("bad-key")
-                .partition(1),
+                .partition(INVALID_PARTITION),
             Duration::from_secs(10),
         )
         .await
-        .expect_err("partition 1 should fail");
+        .expect_err("out-of-range partition should fail");
 
     InvalidPartitionSnapshot {
         error: format!("{:?}", error.0),
@@ -436,6 +496,90 @@ async fn stale_sync_after_handoff_snapshot(
     }
 }
 
+async fn empty_assignment_sync_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+) -> EmptyAssignmentSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join_a_v1 = join_group(bootstrap, group_id, None, topic, b"v1");
+    let bootstrap_b = bootstrap.to_string();
+    let group_b = group_id.to_string();
+    let topic_b = topic.to_string();
+    let member_b_handle =
+        std::thread::spawn(move || join_group(&bootstrap_b, &group_b, None, &topic_b, b"v2"));
+    std::thread::sleep(Duration::from_millis(50));
+    let join_a_v2 = join_group(
+        bootstrap,
+        group_id,
+        Some(join_a_v1.member_id.as_ref()),
+        topic,
+        b"v1",
+    );
+    let join_b_v2 = member_b_handle.join().unwrap();
+
+    let generation = join_a_v2.generation_id;
+    let member_a = join_a_v2.member_id.clone();
+    let member_b = join_b_v2.member_id.clone();
+    let leader = if join_a_v2.leader == member_a {
+        member_a.clone()
+    } else {
+        join_b_v2.leader.clone()
+    };
+    let assigned_member = if leader == member_a {
+        member_b.clone()
+    } else {
+        member_a.clone()
+    };
+    let empty_member = if assigned_member == member_a {
+        member_b.clone()
+    } else {
+        member_a.clone()
+    };
+    let assignments = vec![
+        (empty_member.as_ref(), Vec::new()),
+        (assigned_member.as_ref(), encode_assignment(topic)),
+    ];
+
+    let leader_sync = sync_group(
+        bootstrap,
+        group_id,
+        generation,
+        &leader,
+        &leader,
+        &assignments,
+    );
+    let non_leader = if leader == member_a {
+        &member_b
+    } else {
+        &member_a
+    };
+    let follower_sync = sync_group(bootstrap, group_id, generation, non_leader, &leader, &[]);
+
+    let (empty_sync, assigned_sync) = if empty_member == leader {
+        (leader_sync, follower_sync)
+    } else {
+        (follower_sync, leader_sync)
+    };
+
+    EmptyAssignmentSnapshot {
+        empty_member_error: empty_sync.error_code,
+        empty_member_assignment_len: empty_sync.assignment.len(),
+        empty_member_assignment_decodable: decode_assignment(&empty_sync.assignment),
+        assigned_member_error: assigned_sync.error_code,
+        assigned_member_assignment_len: assigned_sync.assignment.len(),
+        assigned_member_assignment_decodable: decode_assignment(&assigned_sync.assignment),
+    }
+}
+
 async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataSnapshot {
     let consumer = consumer(bootstrap, &format!("meta-{topic}"));
     let metadata = consumer
@@ -459,7 +603,10 @@ async fn produce_consume_snapshot(bootstrap: &str, topic: &str) -> ProduceConsum
     let key = format!("key-{topic}");
     let (partition, offset) = producer
         .send(
-            FutureRecord::to(topic).payload(&payload).key(&key),
+            FutureRecord::to(topic)
+                .payload(&payload)
+                .key(&key)
+                .partition(0),
             Duration::from_secs(10),
         )
         .await
@@ -644,7 +791,7 @@ async fn start_local_broker() -> (
         },
         storage: StorageConfig {
             data_dir: tempdir.path().join("kafkalite-data"),
-            ..StorageConfig::default()
+            default_partitions: 3,
         },
     };
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
@@ -925,4 +1072,9 @@ fn encode_empty_assignment() -> Vec<u8> {
     let mut bytes = BytesMut::new();
     assignment.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
+}
+
+fn decode_assignment(bytes: &[u8]) -> bool {
+    let mut payload = Bytes::copy_from_slice(bytes);
+    ConsumerProtocolAssignment::decode(&mut payload, 3).is_ok()
 }

@@ -481,6 +481,61 @@ fn assignments_split_topic_partitions_across_members() {
 }
 
 #[test]
+fn leader_sync_with_empty_assignment_bytes_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 2, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let _leader = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-missing-assignment",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let follower = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-missing-assignment",
+            member_id: Some("member-b"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 200,
+        })
+        .unwrap();
+
+    let leader_sync = store.sync_group(
+        "group-missing-assignment",
+        "member-a",
+        follower.generation_id,
+        "range",
+        &[("member-a".to_string(), Vec::new())],
+        300,
+    );
+    let follower_sync = store.sync_group(
+        "group-missing-assignment",
+        "member-b",
+        follower.generation_id,
+        "range",
+        &[],
+        300,
+    );
+
+    assert!(matches!(leader_sync, Err(StoreError::UnknownMember { .. })));
+    assert!(matches!(
+        follower_sync,
+        Err(StoreError::UnknownMember { .. })
+    ));
+}
+
+#[test]
 fn truncated_tail_is_recovered_on_restart() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();

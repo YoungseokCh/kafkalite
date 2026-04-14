@@ -116,20 +116,26 @@ impl ControlPlaneState {
         }
         ensure_generation(group, request.generation_id)?;
         if !request.assignments.is_empty() {
+            ensure_complete_assignments(group, request.group_id, request.assignments)?;
             for (assigned_member, assignment) in request.assignments {
                 if let Some(member) = group.members.get_mut(assigned_member) {
                     member.assignment = assignment.clone();
                     member.updated_at_unix_ms = request.now_ms;
                 }
             }
-        } else {
+        } else if group.leader_member_id.as_deref() == Some(request.member_id) {
             maybe_build_assignments(group, request.topics)?;
+        } else {
+            ensure_assignment_ready(group, request.group_id, request.member_id)?;
         }
         let assignment = group
             .members
             .get(request.member_id)
             .map(|member| member.assignment.clone())
-            .unwrap_or_default();
+            .ok_or_else(|| StoreError::UnknownMember {
+                group_id: request.group_id.to_string(),
+                member_id: request.member_id.to_string(),
+            })?;
         Ok(SyncGroupResult {
             protocol_name: request.protocol_name.to_string(),
             assignment,
@@ -400,6 +406,51 @@ fn maybe_build_assignments(group: &mut GroupState, topics: &[TopicMetadata]) -> 
         )?;
     }
     Ok(())
+}
+
+fn ensure_complete_assignments(
+    group: &GroupState,
+    group_id: &str,
+    assignments: &[(String, Vec<u8>)],
+) -> Result<()> {
+    let mut assigned_members = BTreeSet::new();
+    for (member_id, assignment) in assignments {
+        if assignment.is_empty() || !group.members.contains_key(member_id) {
+            return Err(StoreError::UnknownMember {
+                group_id: group_id.to_string(),
+                member_id: member_id.clone(),
+            });
+        }
+        assigned_members.insert(member_id.as_str());
+    }
+
+    if group
+        .members
+        .keys()
+        .any(|member_id| !assigned_members.contains(member_id.as_str()))
+    {
+        return Err(StoreError::UnknownMember {
+            group_id: group_id.to_string(),
+            member_id: "incomplete-assignment".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn ensure_assignment_ready(group: &GroupState, group_id: &str, member_id: &str) -> Result<()> {
+    let assignment_ready = group
+        .members
+        .get(member_id)
+        .map(|member| !member.assignment.is_empty())
+        .unwrap_or(false);
+    if assignment_ready {
+        return Ok(());
+    }
+    Err(StoreError::UnknownMember {
+        group_id: group_id.to_string(),
+        member_id: member_id.to_string(),
+    })
 }
 
 fn parse_topics(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
