@@ -64,7 +64,8 @@ impl MetadataStore {
                     None
                 }
             } else {
-                self.image.upsert_topic(next.clone()).then_some(next)
+                let mut preview = self.image.clone();
+                preview.upsert_topic(next.clone()).then_some(next)
             };
             if let Some(topic_image) = maybe_topic {
                 self.append_records(&[MetadataRecord::UpsertTopic(topic_image)])?;
@@ -75,7 +76,8 @@ impl MetadataStore {
     }
 
     pub fn sync_broker(&mut self, broker: BrokerMetadata) -> Result<bool> {
-        if self.image.upsert_broker(broker.clone()) {
+        let mut preview = self.image.clone();
+        if preview.upsert_broker(broker.clone()) {
             self.append_records(&[MetadataRecord::RegisterBroker(broker)])?;
             return Ok(true);
         }
