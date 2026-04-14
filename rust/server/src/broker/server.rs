@@ -23,11 +23,16 @@ pub struct KafkaBroker {
 impl KafkaBroker {
     pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
         let cluster = ClusterRuntime::from_config(&config)?;
-        Ok(Self {
+        let broker = Self {
             config,
             cluster,
             store,
-        })
+        };
+        let metadata = broker
+            .store
+            .topic_metadata(None, chrono::Utc::now().timestamp_millis())?;
+        broker.sync_topic_metadata(&metadata)?;
+        Ok(broker)
     }
 
     pub async fn run(self) -> Result<()> {
@@ -110,13 +115,18 @@ impl KafkaBroker {
     pub fn sync_follower_progress_from_remote<T: ClusterRpcTransport>(
         &self,
         transport: &T,
-        _target: &ClusterRpcTarget,
+        target: &ClusterRpcTarget,
         topic: &str,
         partition: i32,
         now_ms: i64,
     ) -> Result<i64> {
+        let local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
         let ClusterRpcResponse::GetPartitionState(state) = transport.send_to(
-            _target,
+            target,
             ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
                 topic_name: topic.to_string(),
                 partition_index: partition,
@@ -127,6 +137,12 @@ impl KafkaBroker {
         };
         if !state.found {
             return Ok(-1);
+        }
+        if state.leader_id != target.node_id
+            || state.leader_id != local_state.0
+            || state.leader_epoch != local_state.1
+        {
+            anyhow::bail!("stale leader or epoch during follower progress sync")
         }
         let (_, latest) = self.store.list_offsets(topic, partition)?;
         let response =
@@ -149,6 +165,30 @@ impl KafkaBroker {
         partition: i32,
         now_ms: i64,
     ) -> Result<i64> {
+        let local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
+        let ClusterRpcResponse::GetPartitionState(leader_state) = transport.send_to(
+            target,
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: topic.to_string(),
+                partition_index: partition,
+            }),
+        )?
+        else {
+            unreachable!("unexpected cluster rpc response variant")
+        };
+        if !leader_state.found {
+            return Ok(-1);
+        }
+        if leader_state.leader_id != target.node_id
+            || leader_state.leader_id != local_state.0
+            || leader_state.leader_epoch != local_state.1
+        {
+            anyhow::bail!("stale leader or epoch during replica fetch")
+        }
         let (_, latest) = self.store.list_offsets(topic, partition)?;
         let fetched = transport.replica_fetch_to(
             target,

@@ -68,6 +68,14 @@ impl QuorumState {
         }
     }
 
+    pub fn step_down(&mut self, term: i64) {
+        if term > self.current_term {
+            self.current_term = term;
+        }
+        self.leader_id = None;
+        self.voted_for = None;
+    }
+
     pub fn snapshot(&self) -> QuorumSnapshot {
         QuorumSnapshot {
             local_node_id: self.local_node_id,

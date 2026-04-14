@@ -156,6 +156,17 @@ impl ClusterRuntime {
                     last_metadata_offset: self.metadata_image().metadata_offset,
                 });
             }
+            let current = quorum.snapshot();
+            if request.term == current.current_term
+                && current.leader_id.is_some()
+                && current.leader_id != Some(request.leader_id)
+            {
+                return Ok(AppendMetadataResponse {
+                    term: current.current_term,
+                    accepted: false,
+                    last_metadata_offset: self.metadata_image().metadata_offset,
+                });
+            }
             quorum.follow_leader(request.leader_id, request.term);
             quorum.snapshot()
         };
@@ -220,6 +231,11 @@ impl ClusterRuntime {
                     last_metadata_offset,
                 },
             )?;
+            if response.term > term {
+                let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+                quorum.step_down(response.term);
+                return Ok(false);
+            }
             if response.vote_granted {
                 votes += 1;
             }
@@ -267,7 +283,7 @@ impl ClusterRuntime {
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
             AppendMetadataRequest {
                 term,
-                leader_id: leader_id.max(request.leader_id),
+                leader_id,
                 prev_metadata_offset,
                 records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
                     topic_name: request.topic_name.clone(),
@@ -663,6 +679,32 @@ mod tests {
     }
 
     #[test]
+    fn election_steps_down_on_higher_term_vote_response() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let transport = harness.transport_from_node(1);
+        let target = transport.resolve_target(2).unwrap();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_vote(VoteRequest {
+                term: 5,
+                candidate_id: 9,
+                last_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+            })
+            .unwrap();
+
+        let elected = harness
+            .node1
+            .runtime
+            .run_election(&transport, &[target])
+            .unwrap();
+
+        assert!(!elected);
+        assert_eq!(harness.node1.runtime.quorum_snapshot().current_term, 5);
+        assert_eq!(harness.node1.runtime.quorum_snapshot().leader_id, None);
+    }
+
+    #[test]
     fn register_broker_updates_metadata_and_heartbeat_accepts_current_epoch() {
         let dir = tempdir().unwrap();
         let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
@@ -747,6 +789,36 @@ mod tests {
 
         assert!(!rejected.accepted);
         assert_eq!(runtime.metadata_image().controller_id, 9);
+    }
+
+    #[test]
+    fn same_term_append_with_different_leader_is_rejected() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let accepted = runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 9,
+                prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 9 }],
+            })
+            .unwrap();
+        let rejected = runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 8,
+                prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 8 }],
+            })
+            .unwrap();
+
+        assert!(accepted.accepted);
+        assert!(!rejected.accepted);
+        assert_eq!(runtime.quorum_snapshot().leader_id, Some(9));
     }
 
     #[test]
