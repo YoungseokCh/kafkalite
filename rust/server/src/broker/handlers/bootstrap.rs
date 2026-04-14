@@ -55,15 +55,15 @@ pub async fn handle_metadata(
             .collect::<Vec<_>>()
     });
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if request.allow_auto_topic_creation
-        && let Some(requested) = names.as_ref()
-    {
-        for topic in requested {
-            broker.store().ensure_topic(
-                topic,
-                broker.config().storage.default_partitions,
-                now_ms,
-            )?;
+    if request.allow_auto_topic_creation {
+        if let Some(requested) = names.as_ref() {
+            for topic in requested {
+                broker.store().ensure_topic(
+                    topic,
+                    broker.config().storage.default_partitions,
+                    now_ms,
+                )?;
+            }
         }
     }
     let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;

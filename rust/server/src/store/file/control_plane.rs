@@ -167,12 +167,12 @@ impl ControlPlaneState {
     }
 
     pub fn leave_group(&mut self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()> {
-        if let Some(group) = self.groups.get_mut(group_id)
-            && group.members.remove(member_id).is_some()
-        {
-            group.generation_id += 1;
-            group.leader_member_id = group.members.keys().next().cloned();
-            group.updated_at_unix_ms = now_ms;
+        if let Some(group) = self.groups.get_mut(group_id) {
+            if group.members.remove(member_id).is_some() {
+                group.generation_id += 1;
+                group.leader_member_id = group.members.keys().next().cloned();
+                group.updated_at_unix_ms = now_ms;
+            }
         }
         Ok(())
     }
