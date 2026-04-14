@@ -18,6 +18,7 @@ pub struct TopicRuntime {
 
 pub struct PartitionRuntime {
     pub state: PartitionState,
+    pub high_watermark: i64,
     pub producer_sequences: BTreeMap<i64, ProducerSequenceState>,
 }
 
@@ -41,10 +42,7 @@ impl TopicCatalog {
                     .collect();
                 partitions.insert(
                     partition_id,
-                    PartitionRuntime {
-                        state: partition_state,
-                        producer_sequences: sequences,
-                    },
+                    PartitionRuntime::from_state(partition_state, sequences),
                 );
             }
             runtimes.insert(
@@ -172,9 +170,17 @@ impl TopicCatalog {
 
 impl PartitionRuntime {
     pub fn new(now_ms: i64) -> Self {
+        Self::from_state(PartitionState::new(now_ms), BTreeMap::new())
+    }
+
+    fn from_state(
+        state: PartitionState,
+        producer_sequences: BTreeMap<i64, ProducerSequenceState>,
+    ) -> Self {
         Self {
-            state: PartitionState::new(now_ms),
-            producer_sequences: BTreeMap::new(),
+            high_watermark: state.next_offset,
+            state,
+            producer_sequences,
         }
     }
 

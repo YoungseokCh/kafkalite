@@ -31,6 +31,19 @@ pub struct FetchResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaFetchResult {
+    pub high_watermark: i64,
+    pub log_end_offset: i64,
+    pub records: Vec<BrokerRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaApplyResult {
+    pub high_watermark: i64,
+    pub log_end_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetResult {
     pub offset: i64,
     pub timestamp_ms: i64,

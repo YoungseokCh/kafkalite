@@ -32,6 +32,8 @@ pub enum StoreError {
     UnknownProducerId { producer_id: i64 },
     #[error("unknown topic '{topic}' or partition {partition}")]
     UnknownTopicOrPartition { topic: String, partition: i32 },
+    #[error("replica apply offset mismatch: expected {expected}, got {actual}")]
+    ReplicaOffsetMismatch { expected: i64, actual: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

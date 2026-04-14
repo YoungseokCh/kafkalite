@@ -6,7 +6,7 @@ pub use error::{Result, StoreError};
 pub use file::{FileStore, StorageSummary, TopicPartitionSummary, TopicSummary};
 pub use models::{
     BrokerRecord, FetchResult, GroupJoinResult, GroupMember, ListOffsetResult, PartitionMetadata,
-    ProducerSession, SyncGroupResult, TopicMetadata,
+    ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult, TopicMetadata,
 };
 
 pub const DEFAULT_PARTITION: i32 = 0;
@@ -52,6 +52,21 @@ pub trait Storage: Send + Sync {
         start_offset: i64,
         limit: usize,
     ) -> Result<FetchResult>;
+    fn replica_fetch_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<ReplicaFetchResult>;
+    fn apply_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        leader_high_watermark: i64,
+        now_ms: i64,
+    ) -> Result<ReplicaApplyResult>;
     fn list_offsets(
         &self,
         topic: &str,

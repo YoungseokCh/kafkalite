@@ -11,7 +11,8 @@ use std::sync::Mutex;
 
 use super::{
     BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
-    OffsetCommitRequest, ProducerSession, Result, Storage, SyncGroupResult, TopicMetadata,
+    OffsetCommitRequest, ProducerSession, ReplicaFetchResult, Result, Storage, SyncGroupResult,
+    TopicMetadata,
 };
 use control_plane::{ControlPlaneState, SyncGroupStateRequest};
 use data_plane::{AppendDecision, DataPlaneState};
@@ -233,27 +234,79 @@ impl Storage for FileStore {
         })
     }
 
+    fn replica_fetch_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<ReplicaFetchResult> {
+        let (high_watermark, log_end_offset) = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .replica_progress(topic, partition)?;
+        let records = self
+            .logs
+            .read_records(topic, partition, start_offset, limit)?;
+        Ok(ReplicaFetchResult {
+            high_watermark,
+            log_end_offset,
+            records,
+        })
+    }
+
+    fn apply_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        leader_high_watermark: i64,
+        now_ms: i64,
+    ) -> Result<crate::store::ReplicaApplyResult> {
+        let prepared = {
+            let mut data = self.data.lock().expect("file store mutex poisoned");
+            data.prepare_replica_append(topic, partition, records)?
+        };
+        if let Some(prepared) = prepared.as_ref() {
+            self.logs.ensure_partition(topic, partition)?;
+            self.logs.append_batch(
+                topic,
+                partition,
+                &StoredBatch::from_records(&prepared.records),
+            )?;
+        }
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        data.finish_replica_append(
+            prepared.as_ref(),
+            topic,
+            partition,
+            leader_high_watermark,
+            now_ms,
+        )
+    }
+
     fn list_offsets(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<(ListOffsetResult, ListOffsetResult)> {
-        let earliest = self
-            .logs
-            .earliest_offset(topic, partition)?
-            .unwrap_or((0, 0));
-        let latest = self
+        let latest_offset = self
             .data
             .lock()
             .expect("file store mutex poisoned")
             .latest_offset(topic, partition)?;
+        let earliest = self
+            .logs
+            .earliest_offset(topic, partition)?
+            .unwrap_or((0, 0));
         Ok((
             ListOffsetResult {
                 offset: earliest.0,
                 timestamp_ms: earliest.1,
             },
             ListOffsetResult {
-                offset: latest,
+                offset: latest_offset,
                 timestamp_ms: 0,
             },
         ))

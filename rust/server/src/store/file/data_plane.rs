@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::store::{BrokerRecord, ProducerSession, Result, StoreError, TopicMetadata};
+use crate::store::{
+    BrokerRecord, ProducerSession, ReplicaApplyResult, Result, StoreError, TopicMetadata,
+};
 
 use super::TopicSummary;
 use super::state::{ProducerSequenceState, ProducerState, StateJournal, TopicState};
@@ -122,41 +124,21 @@ impl DataPlaneState {
     }
 
     pub fn finish_append(&mut self, prepared: &PreparedAppend, now_ms: i64) -> Result<()> {
-        let partition = self
-            .partition_state_mut(&prepared.topic, prepared.partition)
-            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
-                topic: prepared.topic.clone(),
-                partition: prepared.partition,
-            })?;
-        partition.state.next_offset = prepared.last_offset + 1;
-        for record in &prepared.records {
-            partition.producer_sequences.insert(
-                record.producer_id,
-                ProducerSequenceState {
-                    producer_epoch: record.producer_epoch,
-                    first_sequence: prepared
-                        .records
-                        .first()
-                        .map(|r| r.sequence)
-                        .unwrap_or(record.sequence),
-                    last_sequence: record.sequence,
-                    base_offset: prepared.base_offset,
-                    last_offset: record.offset,
-                },
-            );
-        }
-        let topic = self
-            .catalog
-            .topic_runtime_mut(&prepared.topic)
-            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
-                topic: prepared.topic.clone(),
-                partition: prepared.partition,
-            })?;
-        topic.updated_at_unix_ms = now_ms;
+        self.apply_prepared_append(prepared, now_ms)?;
+        self.update_high_watermark(&prepared.topic, prepared.partition, i64::MAX)?;
         self.persist_producers(now_ms)
     }
 
     pub fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
+        self.partition_state(topic, partition)
+            .map(|partition| partition.high_watermark)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            })
+    }
+
+    pub fn latest_offset(&self, topic: &str, partition: i32) -> Result<i64> {
         self.partition_state(topic, partition)
             .map(|partition| partition.state.next_offset)
             .ok_or_else(|| StoreError::UnknownTopicOrPartition {
@@ -165,8 +147,13 @@ impl DataPlaneState {
             })
     }
 
-    pub fn latest_offset(&self, topic: &str, partition: i32) -> Result<i64> {
-        self.high_watermark(topic, partition)
+    pub fn replica_progress(&self, topic: &str, partition: i32) -> Result<(i64, i64)> {
+        self.partition_state(topic, partition)
+            .map(|partition| (partition.high_watermark, partition.state.next_offset))
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            })
     }
 
     pub fn topic_count(&self) -> usize {
@@ -184,6 +171,70 @@ impl DataPlaneState {
     pub fn ensure_known_partitions(&mut self, topic: &str, partitions: &[i32], now_ms: i64) {
         self.catalog
             .ensure_known_partitions(topic, partitions, now_ms)
+    }
+
+    pub fn prepare_replica_append(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+    ) -> Result<Option<PreparedAppend>> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        if records.is_empty() {
+            return Ok(None);
+        }
+
+        let mut expected = runtime.state.next_offset;
+        for record in records {
+            if record.offset != expected {
+                return Err(StoreError::ReplicaOffsetMismatch {
+                    expected,
+                    actual: record.offset,
+                });
+            }
+            expected += 1;
+        }
+
+        let base_offset = records
+            .first()
+            .map(|record| record.offset)
+            .unwrap_or(expected);
+        let last_offset = records
+            .last()
+            .map(|record| record.offset)
+            .unwrap_or(base_offset);
+        Ok(Some(PreparedAppend {
+            topic: topic.to_string(),
+            partition,
+            base_offset,
+            last_offset,
+            records: records.to_vec(),
+        }))
+    }
+
+    pub fn finish_replica_append(
+        &mut self,
+        prepared: Option<&PreparedAppend>,
+        topic: &str,
+        partition: i32,
+        leader_high_watermark: i64,
+        now_ms: i64,
+    ) -> Result<ReplicaApplyResult> {
+        if let Some(prepared) = prepared {
+            self.apply_prepared_append(prepared, now_ms)?;
+            self.persist_producers(now_ms)?;
+        }
+        let high_watermark = self.update_high_watermark(topic, partition, leader_high_watermark)?;
+        let log_end_offset = self.latest_offset(topic, partition)?;
+        Ok(ReplicaApplyResult {
+            high_watermark,
+            log_end_offset,
+        })
     }
 
     fn ensure_topic_runtime(
@@ -220,6 +271,57 @@ impl DataPlaneState {
             &self.catalog.to_producer_state(self.next_producer_id),
             now_ms,
         )
+    }
+
+    fn apply_prepared_append(&mut self, prepared: &PreparedAppend, now_ms: i64) -> Result<()> {
+        let partition = self
+            .partition_state_mut(&prepared.topic, prepared.partition)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: prepared.topic.clone(),
+                partition: prepared.partition,
+            })?;
+        partition.state.next_offset = prepared.last_offset + 1;
+        for record in &prepared.records {
+            partition.producer_sequences.insert(
+                record.producer_id,
+                ProducerSequenceState {
+                    producer_epoch: record.producer_epoch,
+                    first_sequence: prepared
+                        .records
+                        .first()
+                        .map(|first| first.sequence)
+                        .unwrap_or(record.sequence),
+                    last_sequence: record.sequence,
+                    base_offset: prepared.base_offset,
+                    last_offset: record.offset,
+                },
+            );
+        }
+        let topic = self
+            .catalog
+            .topic_runtime_mut(&prepared.topic)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: prepared.topic.clone(),
+                partition: prepared.partition,
+            })?;
+        topic.updated_at_unix_ms = now_ms;
+        Ok(())
+    }
+
+    fn update_high_watermark(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        leader_high_watermark: i64,
+    ) -> Result<i64> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        runtime.high_watermark = leader_high_watermark.min(runtime.state.next_offset);
+        Ok(runtime.high_watermark)
     }
 }
 

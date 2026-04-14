@@ -574,6 +574,98 @@ fn stale_producer_epoch_is_rejected() {
     assert!(matches!(result, Err(StoreError::StaleProducerEpoch { .. })));
 }
 
+#[test]
+fn replica_fetch_and_apply_preserve_offsets_and_clamp_high_watermark() {
+    let leader_dir = tempdir().unwrap();
+    let follower_dir = tempdir().unwrap();
+    let leader = FileStore::open(leader_dir.path()).unwrap();
+    let follower = FileStore::open(follower_dir.path()).unwrap();
+    let producer = leader.init_producer(10).unwrap();
+    let records = vec![
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"one")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 20,
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"two")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    leader
+        .append_records("replica.events", 0, &records, 20)
+        .unwrap();
+    follower.ensure_topic("replica.events", 1, 10).unwrap();
+
+    let fetched = leader
+        .replica_fetch_records("replica.events", 0, 0, 10)
+        .unwrap();
+    let applied = follower
+        .apply_replica_records(
+            "replica.events",
+            0,
+            &fetched.records[..1],
+            fetched.high_watermark,
+            30,
+        )
+        .unwrap();
+    let follower_fetch = follower.fetch_records("replica.events", 0, 0, 10).unwrap();
+
+    assert_eq!(fetched.log_end_offset, 2);
+    assert_eq!(applied.log_end_offset, 1);
+    assert_eq!(applied.high_watermark, 1);
+    assert_eq!(follower_fetch.high_watermark, 1);
+    assert_eq!(follower_fetch.records.len(), 1);
+    assert_eq!(follower_fetch.records[0].offset, 0);
+    assert_eq!(
+        follower_fetch.records[0].value.as_deref(),
+        Some(&b"one"[..])
+    );
+}
+
+#[test]
+fn replica_apply_rejects_offset_mismatches() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica.events", 1, 10).unwrap();
+
+    let result = store.apply_replica_records(
+        "replica.events",
+        0,
+        &[BrokerRecord {
+            offset: 1,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: -1,
+            key: None,
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: b"[]".to_vec(),
+        }],
+        1,
+        20,
+    );
+
+    assert!(matches!(
+        result,
+        Err(StoreError::ReplicaOffsetMismatch {
+            expected: 0,
+            actual: 1,
+        })
+    ));
+}
+
 fn encode_subscription(topics: &[&str]) -> Vec<u8> {
     let subscription = ConsumerProtocolSubscription::default().with_topics(
         topics
