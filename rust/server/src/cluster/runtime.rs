@@ -441,6 +441,7 @@ impl ClusterRuntime {
             if config
                 .cluster
                 .has_role(crate::cluster::ProcessRole::Controller)
+                && config.cluster.controller_quorum_voters.len() <= 1
             {
                 quorum.become_candidate();
                 quorum.become_leader();
@@ -518,6 +519,30 @@ mod tests {
         assert_eq!(controller.leader_id, None);
         assert_eq!(controller.registered_brokers.len(), 1);
         assert_eq!(runtime.metadata_image().brokers.len(), 1);
+    }
+
+    #[test]
+    fn multi_controller_bootstrap_starts_without_self_election() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 4,
+                host: "node4".to_string(),
+                port: 9093,
+            },
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 5,
+                host: "node5".to_string(),
+                port: 9093,
+            },
+        ];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+        assert_eq!(runtime.quorum_snapshot().leader_id, None);
     }
 
     #[test]
@@ -873,6 +898,27 @@ mod tests {
                 .step,
             crate::cluster::ReassignmentStep::Planned
         );
+
+        runtime
+            .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+                topic_name: "reassign.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2],
+                leader_epoch: 1,
+            })
+            .unwrap();
+        for broker_id in [2, 3] {
+            runtime
+                .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: "reassign.topic".to_string(),
+                    partition_index: 0,
+                    broker_id,
+                    log_end_offset: 0,
+                    last_caught_up_ms: 100,
+                })
+                .unwrap();
+        }
 
         for step in [
             crate::cluster::ReassignmentStep::Copying,

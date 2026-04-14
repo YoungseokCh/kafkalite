@@ -53,8 +53,9 @@ impl MetadataStore {
                 .iter()
                 .any(|existing| existing.name == topic.name)
             {
-                if self.image.merge_store_topic(topic) {
-                    self.image
+                let mut preview = self.image.clone();
+                if preview.merge_store_topic(topic) {
+                    preview
                         .topics
                         .iter()
                         .find(|existing| existing.name == topic.name)
@@ -85,7 +86,6 @@ impl MetadataStore {
         if self.image.controller_id == controller_id {
             return Ok(false);
         }
-        self.image.controller_id = controller_id;
         self.append_records(&[MetadataRecord::SetController { controller_id }])?;
         Ok(true)
     }
@@ -106,6 +106,7 @@ impl MetadataStore {
         if records.is_empty() {
             return Ok(());
         }
+        let mut next_image = self.image.clone();
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -114,23 +115,25 @@ impl MetadataStore {
             serde_json::to_writer(
                 &mut file,
                 &MetadataLogEntry {
-                    metadata_offset: Some(self.image.metadata_offset + 1),
+                    metadata_offset: Some(next_image.metadata_offset + 1),
                     record: record.clone(),
                 },
             )?;
             file.write_all(b"\n")?;
-            self.image.apply(record.clone());
+            next_image.apply(record.clone());
         }
         file.sync_data()?;
-        self.persist_snapshot()?;
-        self.truncate_log()
+        self.persist_snapshot(&next_image)?;
+        self.truncate_log()?;
+        self.image = next_image;
+        Ok(())
     }
 
-    fn persist_snapshot(&self) -> Result<()> {
+    fn persist_snapshot(&self, image: &ClusterMetadataImage) -> Result<()> {
         let path = self.root.join(SNAPSHOT_FILE);
         let tmp_path = self.root.join(SNAPSHOT_TMP_FILE);
         let mut file = File::create(&tmp_path)?;
-        serde_json::to_writer_pretty(&mut file, &self.image)?;
+        serde_json::to_writer_pretty(&mut file, image)?;
         file.sync_all()?;
         fs::rename(tmp_path, path)?;
         Ok(())
