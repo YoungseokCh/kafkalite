@@ -47,8 +47,26 @@ impl MetadataStore {
         let mut changed = false;
         for topic in topics {
             let next = TopicMetadataImage::from_store_topic(topic, broker_id);
-            if self.image.upsert_topic(next.clone()) {
-                self.append_records(&[MetadataRecord::UpsertTopic(next)])?;
+            let maybe_topic = if self
+                .image
+                .topics
+                .iter()
+                .any(|existing| existing.name == topic.name)
+            {
+                if self.image.merge_store_topic(topic) {
+                    self.image
+                        .topics
+                        .iter()
+                        .find(|existing| existing.name == topic.name)
+                        .cloned()
+                } else {
+                    None
+                }
+            } else {
+                self.image.upsert_topic(next.clone()).then_some(next)
+            };
+            if let Some(topic_image) = maybe_topic {
+                self.append_records(&[MetadataRecord::UpsertTopic(topic_image)])?;
                 changed = true;
             }
         }

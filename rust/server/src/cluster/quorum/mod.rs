@@ -77,6 +77,10 @@ impl QuorumState {
             voters: self.voters.clone(),
         }
     }
+
+    pub fn current_term(&self) -> i64 {
+        self.current_term
+    }
 }
 
 #[cfg(test)]

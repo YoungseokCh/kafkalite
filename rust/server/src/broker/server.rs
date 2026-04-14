@@ -72,10 +72,14 @@ impl KafkaBroker {
     }
 
     pub fn is_local_partition_leader(&self, topic: &str, partition: i32) -> bool {
-        self.cluster()
+        let leader = self
+            .cluster()
             .metadata_image()
-            .partition_leader_id(topic, partition)
-            .is_none_or(|leader_id| leader_id == self.config.broker.broker_id)
+            .partition_leader_id(topic, partition);
+        match leader {
+            Some(leader_id) => leader_id == self.config.broker.broker_id,
+            None => self.cluster.config().controller_quorum_voters.is_empty(),
+        }
     }
 
     pub fn partition_high_watermark(&self, topic: &str, partition: i32) -> Option<i64> {
@@ -242,6 +246,13 @@ mod tests {
                 .map(|(_, _, _, leo)| leo),
             Some(1)
         );
+    }
+
+    #[test]
+    fn unknown_partition_leader_fails_closed_in_distributed_mode() {
+        let broker = test_broker(1, 19092);
+
+        assert!(!broker.is_local_partition_leader("missing.topic", 0));
     }
 
     #[tokio::test]

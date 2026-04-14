@@ -127,6 +127,43 @@ impl ClusterMetadataImage {
         }
     }
 
+    pub fn merge_store_topic(&mut self, topic: &TopicMetadata) -> bool {
+        let Some(existing) = self
+            .topics
+            .iter_mut()
+            .find(|existing| existing.name == topic.name)
+        else {
+            return false;
+        };
+        let mut changed = false;
+        for partition in &topic.partitions {
+            if existing
+                .partitions
+                .iter()
+                .any(|current| current.partition == partition.partition)
+            {
+                continue;
+            }
+            existing.partitions.push(PartitionMetadataImage {
+                partition: partition.partition,
+                leader_id: 0,
+                leader_epoch: 0,
+                high_watermark: 0,
+                replicas: Vec::new(),
+                isr: Vec::new(),
+                replica_progress: Vec::new(),
+                reassignment: None,
+            });
+            changed = true;
+        }
+        if changed {
+            existing
+                .partitions
+                .sort_by_key(|partition| partition.partition);
+        }
+        changed
+    }
+
     pub fn partition_leader_id(&self, topic_name: &str, partition_index: i32) -> Option<i32> {
         self.topics
             .iter()
@@ -226,10 +263,12 @@ impl ClusterMetadataImage {
         }
         partition.leader_id = leader_id;
         partition.leader_epoch = leader_epoch;
-        partition.replicas = vec![leader_id];
-        partition.isr = vec![leader_id];
-        partition.high_watermark = 0;
-        partition.replica_progress.clear();
+        if !partition.replicas.contains(&leader_id) {
+            partition.replicas.insert(0, leader_id);
+        }
+        if !partition.isr.contains(&leader_id) {
+            partition.isr.insert(0, leader_id);
+        }
         true
     }
 
@@ -337,38 +376,62 @@ impl ClusterMetadataImage {
         let Some(partition) = self.partition_mut(topic_name, partition_index) else {
             return false;
         };
-        let Some(reassignment) = partition.reassignment.as_mut() else {
+        let Some(reassignment) = partition.reassignment.clone() else {
             return false;
         };
         if reassignment.step == step {
             return false;
         }
-        reassignment.step = step.clone();
+        let target_replicas = reassignment.target_replicas.clone();
         match step {
             ReassignmentStep::ExpandingIsr => {
-                partition.replicas = reassignment.target_replicas.clone();
-                partition.isr = reassignment.target_replicas.clone();
+                if !targets_caught_up(partition, &target_replicas) {
+                    return false;
+                }
+                partition.replicas = union_preserving_order(&partition.replicas, &target_replicas);
+                partition.isr = union_preserving_order(&partition.isr, &target_replicas);
             }
             ReassignmentStep::LeaderSwitch => {
-                if let Some(new_leader) = reassignment.target_replicas.first().copied() {
+                if let Some(new_leader) = target_replicas.first().copied() {
+                    if !partition.isr.contains(&new_leader)
+                        || !targets_caught_up(partition, &[new_leader])
+                    {
+                        return false;
+                    }
                     partition.leader_id = new_leader;
                     partition.leader_epoch += 1;
                 }
             }
             ReassignmentStep::Shrinking => {
-                partition.replicas = reassignment.target_replicas.clone();
-                partition
-                    .isr
-                    .retain(|id| reassignment.target_replicas.contains(id));
+                if partition.leader_id
+                    != target_replicas
+                        .first()
+                        .copied()
+                        .unwrap_or(partition.leader_id)
+                {
+                    return false;
+                }
+                partition.replicas = target_replicas.clone();
+                partition.isr.retain(|id| target_replicas.contains(id));
             }
             ReassignmentStep::Complete => {
-                partition.replicas = reassignment.target_replicas.clone();
-                partition
-                    .isr
-                    .retain(|id| reassignment.target_replicas.contains(id));
+                if partition.leader_id
+                    != target_replicas
+                        .first()
+                        .copied()
+                        .unwrap_or(partition.leader_id)
+                {
+                    return false;
+                }
+                partition.replicas = target_replicas.clone();
+                partition.isr.retain(|id| target_replicas.contains(id));
                 partition.reassignment = None;
+                return true;
             }
             ReassignmentStep::Planned | ReassignmentStep::Copying => {}
+        }
+        if let Some(current) = partition.reassignment.as_mut() {
+            current.step = step;
         }
         true
     }
@@ -434,6 +497,26 @@ fn reconcile_isr(partition: &mut PartitionMetadataImage) {
                     })
         })
         .collect();
+}
+
+fn targets_caught_up(partition: &PartitionMetadataImage, targets: &[i32]) -> bool {
+    targets.iter().all(|broker_id| {
+        partition
+            .replica_progress
+            .iter()
+            .find(|progress| progress.broker_id == *broker_id)
+            .is_some_and(|progress| progress.log_end_offset >= partition.high_watermark)
+    })
+}
+
+fn union_preserving_order(current: &[i32], target: &[i32]) -> Vec<i32> {
+    let mut combined = current.to_vec();
+    for replica in target {
+        if !combined.contains(replica) {
+            combined.push(*replica);
+        }
+    }
+    combined
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

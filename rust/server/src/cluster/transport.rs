@@ -890,6 +890,30 @@ mod tests {
         let _ = transport
             .send_to(
                 &target,
+                ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                    topic_name: "reassign.topic".to_string(),
+                    partition_index: 0,
+                    broker_id: 2,
+                    log_end_offset: 0,
+                    last_caught_up_ms: 100,
+                }),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                    topic_name: "reassign.topic".to_string(),
+                    partition_index: 0,
+                    broker_id: 3,
+                    log_end_offset: 0,
+                    last_caught_up_ms: 100,
+                }),
+            )
+            .unwrap();
+        let _ = transport
+            .send_to(
+                &target,
                 ClusterRpcRequest::AdvancePartitionReassignment(
                     AdvancePartitionReassignmentRequest {
                         topic_name: "reassign.topic".to_string(),

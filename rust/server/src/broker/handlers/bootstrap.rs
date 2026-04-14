@@ -56,6 +56,7 @@ pub async fn handle_metadata(
             .collect::<Vec<_>>()
     });
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut created = false;
     if request.allow_auto_topic_creation
         && let Some(requested) = names.as_ref()
     {
@@ -65,10 +66,13 @@ pub async fn handle_metadata(
                 broker.config().storage.default_partitions,
                 now_ms,
             )?;
+            created = true;
         }
     }
-    let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
-    broker.sync_topic_metadata(&metadata)?;
+    if created {
+        let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
+        broker.sync_topic_metadata(&metadata)?;
+    }
     let image = broker.cluster().metadata_image();
 
     let topics = if let Some(requested) = names {
