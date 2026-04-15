@@ -3167,6 +3167,24 @@ async fn process_control_plane_rejects_older_replication_epoch() {
         .await
         .unwrap();
     assert!(accepted.accepted);
+    let repeated = transport
+        .update_partition_replication_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            UpdatePartitionReplicationRequest {
+                topic_name: "process.replication.epoch.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2],
+                isr: vec![1],
+                leader_epoch: 3,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(repeated.accepted);
 
     let rejected = transport
         .update_partition_replication_to(
