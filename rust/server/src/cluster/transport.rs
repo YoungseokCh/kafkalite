@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
+use crate::cluster::codec::{decode_request, decode_response, encode_request, encode_response};
 use crate::cluster::rpc::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
     BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
@@ -51,6 +54,55 @@ pub struct ClusterRpcTarget {
     pub node_id: i32,
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TcpClusterRpcTransport;
+
+impl TcpClusterRpcTransport {
+    pub async fn send_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: ClusterRpcRequest,
+    ) -> Result<ClusterRpcResponse> {
+        let mut stream = TcpStream::connect((target.host.as_str(), target.port)).await?;
+        let bytes = encode_request(&request)?;
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+
+        let mut len_bytes = [0_u8; 4];
+        stream.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let mut payload = vec![0_u8; len];
+        stream.read_exact(&mut payload).await?;
+
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&len_bytes);
+        frame.extend_from_slice(&payload);
+        decode_response(&frame)
+    }
+
+    pub async fn serve_once(
+        listener: &TcpListener,
+        handler: impl Fn(ClusterRpcRequest) -> Result<ClusterRpcResponse>,
+    ) -> Result<()> {
+        let (mut stream, _) = listener.accept().await?;
+        let mut len_bytes = [0_u8; 4];
+        stream.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let mut payload = vec![0_u8; len];
+        stream.read_exact(&mut payload).await?;
+
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&len_bytes);
+        frame.extend_from_slice(&payload);
+        let request = decode_request(&frame)?;
+        let response = handler(request)?;
+        let encoded = encode_response(&response)?;
+        stream.write_all(&encoded).await?;
+        stream.flush().await?;
+        Ok(())
+    }
 }
 
 pub trait ClusterRpcTransport {
@@ -445,6 +497,7 @@ impl ClusterRpcTransport for LocalClusterRpcTransport {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
 
     use crate::cluster::{
         ClusterRuntime, ControllerQuorumVoter, ProcessRole, test_support::TwoNodeClusterHarness,
@@ -1124,5 +1177,46 @@ mod tests {
         };
         assert!(!response.accepted);
         assert_eq!(harness.node2.runtime.metadata_image().controller_id, 2);
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_round_trips_cluster_rpc() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_once(&listener, |request| match request {
+                ClusterRpcRequest::Vote(request) => Ok(ClusterRpcResponse::Vote(VoteResponse {
+                    term: request.term,
+                    vote_granted: true,
+                })),
+                other => panic!("unexpected request {other:?}"),
+            })
+            .await
+            .unwrap();
+        });
+
+        let transport = TcpClusterRpcTransport;
+        let response = transport
+            .send_to(
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                ClusterRpcRequest::Vote(VoteRequest {
+                    term: 7,
+                    candidate_id: 1,
+                    last_metadata_offset: 3,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let ClusterRpcResponse::Vote(response) = response else {
+            panic!("unexpected response variant")
+        };
+        assert_eq!(response.term, 7);
+        assert!(response.vote_granted);
+        server.await.unwrap();
     }
 }

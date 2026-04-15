@@ -31,5 +31,5 @@ pub use runtime::ClusterRuntime;
 pub use transport::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget, ClusterRpcTransport,
     InMemoryClusterNetwork, InMemoryRemoteClusterRpcTransport, LocalClusterRpcTransport,
-    RemoteClusterRpcTransport,
+    RemoteClusterRpcTransport, TcpClusterRpcTransport,
 };
