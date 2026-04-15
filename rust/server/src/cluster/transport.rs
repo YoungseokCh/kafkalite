@@ -130,6 +130,40 @@ impl TcpClusterRpcTransport {
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
+
+    pub async fn update_partition_replication_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdatePartitionReplicationRequest,
+    ) -> Result<UpdatePartitionReplicationResponse> {
+        match self
+            .send_to(
+                target,
+                ClusterRpcRequest::UpdatePartitionReplication(request),
+            )
+            .await?
+        {
+            ClusterRpcResponse::UpdatePartitionReplication(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    pub async fn begin_partition_reassignment_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: BeginPartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        match self
+            .send_to(
+                target,
+                ClusterRpcRequest::BeginPartitionReassignment(request),
+            )
+            .await?
+        {
+            ClusterRpcResponse::BeginPartitionReassignment(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
 }
 
 pub trait ClusterRpcTransport {
