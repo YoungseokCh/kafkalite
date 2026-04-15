@@ -2531,6 +2531,33 @@ async fn process_control_plane_rejects_stale_leader_for_reassignment_begin() {
     };
     assert!(!rejected.accepted);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 9,
+                prev_metadata_offset: 0,
+                records: vec![
+                    kafkalite_server::cluster::MetadataRecord::BeginPartitionReassignment {
+                        topic_name: "process.reassign.stale.begin.topic".to_string(),
+                        partition_index: 0,
+                        target_replicas: vec![2, 3],
+                    },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::AppendMetadata(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
