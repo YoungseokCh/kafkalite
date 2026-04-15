@@ -2176,6 +2176,20 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
         .unwrap();
     assert!(!rejected.accepted);
 
+    let rejected_again = transport
+        .update_partition_leader_to(
+            &node1.controller_target,
+            UpdatePartitionLeaderRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!rejected_again.accepted);
+
     let accepted = transport
         .update_partition_leader_to(
             &node2.controller_target,
