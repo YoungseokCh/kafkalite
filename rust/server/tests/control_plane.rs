@@ -2527,6 +2527,7 @@ async fn process_control_plane_rejects_empty_reassignment_target() {
         .unwrap();
 
     assert!(!repeated.accepted);
+    assert_eq!(repeated.metadata_offset, response.metadata_offset);
 
     let _ = child.kill();
     let _ = child.wait();
