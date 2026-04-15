@@ -1531,6 +1531,30 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
         .await
         .unwrap();
     assert!(update.accepted);
+    let registration = transport
+        .register_broker_to(
+            &node2.controller_target,
+            RegisterBrokerRequest {
+                node_id: 9,
+                advertised_host: "127.0.0.1".to_string(),
+                advertised_port: 39092,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(registration.accepted);
+    let heartbeat = transport
+        .broker_heartbeat_to(
+            &node2.controller_target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: registration.broker_epoch,
+                timestamp_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(heartbeat.accepted);
 
     let state = transport
         .send_to(
