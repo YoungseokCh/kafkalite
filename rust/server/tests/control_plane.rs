@@ -787,6 +787,10 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
         .await
         .unwrap();
     assert!(heartbeat_again.accepted);
+    assert_eq!(
+        heartbeat_again.controller_epoch,
+        registration.controller_epoch
+    );
     let wrong_node = transport
         .broker_heartbeat_to(
             &ClusterRpcTarget {
