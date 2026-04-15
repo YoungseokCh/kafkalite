@@ -598,6 +598,7 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
         .await
         .unwrap();
     assert!(registration.accepted);
+    assert_eq!(registration.leader_id, Some(1));
 
     let heartbeat = transport
         .broker_heartbeat_to(
@@ -615,6 +616,7 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
         .await
         .unwrap();
     assert!(heartbeat.accepted);
+    assert_eq!(heartbeat.leader_id, Some(1));
 
     let _ = child.kill();
     let _ = child.wait();
