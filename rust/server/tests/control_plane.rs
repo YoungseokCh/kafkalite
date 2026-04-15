@@ -2131,6 +2131,7 @@ async fn process_control_plane_completes_valid_reassignment_lifecycle() {
     };
     assert!(state.found);
     assert_eq!(state.leader_id, 2);
+    assert_eq!(state.leader_epoch, 2);
 
     let _ = child.kill();
     let _ = child.wait();
