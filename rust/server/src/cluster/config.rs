@@ -144,6 +144,14 @@ fn validate_cluster_config(config: &Config, properties: &BTreeMap<String, String
         if config.cluster.controller_quorum_voters.is_empty() {
             bail!("Controller role requires controller.quorum.voters");
         }
+        if !config
+            .cluster
+            .controller_quorum_voters
+            .iter()
+            .any(|voter| voter.node_id == config.cluster.node_id)
+        {
+            bail!("Controller role requires node.id to appear in controller.quorum.voters");
+        }
         for listener_name in &config.cluster.controller_listener_names {
             if !config.cluster.listeners.contains_key(listener_name) {
                 bail!("Controller listener `{listener_name}` missing from listeners");
