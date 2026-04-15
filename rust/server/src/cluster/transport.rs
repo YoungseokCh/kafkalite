@@ -131,6 +131,34 @@ impl TcpClusterRpcTransport {
         }
     }
 
+    pub async fn register_broker_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: RegisterBrokerRequest,
+    ) -> Result<RegisterBrokerResponse> {
+        match self
+            .send_to(target, ClusterRpcRequest::RegisterBroker(request))
+            .await?
+        {
+            ClusterRpcResponse::RegisterBroker(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    pub async fn broker_heartbeat_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: BrokerHeartbeatRequest,
+    ) -> Result<BrokerHeartbeatResponse> {
+        match self
+            .send_to(target, ClusterRpcRequest::BrokerHeartbeat(request))
+            .await?
+        {
+            ClusterRpcResponse::BrokerHeartbeat(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
     pub async fn update_partition_replication_to(
         &self,
         target: &ClusterRpcTarget,
@@ -1383,6 +1411,78 @@ mod tests {
                 .partition_leader_id("tcp.route.topic", 0),
             Some(2)
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_round_trips_register_broker_and_heartbeat() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let _ = runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 4,
+                prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 4 }],
+            })
+            .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_runtime_once(&listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let transport = TcpClusterRpcTransport;
+        let registration = transport
+            .register_broker_to(
+                &ClusterRpcTarget {
+                    node_id: 4,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                RegisterBrokerRequest {
+                    node_id: 9,
+                    advertised_host: "broker-9.local".to_string(),
+                    advertised_port: 39092,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(registration.accepted);
+        server.await.unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_runtime_once(&listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let heartbeat = transport
+            .broker_heartbeat_to(
+                &ClusterRpcTarget {
+                    node_id: 4,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                BrokerHeartbeatRequest {
+                    node_id: 9,
+                    broker_epoch: registration.broker_epoch,
+                    timestamp_ms: 123,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(heartbeat.accepted);
         server.await.unwrap();
     }
 
