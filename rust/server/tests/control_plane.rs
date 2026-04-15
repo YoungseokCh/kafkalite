@@ -370,6 +370,29 @@ async fn process_control_plane_reports_missing_partition_for_existing_topic() {
     assert_eq!(state.high_watermark, -1);
     assert_eq!(state.leader_log_end_offset, -1);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: "existing.topic.partition.miss".to_string(),
+                partition_index: 1,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::GetPartitionState(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert!(!repeated.found);
+    assert_eq!(repeated.leader_id, -1);
+    assert_eq!(repeated.leader_epoch, -1);
+    assert_eq!(repeated.high_watermark, -1);
+    assert_eq!(repeated.leader_log_end_offset, -1);
+
     let _ = child.kill();
     let _ = child.wait();
 }
