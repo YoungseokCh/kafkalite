@@ -4947,6 +4947,26 @@ async fn process_control_plane_rejects_stale_progress_after_epoch_bump_and_fetch
         .unwrap();
     assert!(!rejected.accepted);
 
+    let repeated = transport
+        .update_replica_progress_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            UpdateReplicaProgressRequest {
+                topic_name: "process.fetch.stale.epoch.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
