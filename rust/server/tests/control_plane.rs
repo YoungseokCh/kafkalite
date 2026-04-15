@@ -1433,6 +1433,22 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
         .unwrap();
     assert!(!reassignment_rejected.accepted);
 
+    let progress_rejected = transport
+        .update_replica_progress_to(
+            &node1.controller_target,
+            UpdateReplicaProgressRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 2,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!progress_rejected.accepted);
+
     let _ = node1.child.kill();
     let _ = node1.child.wait();
     let _ = node2.child.kill();
