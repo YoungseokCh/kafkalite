@@ -2969,6 +2969,30 @@ async fn process_control_plane_completes_valid_reassignment_lifecycle() {
     assert_eq!(fetch.high_watermark, 0);
     assert_eq!(fetch.records.len(), 1);
 
+    let repeated_fetch = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "process.reassign.valid.topic".to_string(),
+                partition_index: 0,
+                start_offset: 0,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(repeated_fetch) = repeated_fetch else {
+        panic!("unexpected response variant")
+    };
+    assert_eq!(repeated_fetch.leader_id, fetch.leader_id);
+    assert_eq!(repeated_fetch.leader_epoch, fetch.leader_epoch);
+    assert_eq!(repeated_fetch.high_watermark, fetch.high_watermark);
+    assert_eq!(repeated_fetch.records.len(), fetch.records.len());
+
     let restart_reassignment = transport
         .begin_partition_reassignment_to(
             &ClusterRpcTarget {
