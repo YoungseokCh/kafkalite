@@ -1032,6 +1032,7 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(registration.accepted);
+    assert_eq!(registration.controller_epoch, 1);
     let heartbeat = transport
         .broker_heartbeat_to(
             &node2.controller_target,
@@ -1044,6 +1045,7 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(heartbeat.accepted);
+    assert_eq!(heartbeat.controller_epoch, 1);
     assert_eq!(heartbeat.leader_id, Some(2));
     assert_eq!(heartbeat.controller_epoch, 2);
     let stale_heartbeat = transport
