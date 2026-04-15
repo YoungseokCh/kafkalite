@@ -252,11 +252,23 @@ impl InMemoryClusterNetwork {
         else {
             return Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
                 found: false,
+                leader_id: -1,
+                leader_epoch: -1,
                 high_watermark: -1,
                 leader_log_end_offset: -1,
                 records: Vec::<BrokerRecord>::new(),
             }));
         };
+        let state = self
+            .runtimes
+            .lock()
+            .expect("in-memory cluster network mutex poisoned")
+            .get(&node_id)
+            .map(|runtime| {
+                runtime
+                    .metadata_image()
+                    .partition_state_view(&request.topic_name, request.partition_index)
+            });
         match store.fetch_records(
             &request.topic_name,
             request.partition_index,
@@ -266,9 +278,15 @@ impl InMemoryClusterNetwork {
             Ok(fetched) => {
                 let (_, latest) =
                     store.list_offsets(&request.topic_name, request.partition_index)?;
+                let (leader_id, leader_epoch, high_watermark, _) =
+                    state
+                        .flatten()
+                        .unwrap_or((-1, -1, fetched.high_watermark, latest.offset));
                 Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
                     found: true,
-                    high_watermark: fetched.high_watermark,
+                    leader_id,
+                    leader_epoch,
+                    high_watermark,
                     leader_log_end_offset: latest.offset,
                     records: fetched.records,
                 }))
@@ -276,6 +294,8 @@ impl InMemoryClusterNetwork {
             Err(crate::store::StoreError::UnknownTopicOrPartition { .. }) => {
                 Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
                     found: false,
+                    leader_id: -1,
+                    leader_epoch: -1,
                     high_watermark: -1,
                     leader_log_end_offset: -1,
                     records: Vec::new(),

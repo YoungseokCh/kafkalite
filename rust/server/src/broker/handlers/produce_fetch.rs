@@ -127,10 +127,15 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
                 1_000,
             ) {
                 Ok(fetched) => {
-                    let records = encode_records(&fetched.records)?;
                     let high_watermark = broker
                         .partition_high_watermark(&topic_name, partition.partition)
                         .unwrap_or(fetched.high_watermark);
+                    let visible_records = fetched
+                        .records
+                        .into_iter()
+                        .filter(|record| record.offset < high_watermark)
+                        .collect::<Vec<_>>();
+                    let records = encode_records(&visible_records)?;
                     partitions.push(
                         PartitionData::default()
                             .with_partition_index(partition.partition)

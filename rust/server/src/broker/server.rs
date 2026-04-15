@@ -224,6 +224,11 @@ impl KafkaBroker {
         if !fetched.found {
             return Ok(-1);
         }
+        if fetched.leader_id != leader_state.leader_id
+            || fetched.leader_epoch != leader_state.leader_epoch
+        {
+            anyhow::bail!("leadership changed before replica fetch response applied")
+        }
         if latest.offset > fetched.leader_log_end_offset {
             self.store
                 .truncate_partition(topic, partition, fetched.leader_log_end_offset)?;
@@ -313,7 +318,7 @@ mod tests {
 
     #[test]
     fn unknown_partition_leader_fails_closed_in_distributed_mode() {
-        let broker = test_broker(1, 19092);
+        let broker = test_broker_with_voters(1, 19092, voter_pair());
 
         assert!(!broker.is_local_partition_leader("missing.topic", 0));
     }
@@ -333,27 +338,7 @@ mod tests {
             .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
             .unwrap();
         leader.sync_topic_metadata(&metadata).unwrap();
-        leader
-            .cluster()
-            .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
-                topic_name: "replicated.topic".to_string(),
-                partition_index: 0,
-                leader_id: 1,
-                leader_epoch: 1,
-            })
-            .unwrap();
-        leader
-            .cluster()
-            .handle_update_partition_replication(
-                crate::cluster::UpdatePartitionReplicationRequest {
-                    topic_name: "replicated.topic".to_string(),
-                    partition_index: 0,
-                    replicas: vec![1, 2],
-                    isr: vec![1, 2],
-                    leader_epoch: 1,
-                },
-            )
-            .unwrap();
+        seed_partition_metadata(&leader, "replicated.topic", 1, vec![1, 2], vec![1, 2], 1);
         let request = produce_request("replicated.topic", -1, -1, 0);
         let _ = handle_produce(&leader, request).await.unwrap();
 
@@ -366,27 +351,7 @@ mod tests {
             .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
             .unwrap();
         follower.sync_topic_metadata(&follower_metadata).unwrap();
-        follower
-            .cluster()
-            .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
-                topic_name: "replicated.topic".to_string(),
-                partition_index: 0,
-                leader_id: 1,
-                leader_epoch: 1,
-            })
-            .unwrap();
-        follower
-            .cluster()
-            .handle_update_partition_replication(
-                crate::cluster::UpdatePartitionReplicationRequest {
-                    topic_name: "replicated.topic".to_string(),
-                    partition_index: 0,
-                    replicas: vec![1, 2],
-                    isr: vec![1, 2],
-                    leader_epoch: 1,
-                },
-            )
-            .unwrap();
+        seed_partition_metadata(&follower, "replicated.topic", 1, vec![1, 2], vec![1, 2], 1);
 
         harness.network.register(1, leader.cluster().clone());
         let transport =
@@ -424,27 +389,14 @@ mod tests {
                 .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
                 .unwrap();
             broker.sync_topic_metadata(&metadata).unwrap();
-            broker
-                .cluster()
-                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
-                    topic_name: "replicated.topic".to_string(),
-                    partition_index: 0,
-                    leader_id: 1,
-                    leader_epoch: 1,
-                })
-                .unwrap();
-            broker
-                .cluster()
-                .handle_update_partition_replication(
-                    crate::cluster::UpdatePartitionReplicationRequest {
-                        topic_name: "replicated.topic".to_string(),
-                        partition_index: 0,
-                        replicas: vec![1, 2, 3],
-                        isr: vec![1, 2, 3],
-                        leader_epoch: 1,
-                    },
-                )
-                .unwrap();
+            seed_partition_metadata(
+                broker,
+                "replicated.topic",
+                1,
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                1,
+            );
         }
 
         let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 0))
@@ -521,27 +473,7 @@ mod tests {
                 .topic_metadata(Some(&["rf.topic".to_string()]), 0)
                 .unwrap();
             broker.sync_topic_metadata(&metadata).unwrap();
-            broker
-                .cluster()
-                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
-                    topic_name: "rf.topic".to_string(),
-                    partition_index: 0,
-                    leader_id: 1,
-                    leader_epoch: 1,
-                })
-                .unwrap();
-            broker
-                .cluster()
-                .handle_update_partition_replication(
-                    crate::cluster::UpdatePartitionReplicationRequest {
-                        topic_name: "rf.topic".to_string(),
-                        partition_index: 0,
-                        replicas: vec![1, 2, 3],
-                        isr: vec![1, 2, 3],
-                        leader_epoch: 1,
-                    },
-                )
-                .unwrap();
+            seed_partition_metadata(broker, "rf.topic", 1, vec![1, 2, 3], vec![1, 2, 3], 1);
         }
 
         let _ = handle_produce(&leader, produce_request("rf.topic", -1, -1, 0))
@@ -585,15 +517,7 @@ mod tests {
                 .topic_metadata(Some(&["diverge.topic".to_string()]), 0)
                 .unwrap();
             broker.sync_topic_metadata(&metadata).unwrap();
-            broker
-                .cluster()
-                .handle_update_partition_leader(crate::cluster::UpdatePartitionLeaderRequest {
-                    topic_name: "diverge.topic".to_string(),
-                    partition_index: 0,
-                    leader_id: 1,
-                    leader_epoch: 1,
-                })
-                .unwrap();
+            seed_partition_metadata(broker, "diverge.topic", 1, vec![1], vec![1], 1);
         }
 
         let _ = handle_produce(&leader, produce_request("diverge.topic", -1, -1, 0))
@@ -629,7 +553,11 @@ mod tests {
     }
 
     fn test_broker(node_id: i32, port: u16) -> KafkaBroker {
-        test_broker_with_voters(node_id, port, voter_pair())
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join(format!("node-{node_id}")), port, 1);
+        config.broker.broker_id = node_id;
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
     }
 
     fn test_broker_with_voters(
@@ -644,7 +572,19 @@ mod tests {
         config.cluster.controller_quorum_voters = voters;
         config.broker.broker_id = node_id;
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-        KafkaBroker::new(config, store).unwrap()
+        let broker = KafkaBroker::new(config, store).unwrap();
+        let _ = broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: node_id,
+                prev_metadata_offset: broker.cluster().metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController {
+                    controller_id: node_id,
+                }],
+            })
+            .unwrap();
+        broker
     }
 
     fn voter_pair() -> Vec<ControllerQuorumVoter> {
@@ -680,6 +620,52 @@ mod tests {
                 port: 9093,
             },
         ]
+    }
+
+    fn seed_partition_metadata(
+        broker: &KafkaBroker,
+        topic: &str,
+        leader_id: i32,
+        replicas: Vec<i32>,
+        isr: Vec<i32>,
+        leader_epoch: i32,
+    ) {
+        let append_leader = broker
+            .cluster()
+            .quorum_snapshot()
+            .leader_id
+            .unwrap_or(leader_id);
+        let prev = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: i64::from(leader_epoch.max(1)),
+                leader_id: append_leader,
+                prev_metadata_offset: prev,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
+                    topic_name: topic.to_string(),
+                    partition_index: 0,
+                    leader_id,
+                    leader_epoch,
+                }],
+            })
+            .unwrap();
+        let prev = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: i64::from(leader_epoch.max(1)),
+                leader_id: append_leader,
+                prev_metadata_offset: prev,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionReplication {
+                    topic_name: topic.to_string(),
+                    partition_index: 0,
+                    replicas,
+                    isr,
+                    leader_epoch,
+                }],
+            })
+            .unwrap();
     }
 
     fn replica_record(offset: i64, timestamp_ms: i64) -> BrokerRecord {
