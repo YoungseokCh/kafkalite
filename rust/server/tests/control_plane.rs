@@ -551,6 +551,28 @@ async fn process_control_plane_rejects_progress_update_for_missing_partition() {
     assert!(!response.accepted);
     assert_eq!(response.high_watermark, 0);
 
+    let repeated = transport
+        .update_replica_progress_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            UpdateReplicaProgressRequest {
+                topic_name: "missing.progress.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(!repeated.accepted);
+    assert_eq!(repeated.high_watermark, 0);
+
     let _ = child.kill();
     let _ = child.wait();
 }
