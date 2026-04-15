@@ -3498,6 +3498,26 @@ async fn process_control_plane_rejects_reassignment_complete_before_target_leade
     };
     assert!(!response.accepted);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::AdvancePartitionReassignment(AdvancePartitionReassignmentRequest {
+                topic_name: "process.reassign.complete.topic".to_string(),
+                partition_index: 0,
+                step: kafkalite_server::cluster::ReassignmentStep::Complete,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::AdvancePartitionReassignment(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
