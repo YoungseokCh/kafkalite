@@ -107,6 +107,15 @@ impl TcpClusterRpcTransport {
     pub async fn serve_runtime_once(listener: &TcpListener, runtime: ClusterRuntime) -> Result<()> {
         Self::serve_once(listener, move |request| runtime.dispatch(request)).await
     }
+
+    pub async fn serve_runtime_forever(
+        listener: TcpListener,
+        runtime: ClusterRuntime,
+    ) -> Result<()> {
+        loop {
+            Self::serve_runtime_once(&listener, runtime.clone()).await?;
+        }
+    }
 }
 
 pub trait ClusterRpcTransport {
@@ -1265,5 +1274,48 @@ mod tests {
         };
         assert!(response.accepted);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_forever_server_handles_multiple_requests() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_runtime_forever(listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let transport = TcpClusterRpcTransport;
+        for term in [1_i64, 2_i64] {
+            let response = transport
+                .send_to(
+                    &ClusterRpcTarget {
+                        node_id: 4,
+                        host: addr.ip().to_string(),
+                        port: addr.port(),
+                    },
+                    ClusterRpcRequest::Vote(VoteRequest {
+                        term,
+                        candidate_id: 4,
+                        last_metadata_offset: runtime.metadata_image().metadata_offset,
+                    }),
+                )
+                .await
+                .unwrap();
+            let ClusterRpcResponse::Vote(response) = response else {
+                panic!("unexpected response variant")
+            };
+            assert_eq!(response.term, term);
+        }
+
+        server.abort();
+        let _ = server.await;
     }
 }

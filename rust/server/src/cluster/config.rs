@@ -56,6 +56,12 @@ impl ClusterConfig {
             .get(ProcessRole::BROKER_DEFAULT_LISTENER)
     }
 
+    pub fn controller_listener(&self) -> Option<&ListenerConfig> {
+        self.controller_listener_names
+            .first()
+            .and_then(|name| self.listeners.get(name))
+    }
+
     pub fn has_role(&self, role: ProcessRole) -> bool {
         self.process_roles.contains(&role)
     }

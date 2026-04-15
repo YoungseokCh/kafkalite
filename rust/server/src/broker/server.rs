@@ -6,7 +6,8 @@ use tracing::{debug, error, info};
 
 use crate::cluster::{
     ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget, ClusterRpcTransport, ClusterRuntime,
-    GetPartitionStateRequest, ReplicaFetchRequest, UpdateReplicaProgressRequest,
+    GetPartitionStateRequest, ReplicaFetchRequest, TcpClusterRpcTransport,
+    UpdateReplicaProgressRequest,
 };
 use crate::config::Config;
 use crate::store::Storage;
@@ -38,6 +39,24 @@ impl KafkaBroker {
     }
 
     pub async fn run(self) -> Result<()> {
+        if let Some(controller_listener) = self.config.cluster.controller_listener() {
+            let controller_addr = controller_listener.socket_addr()?;
+            let controller_runtime = self.cluster.clone();
+            let listener = TcpListener::bind(controller_addr).await?;
+            info!(
+                address = %controller_addr,
+                node_id = self.config.cluster.node_id,
+                "kafkalite cluster RPC listening"
+            );
+            tokio::spawn(async move {
+                if let Err(err) =
+                    TcpClusterRpcTransport::serve_runtime_forever(listener, controller_runtime)
+                        .await
+                {
+                    error!(error = %err, "cluster rpc service failed");
+                }
+            });
+        }
         let addr = self.config.socket_addr()?;
         let listener = TcpListener::bind(addr).await?;
         info!(
