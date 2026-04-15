@@ -5333,6 +5333,8 @@ async fn process_control_plane_replica_fetch_beyond_log_end_returns_empty() {
     };
 
     assert!(response.found);
+    assert_eq!(response.leader_id, 1);
+    assert!(response.leader_epoch >= 0);
     assert!(response.records.is_empty());
     assert_eq!(response.leader_log_end_offset, 1);
 
@@ -5459,6 +5461,8 @@ async fn process_control_plane_replica_fetch_at_log_end_returns_empty() {
     };
 
     assert!(repeated.found);
+    assert_eq!(repeated.leader_id, response.leader_id);
+    assert_eq!(repeated.leader_epoch, response.leader_epoch);
     assert!(repeated.records.is_empty());
     assert_eq!(repeated.leader_log_end_offset, 1);
 
