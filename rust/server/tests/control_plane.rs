@@ -689,6 +689,23 @@ async fn process_control_plane_reregistration_bumps_broker_epoch() {
     assert!(second.accepted);
     assert!(second.broker_epoch > first.broker_epoch);
 
+    let heartbeat = transport
+        .broker_heartbeat_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: second.broker_epoch,
+                timestamp_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(heartbeat.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
