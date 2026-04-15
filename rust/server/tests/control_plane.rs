@@ -2053,6 +2053,7 @@ async fn two_process_cluster_rejects_broker_control_on_non_controller_node() {
         .await
         .unwrap();
     assert!(!rejected.accepted);
+    assert_eq!(rejected.leader_id, Some(2));
 
     let accepted = transport
         .register_broker_to(
@@ -2079,6 +2080,7 @@ async fn two_process_cluster_rejects_broker_control_on_non_controller_node() {
         .await
         .unwrap();
     assert!(!heartbeat_rejected.accepted);
+    assert_eq!(heartbeat_rejected.leader_id, Some(2));
 
     let heartbeat_accepted = transport
         .broker_heartbeat_to(
