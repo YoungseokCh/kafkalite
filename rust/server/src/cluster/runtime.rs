@@ -61,8 +61,7 @@ impl ClusterRuntime {
         if self.config.controller_quorum_voters.len() <= 1 {
             return true;
         }
-        let leader = self.quorum_snapshot().leader_id;
-        leader.is_none() || leader == Some(self.config.node_id)
+        self.quorum_snapshot().leader_id == Some(self.config.node_id)
     }
 
     pub fn can_auto_create_topics_locally(&self) -> bool {
@@ -106,6 +105,13 @@ impl ClusterRuntime {
         request: BrokerHeartbeatRequest,
     ) -> Result<BrokerHeartbeatResponse> {
         let quorum = self.quorum_snapshot();
+        if !self.config.controller_quorum_voters.is_empty() && !self.can_write_metadata_locally() {
+            return Ok(BrokerHeartbeatResponse {
+                accepted: false,
+                controller_epoch: quorum.controller_epoch,
+                leader_id: quorum.leader_id,
+            });
+        }
         let accepted = {
             let mut controller = self
                 .controller
@@ -137,6 +143,14 @@ impl ClusterRuntime {
         now_ms: i64,
     ) -> Result<RegisterBrokerResponse> {
         let quorum = self.quorum_snapshot();
+        if !self.config.controller_quorum_voters.is_empty() && !self.can_write_metadata_locally() {
+            return Ok(RegisterBrokerResponse {
+                accepted: false,
+                broker_epoch: -1,
+                controller_epoch: quorum.controller_epoch,
+                leader_id: quorum.leader_id,
+            });
+        }
         let registration = {
             let mut controller = self
                 .controller
@@ -163,6 +177,7 @@ impl ClusterRuntime {
             metadata.sync_controller(leader_id)?;
         }
         Ok(RegisterBrokerResponse {
+            accepted: true,
             broker_epoch: registration.broker_epoch,
             controller_epoch: quorum.controller_epoch,
             leader_id: quorum.leader_id,
@@ -626,11 +641,13 @@ impl ClusterRuntime {
                     advertised_port: config.broker.advertised_port,
                 })
                 .expect("local broker registration should succeed");
-            let _ = transport.broker_heartbeat(BrokerHeartbeatRequest {
-                node_id: config.broker.broker_id,
-                broker_epoch: response.broker_epoch,
-                timestamp_ms: now_ms,
-            });
+            if response.accepted {
+                let _ = transport.broker_heartbeat(BrokerHeartbeatRequest {
+                    node_id: config.broker.broker_id,
+                    broker_epoch: response.broker_epoch,
+                    timestamp_ms: now_ms,
+                });
+            }
         } else if config
             .cluster
             .has_role(crate::cluster::ProcessRole::Controller)

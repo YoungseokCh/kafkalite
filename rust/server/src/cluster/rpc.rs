@@ -37,6 +37,7 @@ pub struct RegisterBrokerRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterBrokerResponse {
+    pub accepted: bool,
     pub broker_epoch: i64,
     pub controller_epoch: i64,
     pub leader_id: Option<i32>,
