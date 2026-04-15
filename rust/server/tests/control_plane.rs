@@ -3709,6 +3709,27 @@ async fn process_control_plane_rejects_lower_term_vote_after_higher_term_seen() 
     assert_eq!(low.term, 5);
     assert!(!low.vote_granted);
 
+    let repeated_low = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::Vote(VoteRequest {
+                term: 4,
+                candidate_id: 1,
+                last_metadata_offset: -1,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::Vote(repeated_low) = repeated_low else {
+        panic!("unexpected response variant")
+    };
+    assert_eq!(repeated_low.term, 5);
+    assert!(!repeated_low.vote_granted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
