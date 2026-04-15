@@ -56,6 +56,31 @@ pub async fn handle_produce(
                 );
                 continue;
             }
+            let known_local = broker
+                .store()
+                .topic_metadata(Some(&[topic_name.clone()]), now)
+                .map(|topics| {
+                    topics.iter().any(|topic| {
+                        topic
+                            .partitions
+                            .iter()
+                            .any(|p| p.partition == partition_data.index)
+                    })
+                })
+                .unwrap_or(false);
+            if !known_local {
+                partitions.push(
+                    PartitionProduceResponse::default()
+                        .with_index(partition_data.index)
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                        .with_base_offset(-1)
+                        .with_log_append_time_ms(-1)
+                        .with_log_start_offset(0)
+                        .with_record_errors(vec![])
+                        .with_error_message(None),
+                );
+                continue;
+            }
             let produce_result =
                 broker
                     .store()
@@ -63,6 +88,11 @@ pub async fn handle_produce(
             let (error_code, base_offset) = match produce_result {
                 Ok((base_offset, _)) => {
                     if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
+                        let _ = broker.store().truncate_partition(
+                            &topic_name,
+                            partition_data.index,
+                            base_offset,
+                        );
                         (NOT_LEADER_OR_FOLLOWER, -1)
                     } else {
                         let _ = broker.update_local_replica_progress(

@@ -26,6 +26,7 @@ pub enum MetadataRecord {
     UpdateReplicaProgress {
         topic_name: String,
         partition_index: i32,
+        leader_epoch: i32,
         progress: ReplicaProgress,
     },
     BeginPartitionReassignment {

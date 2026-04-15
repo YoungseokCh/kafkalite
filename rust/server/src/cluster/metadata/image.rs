@@ -62,9 +62,10 @@ impl ClusterMetadataImage {
             MetadataRecord::UpdateReplicaProgress {
                 topic_name,
                 partition_index,
+                leader_epoch,
                 progress,
             } => {
-                self.update_replica_progress(&topic_name, partition_index, progress);
+                self.update_replica_progress(&topic_name, partition_index, leader_epoch, progress);
             }
             MetadataRecord::BeginPartitionReassignment {
                 topic_name,
@@ -332,6 +333,7 @@ impl ClusterMetadataImage {
         &mut self,
         topic_name: &str,
         partition_index: i32,
+        leader_epoch: i32,
         progress: ReplicaProgress,
     ) -> bool {
         let Some(topic) = self
@@ -348,6 +350,9 @@ impl ClusterMetadataImage {
         else {
             return false;
         };
+        if leader_epoch != partition.leader_epoch {
+            return false;
+        }
         match partition
             .replica_progress
             .iter_mut()

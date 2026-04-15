@@ -441,6 +441,7 @@ impl ClusterRuntime {
                 records: vec![crate::cluster::MetadataRecord::UpdateReplicaProgress {
                     topic_name: request.topic_name.clone(),
                     partition_index: request.partition_index,
+                    leader_epoch: request.leader_epoch,
                     progress: crate::cluster::ReplicaProgress {
                         broker_id: request.broker_id,
                         log_end_offset: request.log_end_offset,
