@@ -1405,6 +1405,34 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
         .unwrap();
     assert!(accepted.accepted);
 
+    let replication_rejected = transport
+        .update_partition_replication_to(
+            &node1.controller_target,
+            UpdatePartitionReplicationRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2],
+                isr: vec![1],
+                leader_epoch: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!replication_rejected.accepted);
+
+    let reassignment_rejected = transport
+        .begin_partition_reassignment_to(
+            &node1.controller_target,
+            BeginPartitionReassignmentRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![2, 3],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!reassignment_rejected.accepted);
+
     let _ = node1.child.kill();
     let _ = node1.child.wait();
     let _ = node2.child.kill();
