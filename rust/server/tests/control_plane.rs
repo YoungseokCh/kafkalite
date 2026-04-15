@@ -803,6 +803,7 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
         .await
         .unwrap();
     assert!(heartbeat_again.accepted);
+    assert_eq!(heartbeat_again.leader_id, Some(1));
     assert_eq!(
         heartbeat_again.controller_epoch,
         registration.controller_epoch
