@@ -90,6 +90,7 @@ pub struct UpdatePartitionReplicationResponse {
 pub struct UpdateReplicaProgressRequest {
     pub topic_name: String,
     pub partition_index: i32,
+    pub leader_epoch: i32,
     pub broker_id: i32,
     pub log_end_offset: i64,
     pub last_caught_up_ms: i64,

@@ -551,6 +551,7 @@ mod tests {
             .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
                 topic_name: "hw.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 1,
                 last_caught_up_ms: 100,
@@ -561,6 +562,7 @@ mod tests {
             .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
                 topic_name: "hw.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 0,
                 last_caught_up_ms: 100,

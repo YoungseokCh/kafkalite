@@ -52,14 +52,14 @@ impl ClusterRuntime {
     }
 
     pub fn can_write_metadata_locally(&self) -> bool {
+        if self.config.controller_quorum_voters.is_empty() {
+            return true;
+        }
         if !self
             .config
             .has_role(crate::cluster::ProcessRole::Controller)
         {
             return false;
-        }
-        if self.config.controller_quorum_voters.len() <= 1 {
-            return true;
         }
         self.quorum_snapshot().leader_id == Some(self.config.node_id)
     }
@@ -190,6 +190,14 @@ impl ClusterRuntime {
     ) -> Result<AppendMetadataResponse> {
         let snapshot = {
             let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
+            if !quorum.is_voter(request.leader_id) {
+                let snapshot = quorum.snapshot();
+                return Ok(AppendMetadataResponse {
+                    term: snapshot.current_term,
+                    accepted: false,
+                    last_metadata_offset: self.metadata_image().metadata_offset,
+                });
+            }
             if request.term < quorum.current_term() {
                 let snapshot = quorum.snapshot();
                 return Ok(AppendMetadataResponse {
@@ -228,7 +236,8 @@ impl ClusterRuntime {
     pub fn handle_vote(&self, request: VoteRequest) -> Result<VoteResponse> {
         let current_offset = self.metadata_image().metadata_offset;
         let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
-        let vote_granted = request.last_metadata_offset >= current_offset
+        let vote_granted = quorum.is_voter(request.candidate_id)
+            && request.last_metadata_offset >= current_offset
             && quorum.record_vote(request.candidate_id, request.term);
         Ok(VoteResponse {
             term: quorum.current_term(),
@@ -405,6 +414,25 @@ impl ClusterRuntime {
         }
         let topic_name = request.topic_name.clone();
         let partition_index = request.partition_index;
+        let image_before = self.metadata_image();
+        let Some((_, current_epoch, _, _)) =
+            image_before.partition_state_view(&topic_name, partition_index)
+        else {
+            return Ok(UpdateReplicaProgressResponse {
+                accepted: false,
+                metadata_offset: image_before.metadata_offset,
+                high_watermark: 0,
+            });
+        };
+        if request.leader_epoch != current_epoch {
+            return Ok(UpdateReplicaProgressResponse {
+                accepted: false,
+                metadata_offset: image_before.metadata_offset,
+                high_watermark: image_before
+                    .partition_high_watermark(&topic_name, partition_index)
+                    .unwrap_or(0),
+            });
+        }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
             AppendMetadataRequest {
                 term,
@@ -778,7 +806,7 @@ mod tests {
             .runtime
             .handle_vote(VoteRequest {
                 term: 5,
-                candidate_id: 9,
+                candidate_id: 2,
                 last_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
             })
             .unwrap();
@@ -973,6 +1001,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "leader.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -1106,6 +1135,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "progress.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -1115,6 +1145,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "progress.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 8,
                 last_caught_up_ms: 100,
@@ -1161,6 +1192,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "isr.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -1170,6 +1202,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "isr.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -1179,6 +1212,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "isr.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 3,
                 log_end_offset: 5,
                 last_caught_up_ms: 100,
@@ -1239,6 +1273,7 @@ mod tests {
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
                     topic_name: "reassign.topic".to_string(),
                     partition_index: 0,
+                    leader_epoch: 1,
                     broker_id,
                     log_end_offset: 0,
                     last_caught_up_ms: 100,
@@ -1298,6 +1333,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "reassign.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -1307,6 +1343,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "reassign.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,

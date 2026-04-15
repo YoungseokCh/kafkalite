@@ -251,6 +251,7 @@ pub async fn run_cluster_replication_metadata(
             ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                 topic_name: spec.name.to_string(),
                 partition_index: 0,
+                leader_epoch: index as i32 + 1,
                 broker_id: 1,
                 log_end_offset: index as i64 + 1,
                 last_caught_up_ms: index as i64,
@@ -261,6 +262,7 @@ pub async fn run_cluster_replication_metadata(
             ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                 topic_name: spec.name.to_string(),
                 partition_index: 0,
+                leader_epoch: index as i32 + 1,
                 broker_id: 2,
                 log_end_offset: index as i64,
                 last_caught_up_ms: index as i64,

@@ -529,6 +529,7 @@ mod tests {
             .update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "progress.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 10,
                 last_caught_up_ms: 100,
@@ -538,6 +539,7 @@ mod tests {
             .update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "progress.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 8,
                 last_caught_up_ms: 100,
@@ -638,6 +640,16 @@ mod tests {
                 2,
             )
             .unwrap();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
 
         let mut config1 =
             Config::single_node(tempdir().unwrap().path().join("node1-client"), 19092, 1);
@@ -687,6 +699,7 @@ mod tests {
                 ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                     topic_name: "replicated.topic".to_string(),
                     partition_index: 0,
+                    leader_epoch: 1,
                     broker_id: 1,
                     log_end_offset: 11,
                     last_caught_up_ms: 100,
@@ -699,6 +712,7 @@ mod tests {
                 ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                     topic_name: "replicated.topic".to_string(),
                     partition_index: 0,
+                    leader_epoch: 1,
                     broker_id: 2,
                     log_end_offset: 9,
                     last_caught_up_ms: 100,
@@ -776,6 +790,16 @@ mod tests {
                 2,
             )
             .unwrap();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
         harness
             .node2
             .runtime
@@ -803,6 +827,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "replicated.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 7,
                 last_caught_up_ms: 100,
@@ -814,6 +839,7 @@ mod tests {
             .handle_update_replica_progress(UpdateReplicaProgressRequest {
                 topic_name: "replicated.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 2,
                 log_end_offset: 5,
                 last_caught_up_ms: 100,
@@ -883,6 +909,16 @@ mod tests {
                 1,
             )
             .unwrap();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
         let transport = harness.transport_from_node1();
         let target = transport.resolve_target(2).unwrap();
 
@@ -902,6 +938,7 @@ mod tests {
                 ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                     topic_name: "reassign.topic".to_string(),
                     partition_index: 0,
+                    leader_epoch: 0,
                     broker_id: 2,
                     log_end_offset: 0,
                     last_caught_up_ms: 100,
@@ -914,6 +951,7 @@ mod tests {
                 ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
                     topic_name: "reassign.topic".to_string(),
                     partition_index: 0,
+                    leader_epoch: 0,
                     broker_id: 3,
                     log_end_offset: 0,
                     last_caught_up_ms: 100,

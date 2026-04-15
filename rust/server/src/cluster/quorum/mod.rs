@@ -48,6 +48,12 @@ impl QuorumState {
             self.voted_for = None;
             self.leader_id = None;
         }
+        if self.leader_id.is_some()
+            && term == self.current_term
+            && self.leader_id != Some(candidate_id)
+        {
+            return false;
+        }
         if self.voted_for.is_some() && self.voted_for != Some(candidate_id) {
             return false;
         }
@@ -98,6 +104,10 @@ impl QuorumState {
     pub fn has_majority(&self, votes: usize) -> bool {
         let voters = self.voters.len().max(1);
         votes >= (voters / 2) + 1
+    }
+
+    pub fn is_voter(&self, node_id: i32) -> bool {
+        self.voters.is_empty() || self.voters.iter().any(|voter| voter.node_id == node_id)
     }
 }
 

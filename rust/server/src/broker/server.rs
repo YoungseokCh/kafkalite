@@ -107,6 +107,12 @@ impl KafkaBroker {
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
                     topic_name: topic.to_string(),
                     partition_index: partition,
+                    leader_epoch: self
+                        .cluster()
+                        .metadata_image()
+                        .partition_state_view(topic, partition)
+                        .map(|(_, epoch, _, _)| epoch)
+                        .unwrap_or(0),
                     broker_id: self.config.broker.broker_id,
                     log_end_offset: latest.offset,
                     last_caught_up_ms: now_ms,
@@ -140,9 +146,10 @@ impl KafkaBroker {
         if !state.found {
             return Ok(-1);
         }
-        if state.leader_id != target.node_id
-            || state.leader_id != local_state.0
-            || state.leader_epoch != local_state.1
+        if local_state.0 != 0
+            && (state.leader_id != target.node_id
+                || state.leader_id != local_state.0
+                || state.leader_epoch != local_state.1)
         {
             anyhow::bail!("stale leader or epoch during follower progress sync")
         }
@@ -152,6 +159,7 @@ impl KafkaBroker {
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
                     topic_name: topic.to_string(),
                     partition_index: partition,
+                    leader_epoch: local_state.1,
                     broker_id: self.config.broker.broker_id,
                     log_end_offset: latest.offset.min(state.leader_log_end_offset),
                     last_caught_up_ms: now_ms,
@@ -185,9 +193,10 @@ impl KafkaBroker {
         if !leader_state.found {
             return Ok(-1);
         }
-        if leader_state.leader_id != target.node_id
-            || leader_state.leader_id != local_state.0
-            || leader_state.leader_epoch != local_state.1
+        if local_state.0 != 0
+            && (leader_state.leader_id != target.node_id
+                || leader_state.leader_id != local_state.0
+                || leader_state.leader_epoch != local_state.1)
         {
             anyhow::bail!("stale leader or epoch during replica fetch")
         }
@@ -206,8 +215,9 @@ impl KafkaBroker {
             .metadata_image()
             .partition_state_view(topic, partition)
             .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
-        if refreshed_local_state.0 != leader_state.leader_id
-            || refreshed_local_state.1 != leader_state.leader_epoch
+        if refreshed_local_state.0 != 0
+            && (refreshed_local_state.0 != leader_state.leader_id
+                || refreshed_local_state.1 != leader_state.leader_epoch)
         {
             anyhow::bail!("leadership changed during replica fetch")
         }
@@ -228,6 +238,7 @@ impl KafkaBroker {
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
                     topic_name: topic.to_string(),
                     partition_index: partition,
+                    leader_epoch: local_state.1,
                     broker_id: self.config.broker.broker_id,
                     log_end_offset: fetched
                         .leader_log_end_offset
@@ -460,6 +471,7 @@ mod tests {
             .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
                 topic_name: "replicated.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 1,
                 log_end_offset: 3,
                 last_caught_up_ms: 100,
@@ -470,6 +482,7 @@ mod tests {
             .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
                 topic_name: "replicated.topic".to_string(),
                 partition_index: 0,
+                leader_epoch: 1,
                 broker_id: 3,
                 log_end_offset: 3,
                 last_caught_up_ms: 100,
