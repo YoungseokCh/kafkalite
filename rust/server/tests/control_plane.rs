@@ -2069,6 +2069,25 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
     };
     assert!(!stale.accepted);
 
+    let stale_again = transport
+        .send_to(
+            &node2.controller_target,
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 1,
+                prev_metadata_offset: update.metadata_offset,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 1,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::AppendMetadata(stale_again) = stale_again else {
+        panic!("unexpected response variant")
+    };
+    assert!(!stale_again.accepted);
+
     let state = transport
         .send_to(
             &node2.controller_target,
