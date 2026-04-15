@@ -3309,6 +3309,24 @@ async fn process_control_plane_rejects_older_partition_leader_epoch() {
         .unwrap();
     assert!(!rejected.accepted);
 
+    let repeated = transport
+        .update_partition_leader_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            UpdatePartitionLeaderRequest {
+                topic_name: "process.epoch.topic".to_string(),
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
