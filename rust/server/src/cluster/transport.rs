@@ -9,9 +9,10 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::cluster::codec::{decode_request, decode_response, encode_request, encode_response};
 use crate::cluster::rpc::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
-    BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    GetPartitionStateRequest, GetPartitionStateResponse, PartitionReassignmentResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    ApplyReplicaRecordsRequest, ApplyReplicaRecordsResponse, BeginPartitionReassignmentRequest,
+    BrokerHeartbeatRequest, BrokerHeartbeatResponse, GetPartitionStateRequest,
+    GetPartitionStateResponse, PartitionReassignmentResponse, RegisterBrokerRequest,
+    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
     UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
@@ -29,6 +30,7 @@ pub enum ClusterRpcRequest {
     UpdateReplicaProgress(UpdateReplicaProgressRequest),
     GetPartitionState(GetPartitionStateRequest),
     ReplicaFetch(ReplicaFetchRequest),
+    ApplyReplicaRecords(ApplyReplicaRecordsRequest),
     BeginPartitionReassignment(BeginPartitionReassignmentRequest),
     AdvancePartitionReassignment(AdvancePartitionReassignmentRequest),
     Vote(VoteRequest),
@@ -44,6 +46,7 @@ pub enum ClusterRpcResponse {
     UpdateReplicaProgress(UpdateReplicaProgressResponse),
     GetPartitionState(GetPartitionStateResponse),
     ReplicaFetch(ReplicaFetchResponse),
+    ApplyReplicaRecords(ApplyReplicaRecordsResponse),
     BeginPartitionReassignment(PartitionReassignmentResponse),
     AdvancePartitionReassignment(PartitionReassignmentResponse),
     Vote(VoteResponse),
@@ -160,6 +163,20 @@ impl TcpClusterRpcTransport {
                     }
                     Err(err) => Err(err.into()),
                 },
+                ClusterRpcRequest::ApplyReplicaRecords(request) => {
+                    let next_offset = store.append_replica_records(
+                        &request.topic_name,
+                        request.partition_index,
+                        &request.records,
+                        request.now_ms,
+                    )?;
+                    Ok(ClusterRpcResponse::ApplyReplicaRecords(
+                        ApplyReplicaRecordsResponse {
+                            accepted: true,
+                            next_offset,
+                        },
+                    ))
+                }
                 other => runtime.dispatch(other),
             })
             .await?;
@@ -252,6 +269,20 @@ impl TcpClusterRpcTransport {
             .await?
         {
             ClusterRpcResponse::UpdateReplicaProgress(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    pub async fn apply_replica_records_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: ApplyReplicaRecordsRequest,
+    ) -> Result<ApplyReplicaRecordsResponse> {
+        match self
+            .send_to(target, ClusterRpcRequest::ApplyReplicaRecords(request))
+            .await?
+        {
+            ClusterRpcResponse::ApplyReplicaRecords(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }

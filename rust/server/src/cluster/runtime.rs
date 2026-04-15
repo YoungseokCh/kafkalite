@@ -611,6 +611,9 @@ impl ClusterRuntime {
             ClusterRpcRequest::ReplicaFetch(request) => Ok(ClusterRpcResponse::ReplicaFetch(
                 self.handle_replica_fetch(request)?,
             )),
+            ClusterRpcRequest::ApplyReplicaRecords(_) => {
+                anyhow::bail!("apply replica records requires broker data-plane transport")
+            }
             ClusterRpcRequest::BeginPartitionReassignment(request) => {
                 Ok(ClusterRpcResponse::BeginPartitionReassignment(
                     self.handle_begin_partition_reassignment(request)?,

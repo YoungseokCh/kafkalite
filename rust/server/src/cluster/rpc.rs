@@ -138,6 +138,20 @@ pub struct ReplicaFetchResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyReplicaRecordsRequest {
+    pub topic_name: String,
+    pub partition_index: i32,
+    pub records: Vec<crate::store::BrokerRecord>,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyReplicaRecordsResponse {
+    pub accepted: bool,
+    pub next_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeginPartitionReassignmentRequest {
     pub topic_name: String,
     pub partition_index: i32,
