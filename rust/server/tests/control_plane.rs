@@ -546,6 +546,20 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(update.accepted);
+    let replication = transport
+        .update_partition_replication_to(
+            &node2.controller_target,
+            UpdatePartitionReplicationRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![2, 9],
+                isr: vec![2],
+                leader_epoch: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(replication.accepted);
 
     let state = transport
         .send_to(
