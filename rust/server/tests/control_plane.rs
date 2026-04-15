@@ -4545,6 +4545,23 @@ async fn process_control_plane_rejects_heartbeat_before_registration() {
         .unwrap();
     assert!(!heartbeat.accepted);
 
+    let repeated = transport
+        .broker_heartbeat_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: 1,
+                timestamp_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
