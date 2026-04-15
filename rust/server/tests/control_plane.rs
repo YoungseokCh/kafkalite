@@ -2000,6 +2000,30 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
         .await
         .unwrap();
     assert!(heartbeat.accepted);
+    let stale_heartbeat = transport
+        .broker_heartbeat_to(
+            &node2.controller_target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: registration.broker_epoch - 1,
+                timestamp_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!stale_heartbeat.accepted);
+    let stale_heartbeat_again = transport
+        .broker_heartbeat_to(
+            &node2.controller_target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: registration.broker_epoch - 1,
+                timestamp_ms: 125,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!stale_heartbeat_again.accepted);
     let stale = transport
         .send_to(
             &node2.controller_target,
