@@ -5278,6 +5278,26 @@ async fn process_control_plane_accepts_empty_replica_apply_as_noop() {
     assert!(response.accepted);
     assert_eq!(response.next_offset, 1);
 
+    let repeated = transport
+        .apply_replica_records_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ApplyReplicaRecordsRequest {
+                topic_name: "process.apply.noop.topic".to_string(),
+                partition_index: 0,
+                records: vec![],
+                now_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(repeated.accepted);
+    assert_eq!(repeated.next_offset, 1);
+
     let fetched = transport
         .send_to(
             &ClusterRpcTarget {
