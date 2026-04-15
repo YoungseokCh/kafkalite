@@ -2631,6 +2631,7 @@ async fn process_control_plane_rejects_duplicate_reassignment_begin() {
         .await
         .unwrap();
     assert!(!repeated.accepted);
+    assert_eq!(repeated.metadata_offset, rejected.metadata_offset);
 
     let _ = child.kill();
     let _ = child.wait();
