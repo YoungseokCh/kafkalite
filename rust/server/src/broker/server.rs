@@ -28,10 +28,12 @@ impl KafkaBroker {
             cluster,
             store,
         };
-        let metadata = broker
-            .store
-            .topic_metadata(None, chrono::Utc::now().timestamp_millis())?;
-        broker.sync_topic_metadata(&metadata)?;
+        if broker.cluster.can_auto_create_topics_locally() {
+            let metadata = broker
+                .store
+                .topic_metadata(None, chrono::Utc::now().timestamp_millis())?;
+            broker.sync_topic_metadata(&metadata)?;
+        }
         Ok(broker)
     }
 
@@ -199,6 +201,16 @@ impl KafkaBroker {
                 max_records: 1_000,
             },
         )?;
+        let refreshed_local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
+        if refreshed_local_state.0 != leader_state.leader_id
+            || refreshed_local_state.1 != leader_state.leader_epoch
+        {
+            anyhow::bail!("leadership changed during replica fetch")
+        }
         if !fetched.found {
             return Ok(-1);
         }
