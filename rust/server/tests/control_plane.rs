@@ -952,6 +952,18 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
     assert!(heartbeat.accepted);
     assert_eq!(heartbeat.leader_id, Some(2));
     assert_eq!(heartbeat.controller_epoch, 2);
+    let stale_heartbeat = transport
+        .broker_heartbeat_to(
+            &node2.controller_target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: registration.broker_epoch - 1,
+                timestamp_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!stale_heartbeat.accepted);
     let update = transport
         .update_partition_leader_to(
             &node2.controller_target,
