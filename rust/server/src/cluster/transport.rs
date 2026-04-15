@@ -17,7 +17,7 @@ use crate::cluster::rpc::{
     UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
 };
 use crate::cluster::{ClusterConfig, ClusterRuntime};
-use crate::store::{BrokerRecord, Storage};
+use crate::store::{BrokerRecord, Storage, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClusterRpcRequest {
@@ -114,6 +114,55 @@ impl TcpClusterRpcTransport {
     ) -> Result<()> {
         loop {
             Self::serve_runtime_once(&listener, runtime.clone()).await?;
+        }
+    }
+
+    pub async fn serve_broker_forever(
+        listener: TcpListener,
+        runtime: ClusterRuntime,
+        store: Arc<dyn Storage>,
+    ) -> Result<()> {
+        loop {
+            let runtime = runtime.clone();
+            let store = store.clone();
+            Self::serve_once(&listener, move |request| match request {
+                ClusterRpcRequest::ReplicaFetch(request) => match store.fetch_records(
+                    &request.topic_name,
+                    request.partition_index,
+                    request.start_offset,
+                    request.max_records,
+                ) {
+                    Ok(fetched) => {
+                        let (_, latest) =
+                            store.list_offsets(&request.topic_name, request.partition_index)?;
+                        let (leader_id, leader_epoch, high_watermark, _) = runtime
+                            .metadata_image()
+                            .partition_state_view(&request.topic_name, request.partition_index)
+                            .unwrap_or((-1, -1, fetched.high_watermark, latest.offset));
+                        Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                            found: true,
+                            leader_id,
+                            leader_epoch,
+                            high_watermark,
+                            leader_log_end_offset: latest.offset,
+                            records: fetched.records,
+                        }))
+                    }
+                    Err(StoreError::UnknownTopicOrPartition { .. }) => {
+                        Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                            found: false,
+                            leader_id: -1,
+                            leader_epoch: -1,
+                            high_watermark: -1,
+                            leader_log_end_offset: -1,
+                            records: Vec::new(),
+                        }))
+                    }
+                    Err(err) => Err(err.into()),
+                },
+                other => runtime.dispatch(other),
+            })
+            .await?;
         }
     }
 

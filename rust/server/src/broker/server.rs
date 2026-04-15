@@ -42,6 +42,7 @@ impl KafkaBroker {
         if let Some(controller_listener) = self.config.cluster.controller_listener() {
             let controller_addr = controller_listener.socket_addr()?;
             let controller_runtime = self.cluster.clone();
+            let controller_store = self.store.clone();
             let listener = TcpListener::bind(controller_addr).await?;
             info!(
                 address = %controller_addr,
@@ -49,9 +50,12 @@ impl KafkaBroker {
                 "kafkalite cluster RPC listening"
             );
             tokio::spawn(async move {
-                if let Err(err) =
-                    TcpClusterRpcTransport::serve_runtime_forever(listener, controller_runtime)
-                        .await
+                if let Err(err) = TcpClusterRpcTransport::serve_broker_forever(
+                    listener,
+                    controller_runtime,
+                    controller_store,
+                )
+                .await
                 {
                     error!(error = %err, "cluster rpc service failed");
                 }
