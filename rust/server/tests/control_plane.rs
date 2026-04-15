@@ -2278,6 +2278,24 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
     };
     assert!(!reassignment_advance_rejected.accepted);
 
+    let reassignment_advance_rejected_again = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::AdvancePartitionReassignment(AdvancePartitionReassignmentRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                step: kafkalite_server::cluster::ReassignmentStep::Copying,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::AdvancePartitionReassignment(reassignment_advance_rejected_again) =
+        reassignment_advance_rejected_again
+    else {
+        panic!("unexpected response variant")
+    };
+    assert!(!reassignment_advance_rejected_again.accepted);
+
     let progress_rejected = transport
         .update_replica_progress_to(
             &node1.controller_target,
