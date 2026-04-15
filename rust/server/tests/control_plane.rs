@@ -2499,6 +2499,7 @@ async fn process_control_plane_completes_valid_reassignment_lifecycle() {
     };
     assert_eq!(fetch.leader_epoch, 2);
     assert_eq!(fetch.leader_id, 2);
+    assert_eq!(fetch.high_watermark, 0);
     assert_eq!(fetch.records.len(), 1);
 
     let restart_reassignment = transport
