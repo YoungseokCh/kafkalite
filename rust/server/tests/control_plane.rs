@@ -445,6 +445,29 @@ async fn process_control_plane_reports_existing_partition_state_after_produce() 
     assert!(state.high_watermark >= 0);
     assert_eq!(state.leader_log_end_offset, 1);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: "process.partition.state.topic".to_string(),
+                partition_index: 0,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::GetPartitionState(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert!(repeated.found);
+    assert_eq!(repeated.leader_id, state.leader_id);
+    assert_eq!(repeated.leader_epoch, state.leader_epoch);
+    assert_eq!(repeated.high_watermark, state.high_watermark);
+    assert_eq!(repeated.leader_log_end_offset, state.leader_log_end_offset);
+
     let _ = child.kill();
     let _ = child.wait();
 }
