@@ -3686,6 +3686,7 @@ async fn process_control_plane_rejects_older_replication_epoch() {
         .await
         .unwrap();
     assert!(repeated.accepted);
+    assert!(repeated.metadata_offset >= accepted.metadata_offset);
 
     let rejected = transport
         .update_partition_replication_to(
