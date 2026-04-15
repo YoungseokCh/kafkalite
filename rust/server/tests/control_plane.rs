@@ -870,6 +870,37 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
     assert_eq!(fetched_from_follower.records.len(), 1);
     assert_eq!(fetched_from_follower.records[0].offset, 0);
 
+    let progress = transport
+        .update_replica_progress_to(
+            &node1.controller_target,
+            UpdateReplicaProgressRequest {
+                topic_name: "two.process.replica.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(progress.accepted);
+    let state = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: "two.process.replica.topic".to_string(),
+                partition_index: 0,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::GetPartitionState(state) = state else {
+        panic!("unexpected response variant");
+    };
+    assert!(state.found);
+    assert_eq!(state.high_watermark, 1);
+
     let _ = node1.child.kill();
     let _ = node1.child.wait();
     let _ = node2.child.kill();
