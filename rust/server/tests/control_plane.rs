@@ -3405,6 +3405,27 @@ async fn process_control_plane_reports_higher_term_vote() {
     assert_eq!(response.term, 5);
     assert!(response.vote_granted);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::Vote(VoteRequest {
+                term: 5,
+                candidate_id: 1,
+                last_metadata_offset: -1,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::Vote(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert_eq!(repeated.term, 5);
+    assert!(repeated.vote_granted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
