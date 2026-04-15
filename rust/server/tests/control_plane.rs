@@ -771,6 +771,22 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
     assert!(heartbeat.accepted);
     assert_eq!(heartbeat.leader_id, Some(1));
     assert_eq!(heartbeat.controller_epoch, registration.controller_epoch);
+    let wrong_node = transport
+        .broker_heartbeat_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            BrokerHeartbeatRequest {
+                node_id: 99,
+                broker_epoch: registration.broker_epoch,
+                timestamp_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!wrong_node.accepted);
 
     let _ = child.kill();
     let _ = child.wait();
