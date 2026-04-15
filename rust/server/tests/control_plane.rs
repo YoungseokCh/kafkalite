@@ -4582,6 +4582,31 @@ async fn process_control_plane_reports_new_leader_epoch_for_replica_fetch() {
     assert_eq!(response.leader_epoch, 3);
     assert_eq!(response.leader_log_end_offset, 1);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "process.fetch.epoch.topic".to_string(),
+                partition_index: 0,
+                start_offset: 0,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+
+    assert!(repeated.found);
+    assert_eq!(repeated.leader_id, 1);
+    assert_eq!(repeated.leader_epoch, 3);
+    assert_eq!(repeated.leader_log_end_offset, 1);
+
     let _ = child.kill();
     let _ = child.wait();
 }
