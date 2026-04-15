@@ -103,6 +103,10 @@ impl TcpClusterRpcTransport {
         stream.flush().await?;
         Ok(())
     }
+
+    pub async fn serve_runtime_once(listener: &TcpListener, runtime: ClusterRuntime) -> Result<()> {
+        Self::serve_once(listener, move |request| runtime.dispatch(request)).await
+    }
 }
 
 pub trait ClusterRpcTransport {
@@ -1217,6 +1221,49 @@ mod tests {
         };
         assert_eq!(response.term, 7);
         assert!(response.vote_granted);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_can_dispatch_to_runtime() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_runtime_once(&listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let transport = TcpClusterRpcTransport;
+        let response = transport
+            .send_to(
+                &ClusterRpcTarget {
+                    node_id: 4,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 1,
+                    leader_id: 4,
+                    prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 4,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+
+        let ClusterRpcResponse::AppendMetadata(response) = response else {
+            panic!("unexpected response variant")
+        };
+        assert!(response.accepted);
         server.await.unwrap();
     }
 }
