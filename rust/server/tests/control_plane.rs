@@ -2498,6 +2498,8 @@ async fn process_control_plane_completes_valid_reassignment_lifecycle() {
         panic!("unexpected response variant")
     };
     assert_eq!(fetch.leader_epoch, 2);
+    assert_eq!(fetch.leader_id, 2);
+    assert_eq!(fetch.records.len(), 1);
 
     let restart_reassignment = transport
         .begin_partition_reassignment_to(
