@@ -663,6 +663,23 @@ impl ClusterRuntime {
         transport.update_partition_leader_to(&target, request)
     }
 
+    pub async fn route_update_partition_leader_via_tcp(
+        &self,
+        transport: &crate::cluster::TcpClusterRpcTransport,
+        request: UpdatePartitionLeaderRequest,
+    ) -> Result<UpdatePartitionLeaderResponse> {
+        if self.can_write_metadata_locally() {
+            return self.handle_update_partition_leader(request);
+        }
+        let Some(target) = self.controller_target() else {
+            return Ok(UpdatePartitionLeaderResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        };
+        transport.update_partition_leader_to(&target, request).await
+    }
+
     pub fn route_update_partition_replication<T: ClusterRpcTransport>(
         &self,
         transport: &T,
@@ -750,6 +767,7 @@ impl ClusterRuntime {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
 
     use crate::cluster::{
         ProcessRole,
@@ -915,6 +933,70 @@ mod tests {
                 .partition_leader_id("route.topic", 0),
             Some(2)
         );
+    }
+
+    #[tokio::test]
+    async fn non_leader_controller_routes_partition_leader_update_via_tcp() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
+        harness
+            .node2
+            .runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "tcp.route.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                2,
+            )
+            .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let server_runtime = harness.node2.runtime.clone();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            crate::cluster::TcpClusterRpcTransport::serve_runtime_once(&listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let transport = crate::cluster::TcpClusterRpcTransport;
+        let response = transport
+            .update_partition_leader_to(
+                &crate::cluster::ClusterRpcTarget {
+                    node_id: 2,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                UpdatePartitionLeaderRequest {
+                    topic_name: "tcp.route.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 2,
+                    leader_epoch: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(
+            harness
+                .node2
+                .runtime
+                .metadata_image()
+                .partition_leader_id("tcp.route.topic", 0),
+            Some(2)
+        );
+        server.await.unwrap();
     }
 
     #[test]
