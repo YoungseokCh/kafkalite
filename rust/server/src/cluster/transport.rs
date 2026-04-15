@@ -116,6 +116,20 @@ impl TcpClusterRpcTransport {
             Self::serve_runtime_once(&listener, runtime.clone()).await?;
         }
     }
+
+    pub async fn update_partition_leader_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdatePartitionLeaderRequest,
+    ) -> Result<UpdatePartitionLeaderResponse> {
+        match self
+            .send_to(target, ClusterRpcRequest::UpdatePartitionLeader(request))
+            .await?
+        {
+            ClusterRpcResponse::UpdatePartitionLeader(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
 }
 
 pub trait ClusterRpcTransport {
@@ -1273,6 +1287,68 @@ mod tests {
             panic!("unexpected response variant")
         };
         assert!(response.accepted);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_routes_partition_leader_update_to_controller_runtime() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "tcp.route.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                2,
+            )
+            .unwrap();
+        let _ = runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_runtime_once(&listener, server_runtime)
+                .await
+                .unwrap();
+        });
+
+        let transport = TcpClusterRpcTransport;
+        let response = transport
+            .update_partition_leader_to(
+                &ClusterRpcTarget {
+                    node_id: 2,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                UpdatePartitionLeaderRequest {
+                    topic_name: "tcp.route.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 2,
+                    leader_epoch: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(
+            runtime
+                .metadata_image()
+                .partition_leader_id("tcp.route.topic", 0),
+            Some(2)
+        );
         server.await.unwrap();
     }
 
