@@ -2614,6 +2614,23 @@ async fn process_control_plane_rejects_duplicate_reassignment_begin() {
         .unwrap();
     assert!(!rejected.accepted);
 
+    let repeated = transport
+        .begin_partition_reassignment_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            BeginPartitionReassignmentRequest {
+                topic_name: "process.reassign.duplicate.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![3, 4],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
