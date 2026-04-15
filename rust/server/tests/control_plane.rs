@@ -3769,6 +3769,28 @@ async fn process_control_plane_rejects_non_voter_vote_candidate() {
     assert_eq!(response.term, 0);
     assert!(!response.vote_granted);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::Vote(VoteRequest {
+                term: 6,
+                candidate_id: 9,
+                last_metadata_offset: -1,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let ClusterRpcResponse::Vote(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert_eq!(repeated.term, 0);
+    assert!(!repeated.vote_granted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
