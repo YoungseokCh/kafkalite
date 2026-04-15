@@ -1265,6 +1265,7 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
         .await
         .unwrap();
     assert!(applied.accepted);
+    assert_eq!(applied.next_offset, 1);
     let fetched_from_follower = transport
         .send_to(
             &node1.controller_target,
