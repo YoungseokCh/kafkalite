@@ -109,13 +109,18 @@ pub async fn handle_metadata(
             .collect()
     };
 
-    let brokers = metadata_brokers(&image);
+    let brokers = metadata_brokers(&image, broker);
+    let controller_id = broker
+        .cluster()
+        .quorum_snapshot()
+        .leader_id
+        .unwrap_or(image.controller_id);
 
     Ok(MetadataResponse::default()
         .with_throttle_time_ms(0)
         .with_brokers(brokers)
         .with_cluster_id(Some(StrBytes::from(image.cluster_id.clone())))
-        .with_controller_id(BrokerId(image.controller_id))
+        .with_controller_id(BrokerId(controller_id))
         .with_topics(topics))
 }
 
@@ -137,9 +142,20 @@ fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {
         .with_max_version(max_version)
 }
 
-fn metadata_brokers(image: &ClusterMetadataImage) -> Vec<MetadataResponseBroker> {
-    image
-        .brokers
+fn metadata_brokers(
+    image: &ClusterMetadataImage,
+    broker: &KafkaBroker,
+) -> Vec<MetadataResponseBroker> {
+    let brokers = if image.brokers.is_empty() {
+        vec![crate::cluster::BrokerMetadata {
+            node_id: broker.config().broker.broker_id,
+            host: broker.config().broker.advertised_host.clone(),
+            port: broker.config().broker.advertised_port,
+        }]
+    } else {
+        image.brokers.clone()
+    };
+    brokers
         .iter()
         .map(|broker| {
             MetadataResponseBroker::default()

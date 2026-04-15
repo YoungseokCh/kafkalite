@@ -95,6 +95,12 @@ impl KafkaBroker {
             .partition_high_watermark(topic, partition)
     }
 
+    pub fn partition_has_replica_progress(&self, topic: &str, partition: i32) -> bool {
+        self.cluster()
+            .metadata_image()
+            .partition_has_replica_progress(topic, partition)
+    }
+
     pub fn update_local_replica_progress(
         &self,
         topic: &str,

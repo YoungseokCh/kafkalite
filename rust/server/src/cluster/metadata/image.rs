@@ -237,6 +237,19 @@ impl ClusterMetadataImage {
             .and_then(|partition| partition.reassignment.clone())
     }
 
+    pub fn partition_has_replica_progress(&self, topic_name: &str, partition_index: i32) -> bool {
+        self.topics
+            .iter()
+            .find(|topic| topic.name == topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|p| p.partition == partition_index)
+            })
+            .is_some_and(|partition| !partition.replica_progress.is_empty())
+    }
+
     pub fn update_partition_leader(
         &mut self,
         topic_name: &str,
@@ -360,6 +373,9 @@ impl ClusterMetadataImage {
         partition_index: i32,
         target_replicas: Vec<i32>,
     ) -> bool {
+        if target_replicas.is_empty() {
+            return false;
+        }
         let Some(partition) = self.partition_mut(topic_name, partition_index) else {
             return false;
         };

@@ -62,12 +62,16 @@ pub async fn handle_produce(
                     .append_records(&topic_name, partition_data.index, &flattened, now);
             let (error_code, base_offset) = match produce_result {
                 Ok((base_offset, _)) => {
-                    let _ = broker.update_local_replica_progress(
-                        &topic_name,
-                        partition_data.index,
-                        now,
-                    );
-                    (0, base_offset)
+                    if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
+                        (NOT_LEADER_OR_FOLLOWER, -1)
+                    } else {
+                        let _ = broker.update_local_replica_progress(
+                            &topic_name,
+                            partition_data.index,
+                            now,
+                        );
+                        (0, base_offset)
+                    }
                 }
                 Err(StoreError::UnknownTopicOrPartition { .. }) => (UNKNOWN_TOPIC_OR_PARTITION, -1),
                 Err(StoreError::InvalidProducerSequence { .. }) => {
@@ -129,12 +133,20 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
                 Ok(fetched) => {
                     let high_watermark = broker
                         .partition_high_watermark(&topic_name, partition.partition)
+                        .filter(|_| !fetched.records.is_empty())
                         .unwrap_or(fetched.high_watermark);
-                    let visible_records = fetched
-                        .records
-                        .into_iter()
-                        .filter(|record| record.offset < high_watermark)
-                        .collect::<Vec<_>>();
+                    let visible_records = if high_watermark == 0
+                        && !fetched.records.is_empty()
+                        && !broker.partition_has_replica_progress(&topic_name, partition.partition)
+                    {
+                        fetched.records.clone()
+                    } else {
+                        fetched
+                            .records
+                            .into_iter()
+                            .filter(|record| record.offset < high_watermark)
+                            .collect::<Vec<_>>()
+                    };
                     let records = encode_records(&visible_records)?;
                     partitions.push(
                         PartitionData::default()
