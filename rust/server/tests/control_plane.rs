@@ -3895,6 +3895,25 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
     assert!(state.found);
     assert_eq!(state.high_watermark, 1);
 
+    let fetched = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "two.process.replica.restart.topic".to_string(),
+                partition_index: 0,
+                start_offset: 0,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(fetched) = fetched else {
+        panic!("unexpected response variant")
+    };
+    assert!(fetched.found);
+    assert_eq!(fetched.records.len(), 1);
+    assert_eq!(fetched.records[0].offset, 0);
+
     let _ = node1.child.kill();
     let _ = node1.child.wait();
     let _ = node2.child.kill();
