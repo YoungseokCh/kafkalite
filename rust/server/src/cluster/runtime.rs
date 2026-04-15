@@ -641,6 +641,62 @@ impl ClusterRuntime {
         RemoteClusterRpcTransport::new(&self.config)
     }
 
+    pub fn controller_target(&self) -> Option<crate::cluster::ClusterRpcTarget> {
+        let leader_id = self.quorum_snapshot().leader_id?;
+        self.remote_transport().resolve_target(leader_id).ok()
+    }
+
+    pub fn route_update_partition_leader<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        request: UpdatePartitionLeaderRequest,
+    ) -> Result<UpdatePartitionLeaderResponse> {
+        if self.can_write_metadata_locally() {
+            return self.handle_update_partition_leader(request);
+        }
+        let Some(target) = self.controller_target() else {
+            return Ok(UpdatePartitionLeaderResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        };
+        transport.update_partition_leader_to(&target, request)
+    }
+
+    pub fn route_update_partition_replication<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        request: UpdatePartitionReplicationRequest,
+    ) -> Result<UpdatePartitionReplicationResponse> {
+        if self.can_write_metadata_locally() {
+            return self.handle_update_partition_replication(request);
+        }
+        let Some(target) = self.controller_target() else {
+            return Ok(UpdatePartitionReplicationResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        };
+        transport.update_partition_replication_to(&target, request)
+    }
+
+    pub fn route_begin_partition_reassignment<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        request: BeginPartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        if self.can_write_metadata_locally() {
+            return self.handle_begin_partition_reassignment(request);
+        }
+        let Some(target) = self.controller_target() else {
+            return Ok(PartitionReassignmentResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        };
+        transport.begin_partition_reassignment_to(&target, request)
+    }
+
     pub fn quorum_snapshot(&self) -> QuorumSnapshot {
         self.quorum
             .lock()
@@ -695,7 +751,10 @@ impl ClusterRuntime {
 mod tests {
     use tempfile::tempdir;
 
-    use crate::cluster::{ProcessRole, test_support::ThreeNodeClusterHarness};
+    use crate::cluster::{
+        ProcessRole,
+        test_support::{ThreeNodeClusterHarness, TwoNodeClusterHarness},
+    };
     use crate::config::Config;
 
     use super::*;
@@ -795,6 +854,67 @@ mod tests {
 
         assert!(!elected);
         assert_eq!(harness.node1.runtime.quorum_snapshot().leader_id, None);
+    }
+
+    #[test]
+    fn non_leader_controller_routes_partition_leader_update_to_elected_controller() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let transport = harness.transport_from_node1();
+        let _ = harness
+            .node1
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node1.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
+        let _ = harness
+            .node2
+            .runtime
+            .handle_append_metadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 2,
+                prev_metadata_offset: harness.node2.runtime.metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController { controller_id: 2 }],
+            })
+            .unwrap();
+        harness
+            .node2
+            .runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "route.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                2,
+            )
+            .unwrap();
+
+        let response = harness
+            .node1
+            .runtime
+            .route_update_partition_leader(
+                &transport,
+                UpdatePartitionLeaderRequest {
+                    topic_name: "route.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 2,
+                    leader_epoch: 1,
+                },
+            )
+            .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(
+            harness
+                .node2
+                .runtime
+                .metadata_image()
+                .partition_leader_id("route.topic", 0),
+            Some(2)
+        );
     }
 
     #[test]

@@ -94,6 +94,17 @@ pub trait ClusterRpcTransport {
         }
     }
 
+    fn update_partition_leader_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdatePartitionLeaderRequest,
+    ) -> Result<UpdatePartitionLeaderResponse> {
+        match self.send_to(target, ClusterRpcRequest::UpdatePartitionLeader(request))? {
+            ClusterRpcResponse::UpdatePartitionLeader(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
     fn update_partition_replication(
         &self,
         request: UpdatePartitionReplicationRequest,
@@ -104,11 +115,36 @@ pub trait ClusterRpcTransport {
         }
     }
 
+    fn update_partition_replication_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdatePartitionReplicationRequest,
+    ) -> Result<UpdatePartitionReplicationResponse> {
+        match self.send_to(
+            target,
+            ClusterRpcRequest::UpdatePartitionReplication(request),
+        )? {
+            ClusterRpcResponse::UpdatePartitionReplication(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
     fn update_replica_progress(
         &self,
         request: UpdateReplicaProgressRequest,
     ) -> Result<UpdateReplicaProgressResponse> {
         match self.send(ClusterRpcRequest::UpdateReplicaProgress(request))? {
+            ClusterRpcResponse::UpdateReplicaProgress(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn update_replica_progress_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdateReplicaProgressRequest,
+    ) -> Result<UpdateReplicaProgressResponse> {
+        match self.send_to(target, ClusterRpcRequest::UpdateReplicaProgress(request))? {
             ClusterRpcResponse::UpdateReplicaProgress(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
@@ -145,11 +181,39 @@ pub trait ClusterRpcTransport {
         }
     }
 
+    fn begin_partition_reassignment_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: BeginPartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        match self.send_to(
+            target,
+            ClusterRpcRequest::BeginPartitionReassignment(request),
+        )? {
+            ClusterRpcResponse::BeginPartitionReassignment(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
     fn advance_partition_reassignment(
         &self,
         request: AdvancePartitionReassignmentRequest,
     ) -> Result<PartitionReassignmentResponse> {
         match self.send(ClusterRpcRequest::AdvancePartitionReassignment(request))? {
+            ClusterRpcResponse::AdvancePartitionReassignment(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
+
+    fn advance_partition_reassignment_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: AdvancePartitionReassignmentRequest,
+    ) -> Result<PartitionReassignmentResponse> {
+        match self.send_to(
+            target,
+            ClusterRpcRequest::AdvancePartitionReassignment(request),
+        )? {
             ClusterRpcResponse::AdvancePartitionReassignment(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
