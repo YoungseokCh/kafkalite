@@ -5067,6 +5067,30 @@ async fn process_control_plane_accepts_empty_replica_apply_as_noop() {
     assert!(response.accepted);
     assert_eq!(response.next_offset, 1);
 
+    let fetched = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "process.apply.noop.topic".to_string(),
+                partition_index: 0,
+                start_offset: 0,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(fetched) = fetched else {
+        panic!("unexpected response variant")
+    };
+    assert!(fetched.found);
+    assert_eq!(fetched.leader_log_end_offset, 1);
+    assert_eq!(fetched.records.len(), 1);
+    assert_eq!(fetched.records[0].offset, 0);
+
     let _ = child.kill();
     let _ = child.wait();
 }
