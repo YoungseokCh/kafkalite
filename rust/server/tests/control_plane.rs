@@ -3094,6 +3094,7 @@ async fn process_control_plane_rejects_invalid_reassignment_progression() {
         panic!("unexpected response variant")
     };
     assert!(!repeated.accepted);
+    assert_eq!(repeated.metadata_offset, invalid.metadata_offset);
 
     let _ = child.kill();
     let _ = child.wait();
