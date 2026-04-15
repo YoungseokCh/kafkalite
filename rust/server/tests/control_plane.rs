@@ -373,6 +373,39 @@ async fn two_process_cluster_accepts_control_plane_mutation_on_designated_contro
         .await
         .unwrap();
     assert!(replication.accepted);
+    let replica_fetch = transport
+        .send_to(
+            &node2.controller_target,
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                start_offset: 0,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(replica_fetch) = replica_fetch else {
+        panic!("unexpected response variant");
+    };
+    assert!(replica_fetch.found);
+    assert_eq!(replica_fetch.records.len(), 1);
+    let progress = transport
+        .update_replica_progress_to(
+            &node2.controller_target,
+            UpdateReplicaProgressRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 2,
+                broker_id: 9,
+                log_end_offset: 1,
+                last_caught_up_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(progress.accepted);
+    assert_eq!(progress.high_watermark, 1);
 
     let state = transport
         .send_to(
@@ -389,6 +422,7 @@ async fn two_process_cluster_accepts_control_plane_mutation_on_designated_contro
     };
     assert!(state.found);
     assert_eq!(state.leader_epoch, 2);
+    assert_eq!(state.high_watermark, 1);
 
     let _ = node1.child.kill();
     let _ = node1.child.wait();
