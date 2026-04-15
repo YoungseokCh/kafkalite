@@ -51,6 +51,33 @@ impl ClusterRuntime {
         &self.config
     }
 
+    pub fn can_write_metadata_locally(&self) -> bool {
+        if !self
+            .config
+            .has_role(crate::cluster::ProcessRole::Controller)
+        {
+            return false;
+        }
+        if self.config.controller_quorum_voters.len() <= 1 {
+            return true;
+        }
+        let leader = self.quorum_snapshot().leader_id;
+        leader.is_none() || leader == Some(self.config.node_id)
+    }
+
+    pub fn can_auto_create_topics_locally(&self) -> bool {
+        if !self
+            .config
+            .has_role(crate::cluster::ProcessRole::Controller)
+        {
+            return self.config.controller_quorum_voters.is_empty();
+        }
+        if self.config.controller_quorum_voters.len() <= 1 {
+            return true;
+        }
+        self.quorum_snapshot().leader_id == Some(self.config.node_id)
+    }
+
     pub fn controller_snapshot(&self) -> ControllerSnapshot {
         self.controller
             .lock()
@@ -280,6 +307,24 @@ impl ClusterRuntime {
         &self,
         request: UpdatePartitionLeaderRequest,
     ) -> Result<UpdatePartitionLeaderResponse> {
+        if !self.can_write_metadata_locally() {
+            return Ok(UpdatePartitionLeaderResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        }
+        let mut preview = self.metadata_image();
+        if !preview.update_partition_leader(
+            &request.topic_name,
+            request.partition_index,
+            request.leader_id,
+            request.leader_epoch,
+        ) {
+            return Ok(UpdatePartitionLeaderResponse {
+                accepted: false,
+                metadata_offset: preview.metadata_offset,
+            });
+        }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
             AppendMetadataRequest {
                 term,
@@ -303,6 +348,12 @@ impl ClusterRuntime {
         &self,
         request: UpdatePartitionReplicationRequest,
     ) -> Result<UpdatePartitionReplicationResponse> {
+        if !self.can_write_metadata_locally() {
+            return Ok(UpdatePartitionReplicationResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
             AppendMetadataRequest {
                 term,
@@ -327,6 +378,16 @@ impl ClusterRuntime {
         &self,
         request: UpdateReplicaProgressRequest,
     ) -> Result<UpdateReplicaProgressResponse> {
+        if !self.can_write_metadata_locally() {
+            return Ok(UpdateReplicaProgressResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+                high_watermark: self
+                    .metadata_image()
+                    .partition_high_watermark(&request.topic_name, request.partition_index)
+                    .unwrap_or(0),
+            });
+        }
         let topic_name = request.topic_name.clone();
         let partition_index = request.partition_index;
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
@@ -392,6 +453,12 @@ impl ClusterRuntime {
         &self,
         request: BeginPartitionReassignmentRequest,
     ) -> Result<PartitionReassignmentResponse> {
+        if !self.can_write_metadata_locally() {
+            return Ok(PartitionReassignmentResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        }
         let mut preview = self.metadata_image();
         if !preview.begin_partition_reassignment(
             &request.topic_name,
@@ -425,6 +492,12 @@ impl ClusterRuntime {
         &self,
         request: AdvancePartitionReassignmentRequest,
     ) -> Result<PartitionReassignmentResponse> {
+        if !self.can_write_metadata_locally() {
+            return Ok(PartitionReassignmentResponse {
+                accepted: false,
+                metadata_offset: self.metadata_image().metadata_offset,
+            });
+        }
         let mut preview = self.metadata_image();
         let preview_accepted = if request.step == crate::cluster::ReassignmentStep::Complete {
             preview.complete_partition_reassignment(&request.topic_name, request.partition_index)
@@ -902,6 +975,53 @@ mod tests {
         assert_eq!(partition.replicas, vec![1, 2]);
         assert!(partition.replica_progress.iter().any(|p| p.broker_id == 1));
         assert_eq!(partition.high_watermark, 10);
+    }
+
+    #[test]
+    fn update_partition_leader_rejects_older_epoch() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 4;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "leader.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+        let _ = runtime
+            .handle_update_partition_leader(UpdatePartitionLeaderRequest {
+                topic_name: "leader.topic".to_string(),
+                partition_index: 0,
+                leader_id: 9,
+                leader_epoch: 3,
+            })
+            .unwrap();
+
+        let rejected = runtime
+            .handle_update_partition_leader(UpdatePartitionLeaderRequest {
+                topic_name: "leader.topic".to_string(),
+                partition_index: 0,
+                leader_id: 8,
+                leader_epoch: 2,
+            })
+            .unwrap();
+
+        assert!(!rejected.accepted);
+        assert_eq!(
+            runtime
+                .metadata_image()
+                .partition_leader_id("leader.topic", 0),
+            Some(9)
+        );
+        assert_eq!(
+            runtime.metadata_image().topics[0].partitions[0].leader_epoch,
+            3
+        );
     }
 
     #[test]
