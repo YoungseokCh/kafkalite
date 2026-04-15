@@ -5108,6 +5108,30 @@ async fn process_control_plane_replica_fetch_beyond_log_end_returns_empty() {
     assert!(response.records.is_empty());
     assert_eq!(response.leader_log_end_offset, 1);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                topic_name: "process.fetch.eof.topic".to_string(),
+                partition_index: 0,
+                start_offset: 10,
+                max_records: 10,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::ReplicaFetch(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+
+    assert!(repeated.found);
+    assert!(repeated.records.is_empty());
+    assert_eq!(repeated.leader_log_end_offset, 1);
+
     let _ = child.kill();
     let _ = child.wait();
 }
