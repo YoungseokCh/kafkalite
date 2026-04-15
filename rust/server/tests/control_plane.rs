@@ -5,8 +5,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kafkalite_server::cluster::{
-    AppendMetadataRequest, BrokerHeartbeatRequest, ClusterRpcRequest, ClusterRpcResponse,
-    ClusterRpcTarget, GetPartitionStateRequest, RegisterBrokerRequest, TcpClusterRpcTransport,
+    AdvancePartitionReassignmentRequest, AppendMetadataRequest, BeginPartitionReassignmentRequest,
+    BrokerHeartbeatRequest, ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget,
+    GetPartitionStateRequest, RegisterBrokerRequest, TcpClusterRpcTransport,
     UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, VoteRequest,
 };
 use rdkafka::config::ClientConfig;
@@ -561,6 +562,34 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
     };
     assert!(state.found);
     assert_eq!(state.leader_epoch, 2);
+
+    let begin = transport
+        .begin_partition_reassignment_to(
+            &node2.controller_target,
+            BeginPartitionReassignmentRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![2, 9],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(begin.accepted);
+    let advance = transport
+        .send_to(
+            &node2.controller_target,
+            ClusterRpcRequest::AdvancePartitionReassignment(AdvancePartitionReassignmentRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                step: kafkalite_server::cluster::ReassignmentStep::Copying,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        advance,
+        ClusterRpcResponse::AdvancePartitionReassignment(_)
+    ));
 
     let _ = node1.child.kill();
     let _ = node1.child.wait();
