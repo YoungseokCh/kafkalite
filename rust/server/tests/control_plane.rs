@@ -3527,6 +3527,29 @@ async fn process_control_plane_rejects_same_term_conflicting_controller_append()
     };
     assert!(!rejected.accepted);
 
+    let repeated = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 2,
+                leader_id: 9,
+                prev_metadata_offset: accepted.last_metadata_offset,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 9,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::AppendMetadata(repeated) = repeated else {
+        panic!("unexpected response variant")
+    };
+    assert!(!repeated.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
