@@ -1142,6 +1142,11 @@ async fn process_control_plane_reregistration_bumps_broker_epoch() {
         .await
         .unwrap();
     assert!(latest_heartbeat_again.accepted);
+    assert_eq!(latest_heartbeat_again.leader_id, Some(1));
+    assert_eq!(
+        latest_heartbeat_again.controller_epoch,
+        third.controller_epoch
+    );
 
     let _ = child.kill();
     let _ = child.wait();
