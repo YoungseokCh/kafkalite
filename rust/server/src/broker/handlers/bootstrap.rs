@@ -60,6 +60,25 @@ pub async fn handle_metadata(
     if request.allow_auto_topic_creation
         && let Some(requested) = names.as_ref()
     {
+        if !broker.cluster().can_auto_create_topics_locally() {
+            let image = broker.cluster().metadata_image();
+            let topics = requested
+                .iter()
+                .map(|name| {
+                    MetadataResponseTopic::default()
+                        .with_error_code(6)
+                        .with_name(Some(TopicName(StrBytes::from(name.clone()))))
+                        .with_is_internal(false)
+                        .with_partitions(vec![])
+                })
+                .collect();
+            return Ok(MetadataResponse::default()
+                .with_throttle_time_ms(0)
+                .with_brokers(metadata_brokers(&image))
+                .with_cluster_id(Some(StrBytes::from(image.cluster_id.clone())))
+                .with_controller_id(BrokerId(image.controller_id))
+                .with_topics(topics));
+        }
         for topic in requested {
             broker.store().ensure_topic(
                 topic,

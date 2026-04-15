@@ -258,6 +258,9 @@ impl ClusterMetadataImage {
         else {
             return false;
         };
+        if leader_epoch < partition.leader_epoch {
+            return false;
+        }
         if partition.leader_id == leader_id && partition.leader_epoch == leader_epoch {
             return false;
         }
@@ -294,6 +297,9 @@ impl ClusterMetadataImage {
         else {
             return false;
         };
+        if leader_epoch < partition.leader_epoch {
+            return false;
+        }
         if partition.replicas == replicas
             && partition.isr == isr
             && partition.leader_epoch == leader_epoch
