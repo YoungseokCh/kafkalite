@@ -2424,6 +2424,23 @@ async fn process_control_plane_completes_valid_reassignment_lifecycle() {
     };
     assert_eq!(fetch.leader_epoch, 2);
 
+    let restart_reassignment = transport
+        .begin_partition_reassignment_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            BeginPartitionReassignmentRequest {
+                topic_name: "process.reassign.valid.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![3, 4],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(restart_reassignment.accepted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
