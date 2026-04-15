@@ -4074,7 +4074,9 @@ async fn process_control_plane_reports_new_leader_epoch_for_replica_fetch() {
     };
 
     assert!(response.found);
+    assert_eq!(response.leader_id, 1);
     assert_eq!(response.leader_epoch, 3);
+    assert_eq!(response.leader_log_end_offset, 1);
 
     let _ = child.kill();
     let _ = child.wait();
