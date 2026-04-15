@@ -213,6 +213,7 @@ async fn process_control_plane_accepts_partition_leader_mutation() {
         .await
         .unwrap();
     assert!(repeated.accepted);
+    assert!(repeated.metadata_offset >= update.metadata_offset);
 
     let state = transport
         .send_to(
