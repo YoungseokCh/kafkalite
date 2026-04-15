@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use kafkalite_server::cluster::{
     AppendMetadataRequest, BrokerHeartbeatRequest, ClusterRpcRequest, ClusterRpcResponse,
     ClusterRpcTarget, GetPartitionStateRequest, RegisterBrokerRequest, TcpClusterRpcTransport,
-    UpdatePartitionLeaderRequest, VoteRequest,
+    UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, VoteRequest,
 };
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -282,6 +282,20 @@ async fn two_process_cluster_accepts_control_plane_mutation_on_designated_contro
         .await
         .unwrap();
     assert!(update.accepted);
+    let replication = transport
+        .update_partition_replication_to(
+            &node2.controller_target,
+            UpdatePartitionReplicationRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![2, 9],
+                isr: vec![2],
+                leader_epoch: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(replication.accepted);
 
     let state = transport
         .send_to(
