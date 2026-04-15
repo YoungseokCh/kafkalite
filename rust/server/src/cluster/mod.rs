@@ -20,9 +20,10 @@ pub use quorum::{QuorumSnapshot, QuorumState};
 pub use replication::{PartitionReplicationState, ReplicaProgress};
 pub use rpc::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
-    BeginPartitionReassignmentRequest, BrokerHeartbeatRequest, BrokerHeartbeatResponse,
-    GetPartitionStateRequest, GetPartitionStateResponse, PartitionReassignmentResponse,
-    RegisterBrokerRequest, RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
+    ApplyReplicaRecordsRequest, ApplyReplicaRecordsResponse, BeginPartitionReassignmentRequest,
+    BrokerHeartbeatRequest, BrokerHeartbeatResponse, GetPartitionStateRequest,
+    GetPartitionStateResponse, PartitionReassignmentResponse, RegisterBrokerRequest,
+    RegisterBrokerResponse, ReplicaFetchRequest, ReplicaFetchResponse,
     UpdatePartitionLeaderRequest, UpdatePartitionLeaderResponse, UpdatePartitionReplicationRequest,
     UpdatePartitionReplicationResponse, UpdateReplicaProgressRequest,
     UpdateReplicaProgressResponse, VoteRequest, VoteResponse,
