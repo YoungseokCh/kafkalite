@@ -824,6 +824,8 @@ async fn process_control_plane_accepts_register_broker_and_heartbeat() {
         .await
         .unwrap();
     assert!(!wrong_node.accepted);
+    assert_eq!(wrong_node.leader_id, Some(1));
+    assert_eq!(wrong_node.controller_epoch, registration.controller_epoch);
 
     let _ = child.kill();
     let _ = child.wait();
