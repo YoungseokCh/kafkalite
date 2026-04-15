@@ -3770,6 +3770,9 @@ async fn process_control_plane_replica_fetch_reports_missing_topic() {
     };
     assert!(!response.found);
     assert!(response.records.is_empty());
+    assert_eq!(response.leader_id, -1);
+    assert_eq!(response.leader_epoch, -1);
+    assert_eq!(response.high_watermark, -1);
     assert_eq!(response.leader_log_end_offset, -1);
 
     let _ = child.kill();
