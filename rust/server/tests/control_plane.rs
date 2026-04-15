@@ -274,6 +274,9 @@ async fn process_control_plane_reports_missing_partition_state() {
     };
     assert!(!state.found);
     assert_eq!(state.leader_id, -1);
+    assert_eq!(state.leader_epoch, -1);
+    assert_eq!(state.high_watermark, -1);
+    assert_eq!(state.leader_log_end_offset, -1);
 
     let _ = child.kill();
     let _ = child.wait();
