@@ -949,6 +949,8 @@ async fn two_process_cluster_accepts_register_broker_and_heartbeat_on_designated
         .await
         .unwrap();
     assert!(registration.accepted);
+    assert_eq!(registration.leader_id, Some(2));
+    assert_eq!(registration.controller_epoch, 2);
     let heartbeat = transport
         .broker_heartbeat_to(
             &node2.controller_target,
