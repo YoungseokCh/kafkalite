@@ -2247,6 +2247,19 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
         .unwrap();
     assert!(!reassignment_rejected.accepted);
 
+    let reassignment_rejected_again = transport
+        .begin_partition_reassignment_to(
+            &node1.controller_target,
+            BeginPartitionReassignmentRequest {
+                topic_name: "two.process.authority.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![2, 3],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!reassignment_rejected_again.accepted);
+
     let reassignment_advance_rejected = transport
         .send_to(
             &node1.controller_target,
