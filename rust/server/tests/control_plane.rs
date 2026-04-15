@@ -687,6 +687,7 @@ async fn process_control_plane_reregistration_bumps_broker_epoch() {
 
     assert!(first.accepted);
     assert!(second.accepted);
+    assert_eq!(first.leader_id, second.leader_id);
     assert!(second.broker_epoch > first.broker_epoch);
 
     let heartbeat = transport
