@@ -2050,6 +2050,8 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
         .await
         .unwrap();
     assert!(!stale_heartbeat_again.accepted);
+    assert_eq!(stale_heartbeat_again.leader_id, Some(2));
+    assert_eq!(stale_heartbeat_again.controller_epoch, 2);
     let stale = transport
         .send_to(
             &node2.controller_target,
