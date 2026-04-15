@@ -950,6 +950,7 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(heartbeat.accepted);
+    assert_eq!(heartbeat.leader_id, Some(2));
     let update = transport
         .update_partition_leader_to(
             &node2.controller_target,
