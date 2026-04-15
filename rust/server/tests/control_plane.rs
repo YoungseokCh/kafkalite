@@ -5628,6 +5628,7 @@ async fn process_control_plane_replica_fetch_beyond_log_end_returns_empty() {
     assert_eq!(response.leader_id, 1);
     assert!(response.leader_epoch >= 0);
     assert!(response.records.is_empty());
+    assert_eq!(response.high_watermark, 0);
     assert_eq!(response.leader_log_end_offset, 1);
 
     let repeated = transport
@@ -5654,6 +5655,7 @@ async fn process_control_plane_replica_fetch_beyond_log_end_returns_empty() {
     assert_eq!(repeated.leader_id, response.leader_id);
     assert_eq!(repeated.leader_epoch, response.leader_epoch);
     assert!(repeated.records.is_empty());
+    assert_eq!(repeated.high_watermark, response.high_watermark);
     assert_eq!(repeated.leader_log_end_offset, 1);
 
     let _ = child.kill();
