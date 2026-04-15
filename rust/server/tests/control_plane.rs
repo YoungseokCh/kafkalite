@@ -254,6 +254,7 @@ async fn process_control_plane_accepts_partition_leader_mutation() {
     assert!(repeated.found);
     assert_eq!(repeated.leader_id, state.leader_id);
     assert_eq!(repeated.leader_epoch, state.leader_epoch);
+    assert_eq!(repeated.high_watermark, state.high_watermark);
     assert_eq!(repeated.leader_log_end_offset, state.leader_log_end_offset);
 
     let _ = child.kill();
