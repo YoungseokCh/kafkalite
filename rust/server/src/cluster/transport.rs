@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::cluster::rpc::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, AppendMetadataResponse,
@@ -15,7 +16,7 @@ use crate::cluster::rpc::{
 use crate::cluster::{ClusterConfig, ClusterRuntime};
 use crate::store::{BrokerRecord, Storage};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClusterRpcRequest {
     AppendMetadata(AppendMetadataRequest),
     RegisterBroker(RegisterBrokerRequest),
@@ -30,7 +31,7 @@ pub enum ClusterRpcRequest {
     Vote(VoteRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClusterRpcResponse {
     AppendMetadata(AppendMetadataResponse),
     RegisterBroker(RegisterBrokerResponse),
@@ -45,7 +46,7 @@ pub enum ClusterRpcResponse {
     Vote(VoteResponse),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterRpcTarget {
     pub node_id: i32,
     pub host: String,

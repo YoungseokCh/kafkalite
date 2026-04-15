@@ -1,19 +1,20 @@
 use crate::cluster::metadata::MetadataRecord;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoteRequest {
     pub term: i64,
     pub candidate_id: i32,
     pub last_metadata_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoteResponse {
     pub term: i64,
     pub vote_granted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendMetadataRequest {
     pub term: i64,
     pub leader_id: i32,
@@ -21,21 +22,21 @@ pub struct AppendMetadataRequest {
     pub records: Vec<MetadataRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendMetadataResponse {
     pub term: i64,
     pub accepted: bool,
     pub last_metadata_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterBrokerRequest {
     pub node_id: i32,
     pub advertised_host: String,
     pub advertised_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterBrokerResponse {
     pub accepted: bool,
     pub broker_epoch: i64,
@@ -43,21 +44,21 @@ pub struct RegisterBrokerResponse {
     pub leader_id: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerHeartbeatRequest {
     pub node_id: i32,
     pub broker_epoch: i64,
     pub timestamp_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerHeartbeatResponse {
     pub accepted: bool,
     pub controller_epoch: i64,
     pub leader_id: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePartitionLeaderRequest {
     pub topic_name: String,
     pub partition_index: i32,
@@ -65,13 +66,13 @@ pub struct UpdatePartitionLeaderRequest {
     pub leader_epoch: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePartitionLeaderResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePartitionReplicationRequest {
     pub topic_name: String,
     pub partition_index: i32,
@@ -80,13 +81,13 @@ pub struct UpdatePartitionReplicationRequest {
     pub leader_epoch: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePartitionReplicationResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateReplicaProgressRequest {
     pub topic_name: String,
     pub partition_index: i32,
@@ -96,20 +97,20 @@ pub struct UpdateReplicaProgressRequest {
     pub last_caught_up_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateReplicaProgressResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
     pub high_watermark: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetPartitionStateRequest {
     pub topic_name: String,
     pub partition_index: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetPartitionStateResponse {
     pub found: bool,
     pub leader_id: i32,
@@ -118,7 +119,7 @@ pub struct GetPartitionStateResponse {
     pub leader_log_end_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaFetchRequest {
     pub topic_name: String,
     pub partition_index: i32,
@@ -126,7 +127,7 @@ pub struct ReplicaFetchRequest {
     pub max_records: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaFetchResponse {
     pub found: bool,
     pub leader_id: i32,
@@ -136,21 +137,21 @@ pub struct ReplicaFetchResponse {
     pub records: Vec<crate::store::BrokerRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeginPartitionReassignmentRequest {
     pub topic_name: String,
     pub partition_index: i32,
     pub target_replicas: Vec<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvancePartitionReassignmentRequest {
     pub topic_name: String,
     pub partition_index: i32,
     pub step: crate::cluster::ReassignmentStep,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionReassignmentResponse {
     pub accepted: bool,
     pub metadata_offset: i64,
