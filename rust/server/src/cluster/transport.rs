@@ -241,6 +241,20 @@ impl TcpClusterRpcTransport {
             other => bail!("unexpected RPC response: {other:?}"),
         }
     }
+
+    pub async fn update_replica_progress_to(
+        &self,
+        target: &ClusterRpcTarget,
+        request: UpdateReplicaProgressRequest,
+    ) -> Result<UpdateReplicaProgressResponse> {
+        match self
+            .send_to(target, ClusterRpcRequest::UpdateReplicaProgress(request))
+            .await?
+        {
+            ClusterRpcResponse::UpdateReplicaProgress(response) => Ok(response),
+            other => bail!("unexpected RPC response: {other:?}"),
+        }
+    }
 }
 
 pub trait ClusterRpcTransport {

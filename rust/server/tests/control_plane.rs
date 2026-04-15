@@ -8,7 +8,8 @@ use kafkalite_server::cluster::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, BeginPartitionReassignmentRequest,
     BrokerHeartbeatRequest, ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget,
     GetPartitionStateRequest, RegisterBrokerRequest, ReplicaFetchRequest, TcpClusterRpcTransport,
-    UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, VoteRequest,
+    UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, UpdateReplicaProgressRequest,
+    VoteRequest,
 };
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -635,6 +636,22 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(replication.accepted);
+    let progress = transport
+        .update_replica_progress_to(
+            &node2.controller_target,
+            UpdateReplicaProgressRequest {
+                topic_name: "two.process.workflow.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 2,
+                broker_id: 9,
+                log_end_offset: 1,
+                last_caught_up_ms: 123,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(progress.accepted);
+    assert_eq!(progress.high_watermark, 1);
 
     let state = transport
         .send_to(
@@ -651,6 +668,7 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
     };
     assert!(state.found);
     assert_eq!(state.leader_epoch, 2);
+    assert_eq!(state.high_watermark, 1);
 
     let begin = transport
         .begin_partition_reassignment_to(
