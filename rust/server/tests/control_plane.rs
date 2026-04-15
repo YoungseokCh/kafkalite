@@ -2287,6 +2287,20 @@ async fn two_process_cluster_rejects_broker_control_on_non_controller_node() {
     assert!(!rejected.accepted);
     assert_eq!(rejected.leader_id, Some(2));
     assert_eq!(rejected.controller_epoch, 1);
+    let rejected_again = transport
+        .register_broker_to(
+            &node1.controller_target,
+            RegisterBrokerRequest {
+                node_id: 9,
+                advertised_host: "127.0.0.1".to_string(),
+                advertised_port: 39092,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!rejected_again.accepted);
+    assert_eq!(rejected_again.leader_id, Some(2));
+    assert_eq!(rejected_again.controller_epoch, 1);
 
     let accepted = transport
         .register_broker_to(
@@ -2315,6 +2329,20 @@ async fn two_process_cluster_rejects_broker_control_on_non_controller_node() {
     assert!(!heartbeat_rejected.accepted);
     assert_eq!(heartbeat_rejected.leader_id, Some(2));
     assert_eq!(heartbeat_rejected.controller_epoch, 1);
+    let heartbeat_rejected_again = transport
+        .broker_heartbeat_to(
+            &node1.controller_target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: accepted.broker_epoch,
+                timestamp_ms: 124,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!heartbeat_rejected_again.accepted);
+    assert_eq!(heartbeat_rejected_again.leader_id, Some(2));
+    assert_eq!(heartbeat_rejected_again.controller_epoch, 1);
 
     let heartbeat_accepted = transport
         .broker_heartbeat_to(
