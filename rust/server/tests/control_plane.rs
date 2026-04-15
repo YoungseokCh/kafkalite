@@ -3911,6 +3911,7 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
         panic!("unexpected response variant")
     };
     assert!(fetched.found);
+    assert_eq!(fetched.high_watermark, 1);
     assert_eq!(fetched.records.len(), 1);
     assert_eq!(fetched.records[0].offset, 0);
 
