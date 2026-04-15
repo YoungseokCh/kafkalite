@@ -3828,6 +3828,27 @@ async fn process_control_plane_reports_higher_term_vote() {
     assert_eq!(conflicting.term, 5);
     assert!(!conflicting.vote_granted);
 
+    let conflicting_again = transport
+        .send_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ClusterRpcRequest::Vote(VoteRequest {
+                term: 5,
+                candidate_id: 2,
+                last_metadata_offset: -1,
+            }),
+        )
+        .await
+        .unwrap();
+    let ClusterRpcResponse::Vote(conflicting_again) = conflicting_again else {
+        panic!("unexpected response variant")
+    };
+    assert_eq!(conflicting_again.term, 5);
+    assert!(!conflicting_again.vote_granted);
+
     let _ = child.kill();
     let _ = child.wait();
 }
