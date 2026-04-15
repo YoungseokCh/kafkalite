@@ -5157,6 +5157,29 @@ async fn process_control_plane_rejects_replica_apply_for_missing_partition() {
 
     assert!(err.contains("UnknownTopicOrPartition") || err.contains("unknown topic or partition"));
 
+    let repeated_err = transport
+        .apply_replica_records_to(
+            &ClusterRpcTarget {
+                node_id: 1,
+                host: "127.0.0.1".to_string(),
+                port: controller_port,
+            },
+            ApplyReplicaRecordsRequest {
+                topic_name: "missing.apply.topic".to_string(),
+                partition_index: 0,
+                records: vec![],
+                now_ms: 124,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        repeated_err.contains("UnknownTopicOrPartition")
+            || repeated_err.contains("unknown topic or partition")
+    );
+
     let _ = child.kill();
     let _ = child.wait();
 }
