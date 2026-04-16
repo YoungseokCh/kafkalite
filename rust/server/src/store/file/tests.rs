@@ -756,6 +756,162 @@ fn stale_producer_epoch_is_rejected() {
     assert!(matches!(result, Err(StoreError::StaleProducerEpoch { .. })));
 }
 
+#[test]
+fn unknown_producer_id_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: 10,
+        producer_epoch: 0,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let result = store.append_records("unknown-producer.topic", 0, &records, 10);
+    assert!(matches!(result, Err(StoreError::UnknownProducerId { .. })));
+}
+
+#[test]
+fn non_contiguous_idempotent_sequence_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let first = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("seq.topic", 0, &first, 10)
+        .expect("first append should succeed");
+
+    let gapped = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 20,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 2,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value-2")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let result = store.append_records("seq.topic", 0, &gapped, 20);
+
+    assert!(matches!(
+        result,
+        Err(StoreError::InvalidProducerSequence { .. })
+    ));
+}
+
+#[test]
+fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store.append_records("replica.topic", 0, &seed, 1).unwrap();
+
+    let misaligned = vec![BrokerRecord {
+        offset: 5,
+        timestamp_ms: 2,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"m")),
+        value: Some(Bytes::from_static(b"m")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let misaligned_err = store
+        .append_replica_records("replica.topic", 0, &misaligned, 2)
+        .unwrap_err()
+        .to_string();
+    assert!(misaligned_err.contains("expected offset 1"));
+
+    let non_contiguous = vec![
+        BrokerRecord {
+            offset: 1,
+            timestamp_ms: 3,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"a")),
+            value: Some(Bytes::from_static(b"a")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 3,
+            timestamp_ms: 4,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"b")),
+            value: Some(Bytes::from_static(b"b")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    let non_contiguous_err = store
+        .append_replica_records("replica.topic", 0, &non_contiguous, 3)
+        .unwrap_err()
+        .to_string();
+    assert!(non_contiguous_err.contains("must be contiguous"));
+}
+
+#[test]
+fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica-skip.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("replica-skip.topic", 0, &seed, 1)
+        .unwrap();
+
+    let stale = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 2,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"stale")),
+        value: Some(Bytes::from_static(b"stale")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let latest = store
+        .append_replica_records("replica-skip.topic", 0, &stale, 2)
+        .unwrap();
+
+    assert_eq!(latest, 1);
+}
+
 fn encode_subscription(topics: &[&str]) -> Vec<u8> {
     let subscription = ConsumerProtocolSubscription::default().with_topics(
         topics
