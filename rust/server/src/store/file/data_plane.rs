@@ -338,9 +338,8 @@ fn duplicate_append_result(
 }
 
 fn validate_replica_offsets(next_offset: i64, records: &[BrokerRecord]) -> Result<()> {
-    let Some(first) = records.first() else {
-        return Ok(());
-    };
+    debug_assert!(!records.is_empty(), "replica append must contain records");
+    let first = &records[0];
     if first.offset != next_offset {
         return Err(StoreError::Protocol(format!(
             "replica append expected offset {next_offset} but started at {}",
