@@ -234,6 +234,89 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
 }
 
 #[test]
+fn committed_offset_resume_survives_restart_after_tombstone() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-mixed", 1, 10).unwrap();
+    let subscription = encode_subscription(&["topic-mixed"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-mixed",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let records = vec![
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"key-one")),
+            value: Some(Bytes::from_static(b"payload-one")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 11,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"key-two")),
+            value: None,
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 12,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 2,
+            key: None,
+            value: Some(Bytes::from_static(b"payload-three")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    store
+        .append_records("topic-mixed", 0, &records, 100)
+        .unwrap();
+    store
+        .commit_offset(commit_request(
+            "group-mixed",
+            "member-a",
+            joined.generation_id,
+            "topic-mixed",
+            0,
+            2,
+            200,
+        ))
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened
+            .fetch_offset("group-mixed", "topic-mixed", 0)
+            .unwrap(),
+        Some(2)
+    );
+
+    let fetched = reopened.fetch_records("topic-mixed", 0, 2, 10).unwrap();
+    assert_eq!(fetched.records.len(), 1);
+    assert_eq!(fetched.records[0].offset, 2);
+    assert_eq!(fetched.records[0].key, None);
+    assert_eq!(
+        fetched.records[0].value,
+        Some(Bytes::from_static(b"payload-three"))
+    );
+}
+
+#[test]
 fn heartbeat_does_not_grow_state_journal_but_offset_commit_does() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -579,6 +662,36 @@ fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
 
     assert_eq!(first, duplicate);
     assert_eq!(fetched.records.len(), 1);
+}
+
+#[test]
+fn non_idempotent_retries_are_not_deduplicated() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let first = store
+        .append_records("nonidempotent.events", 0, &records, 10)
+        .unwrap();
+    let second = store
+        .append_records("nonidempotent.events", 0, &records, 20)
+        .unwrap();
+    let fetched = store
+        .fetch_records("nonidempotent.events", 0, 0, 10)
+        .unwrap();
+
+    assert_eq!(first, (0, 0));
+    assert_eq!(second, (1, 1));
+    assert_eq!(fetched.records.len(), 2);
 }
 
 #[test]

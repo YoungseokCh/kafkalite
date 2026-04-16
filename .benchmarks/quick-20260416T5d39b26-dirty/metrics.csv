@@ -1,0 +1,2 @@
+name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes
+bench.produce.small,1000,100,1,47529.56,21.04,2103.95,46.67,50.00,50.05,5572,5572,370639,185000,1764,1512,0,181619

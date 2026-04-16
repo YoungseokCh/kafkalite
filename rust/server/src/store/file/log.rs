@@ -132,6 +132,46 @@ impl RecordLog {
         Ok(records)
     }
 
+    pub fn read_records_for_client(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<Vec<BrokerRecord>> {
+        if !self.segment_path(topic, partition).exists() {
+            return Ok(Vec::new());
+        }
+        let start_position = self.lookup_position(topic, partition, start_offset)?;
+        let mut file = File::open(self.segment_path(topic, partition))?;
+        file.seek(SeekFrom::Start(start_position))?;
+        let mut reader = BufReader::new(file);
+        let mut records = Vec::new();
+        let mut visible_count = 0_usize;
+        loop {
+            let mut len = [0_u8; 4];
+            if reader.read_exact(&mut len).is_err() {
+                break;
+            }
+            let mut payload = vec![0_u8; u32::from_le_bytes(len) as usize];
+            reader.read_exact(&mut payload)?;
+            let batch = StoredBatch::decode_binary(&payload)?;
+            if batch.last_offset < start_offset {
+                continue;
+            }
+            visible_count += batch
+                .records
+                .iter()
+                .filter(|record| record.offset >= start_offset)
+                .count();
+            records.extend(batch.records);
+            if visible_count >= limit {
+                return Ok(records);
+            }
+        }
+        Ok(records)
+    }
+
     pub fn earliest_offset(&self, topic: &str, partition: i32) -> Result<Option<(i64, i64)>> {
         let records = self.read_records(topic, partition, 0, 1)?;
         Ok(records

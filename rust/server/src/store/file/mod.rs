@@ -233,6 +233,27 @@ impl Storage for FileStore {
         })
     }
 
+    fn fetch_records_for_client(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<FetchResult> {
+        let high_watermark = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .high_watermark(topic, partition)?;
+        let records = self
+            .logs
+            .read_records_for_client(topic, partition, start_offset, limit)?;
+        Ok(FetchResult {
+            high_watermark,
+            records,
+        })
+    }
+
     fn append_replica_records(
         &self,
         topic: &str,

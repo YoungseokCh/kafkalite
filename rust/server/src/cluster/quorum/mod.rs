@@ -103,7 +103,7 @@ impl QuorumState {
 
     pub fn has_majority(&self, votes: usize) -> bool {
         let voters = self.voters.len().max(1);
-        votes >= (voters / 2) + 1
+        votes > (voters / 2)
     }
 
     pub fn is_voter(&self, node_id: i32) -> bool {
@@ -119,13 +119,15 @@ mod tests {
 
     #[test]
     fn candidate_to_leader_bumps_controller_epoch() {
-        let mut config = ClusterConfig::default();
-        config.node_id = 2;
-        config.controller_quorum_voters = vec![ControllerQuorumVoter {
+        let config = ClusterConfig {
             node_id: 2,
-            host: "node2".to_string(),
-            port: 9093,
-        }];
+            controller_quorum_voters: vec![ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            }],
+            ..ClusterConfig::default()
+        };
         let mut state = QuorumState::new(&config);
 
         state.become_candidate();
