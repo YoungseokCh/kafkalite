@@ -198,12 +198,21 @@ mod tests {
     #[tokio::test]
     async fn metadata_without_topic_filter_returns_all_known_topics() {
         let broker = test_broker();
+        let create = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("all.topic".to_string())),
+            ))]));
+        let _ = handle_metadata(&broker, create).await.unwrap();
 
-        let response = handle_metadata(&broker, MetadataRequest::default())
-            .await
-            .unwrap();
+        let mut request = MetadataRequest::default();
+        request.topics = None;
 
-        assert!(response.topics.is_empty());
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 0);
+        assert_eq!(response.topics[0].name.as_ref().unwrap().0.to_string(), "all.topic");
     }
 
     #[tokio::test]
