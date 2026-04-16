@@ -104,11 +104,7 @@ impl SnapshotSet {
                 next_producer_id: 1,
                 sequences: BTreeMap::new(),
             }),
-            groups: if DEFAULT_POLICY.persist_group_membership {
-                read_json(root.join("state/groups.snapshot"))?.unwrap_or_default()
-            } else {
-                BTreeMap::new()
-            },
+            groups: BTreeMap::new(),
             offsets: read_json(root.join("state/offsets.snapshot"))?.unwrap_or_default(),
         })
     }
@@ -138,11 +134,7 @@ impl StateJournal {
             match entry {
                 JournalEntry::Topics(topics) => snapshots.topics = topics,
                 JournalEntry::Producers(producers) => snapshots.producers = producers,
-                JournalEntry::Groups(groups) => {
-                    if DEFAULT_POLICY.persist_group_membership {
-                        snapshots.groups = groups;
-                    }
-                }
+                JournalEntry::Groups(_) => {}
                 JournalEntry::Offsets(offsets) => snapshots.offsets = offsets,
             }
         }
@@ -265,6 +257,38 @@ mod tests {
         assert_eq!(snapshots.producers.next_producer_id, 1);
         assert!(snapshots.topics.is_empty());
         assert!(snapshots.offsets.is_empty());
+    }
+
+    #[test]
+    fn snapshot_load_reads_existing_producer_snapshot() {
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("producers.snapshot"),
+            r#"{"next_producer_id":9,"sequences":{}}"#,
+        )
+        .unwrap();
+
+        let snapshots = SnapshotSet::load(dir.path()).unwrap();
+
+        assert_eq!(snapshots.producers.next_producer_id, 9);
+    }
+
+    #[test]
+    fn snapshot_load_ignores_groups_snapshot_by_policy() {
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("groups.snapshot"),
+            r#"{"group-a":{"generation_id":1,"protocol_type":"consumer","protocol_name":"range","leader_member_id":null,"members":{},"updated_at_unix_ms":1}}"#,
+        )
+        .unwrap();
+
+        let snapshots = SnapshotSet::load(dir.path()).unwrap();
+
+        assert!(snapshots.groups.is_empty());
     }
 
     #[test]
