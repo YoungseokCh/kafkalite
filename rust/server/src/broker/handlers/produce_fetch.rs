@@ -577,6 +577,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn produce_returns_unknown_when_metadata_is_local_but_store_partition_missing() {
+        let broker = test_broker();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "missing-local.topic".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 1,
+                            leader_id: 1,
+                            leader_epoch: 1,
+                            high_watermark: 0,
+                            replicas: vec![1],
+                            isr: vec![1],
+                            replica_progress: vec![],
+                            reassignment: None,
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let response = handle_produce(
+            &broker,
+            produce_request_for_partition("missing-local.topic", 1, -1, -1, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.responses[0].partition_responses[0].error_code,
+            UNKNOWN_TOPIC_OR_PARTITION
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_uses_metadata_high_watermark_when_replication_progress_exists() {
         let broker = test_broker();
         broker.store().ensure_topic("hw.topic", 1, 0).unwrap();
