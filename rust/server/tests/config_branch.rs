@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use kafkalite_server::Config;
 use tempfile::TempDir;
+
+static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn write_config(dir: &Path, content: &str) -> PathBuf {
     let path = dir.join("server.properties");
@@ -117,6 +120,31 @@ fn controller_only_role_does_not_require_plaintext_listener() {
     assert_eq!(config.cluster.process_roles.len(), 1);
     assert_eq!(config.cluster.node_id, 1);
     assert!(config.cluster.listeners.contains_key("CONTROLLER"));
+}
+
+#[test]
+fn load_uses_kafkalite_config_env_when_path_not_provided() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = write_config(dir.path(), "listeners=PLAINTEXT://127.0.0.1:19092\n");
+
+    unsafe { std::env::set_var("KAFKALITE_CONFIG", path.to_str().unwrap()) };
+    let loaded = Config::load(None);
+    unsafe { std::env::remove_var("KAFKALITE_CONFIG") };
+
+    let config = loaded.unwrap();
+    assert_eq!(config.broker.host, "127.0.0.1");
+    assert_eq!(config.broker.port, 19092);
+}
+
+#[test]
+fn load_without_path_or_env_reports_missing_configuration() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    unsafe { std::env::remove_var("KAFKALITE_CONFIG") };
+
+    let err = Config::load(None).unwrap_err().to_string();
+
+    assert!(err.contains("No configuration provided"));
 }
 
 #[test]

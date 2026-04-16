@@ -212,7 +212,10 @@ mod tests {
 
         assert_eq!(response.topics.len(), 1);
         assert_eq!(response.topics[0].error_code, 0);
-        assert_eq!(response.topics[0].name.as_ref().unwrap().0.to_string(), "all.topic");
+        assert_eq!(
+            response.topics[0].name.as_ref().unwrap().0.to_string(),
+            "all.topic"
+        );
     }
 
     #[tokio::test]
