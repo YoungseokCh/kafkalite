@@ -1330,6 +1330,84 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn auto_create_noops_for_out_of_range_partitions() {
+        let broker = test_broker();
+
+        maybe_auto_create_topic(&broker, "bounds.topic", -1, 0).unwrap();
+        maybe_auto_create_topic(
+            &broker,
+            "bounds.topic",
+            broker.config().storage.default_partitions,
+            0,
+        )
+        .unwrap();
+
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["bounds.topic".to_string()]), 0)
+            .unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_create_noops_without_local_controller_authority() {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join("data"), 9092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9094,
+            },
+        ];
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        let broker = KafkaBroker::new(config, store).unwrap();
+
+        maybe_auto_create_topic(&broker, "blocked.topic", 0, 0).unwrap();
+
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["blocked.topic".to_string()]), 0)
+            .unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_offsets_sets_leader_epoch_by_api_version() {
+        let broker = test_broker();
+        let _ = handle_produce(&broker, produce_request("offsets.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        let request = ListOffsetsRequest::default().with_topics(vec![
+            kafka_protocol::messages::list_offsets_request::ListOffsetsTopic::default()
+                .with_name(TopicName(StrBytes::from("offsets.topic".to_string())))
+                .with_partitions(vec![
+                    kafka_protocol::messages::list_offsets_request::ListOffsetsPartition::default()
+                        .with_partition_index(0)
+                        .with_timestamp(-1),
+                ]),
+        ]);
+
+        let v3 = handle_list_offsets(&broker, request.clone(), 3)
+            .await
+            .unwrap();
+        let v4 = handle_list_offsets(&broker, request, 4).await.unwrap();
+
+        assert_eq!(v3.topics[0].partitions[0].error_code, 0);
+        assert_eq!(v3.topics[0].partitions[0].leader_epoch, -1);
+        assert_eq!(v4.topics[0].partitions[0].error_code, 0);
+        assert_eq!(v4.topics[0].partitions[0].leader_epoch, 0);
+    }
+
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
         let config = Config::single_node(dir.join("data"), 9092, 1);
