@@ -412,6 +412,48 @@ fn reassignment_mutations_reject_when_runtime_is_not_metadata_leader() {
 }
 
 #[test]
+fn update_partition_leader_rejects_when_runtime_is_not_metadata_leader() {
+    let dir = tempdir().unwrap();
+    let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+    config.cluster.process_roles = vec![ProcessRole::Broker];
+    config.cluster.controller_quorum_voters = voters(&[1, 2]);
+    let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+    let metadata_offset = runtime.metadata_image().metadata_offset;
+    let response = runtime
+        .handle_update_partition_leader(UpdatePartitionLeaderRequest {
+            topic_name: "leader-blocked.topic".to_string(),
+            partition_index: 0,
+            leader_id: 2,
+            leader_epoch: 1,
+        })
+        .unwrap();
+
+    assert!(!response.accepted);
+    assert_eq!(response.metadata_offset, metadata_offset);
+}
+
+#[test]
+fn begin_reassignment_rejects_missing_partition_when_runtime_is_writable() {
+    let dir = tempdir().unwrap();
+    let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+    config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+    let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+    let metadata_offset = runtime.metadata_image().metadata_offset;
+    let response = runtime
+        .handle_begin_partition_reassignment(BeginPartitionReassignmentRequest {
+            topic_name: "reassign-missing-preview.topic".to_string(),
+            partition_index: 0,
+            target_replicas: vec![2],
+        })
+        .unwrap();
+
+    assert!(!response.accepted);
+    assert_eq!(response.metadata_offset, metadata_offset);
+}
+
+#[test]
 fn route_methods_take_local_fast_path_when_runtime_is_writable() {
     let dir = tempdir().unwrap();
     let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
