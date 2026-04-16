@@ -382,6 +382,36 @@ fn advance_reassignment_rejects_when_no_reassignment_exists() {
 }
 
 #[test]
+fn reassignment_mutations_reject_when_runtime_is_not_metadata_leader() {
+    let dir = tempdir().unwrap();
+    let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+    config.cluster.process_roles = vec![ProcessRole::Broker];
+    config.cluster.controller_quorum_voters = voters(&[1, 2]);
+    let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+    let metadata_offset = runtime.metadata_image().metadata_offset;
+    let begin = runtime
+        .handle_begin_partition_reassignment(BeginPartitionReassignmentRequest {
+            topic_name: "reassign-blocked.topic".to_string(),
+            partition_index: 0,
+            target_replicas: vec![2],
+        })
+        .unwrap();
+    assert!(!begin.accepted);
+    assert_eq!(begin.metadata_offset, metadata_offset);
+
+    let advance = runtime
+        .handle_advance_partition_reassignment(AdvancePartitionReassignmentRequest {
+            topic_name: "reassign-blocked.topic".to_string(),
+            partition_index: 0,
+            step: ReassignmentStep::Copying,
+        })
+        .unwrap();
+    assert!(!advance.accepted);
+    assert_eq!(advance.metadata_offset, metadata_offset);
+}
+
+#[test]
 fn route_methods_take_local_fast_path_when_runtime_is_writable() {
     let dir = tempdir().unwrap();
     let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
