@@ -104,6 +104,22 @@ make publish-dry-run-dirty
 - `make publish-dry-run` validates the clean release candidate that would be uploaded to crates.io
 - `make publish-dry-run-dirty` is a local-only escape hatch for package iteration before committing
 
+## Fuzzing runbook (PR1)
+
+From the repository root, after installing `cargo-fuzz`:
+
+```bash
+cargo install cargo-fuzz
+cd rust/server/fuzz
+cargo fuzz list
+cargo fuzz run protocol_peek_header -- -runs=1000
+cargo fuzz run cluster_codec_decode -- -runs=1000
+```
+
+- `protocol_peek_header` exercises `peek_key_and_version` parsing behavior on raw request bytes.
+- `cluster_codec_decode` exercises both `cluster::codec::{decode_request, decode_response}`.
+- Keep fuzz corpora/artifacts under `rust/server/fuzz/` and record bounded-smoke outcomes in PR evidence.
+
 Current `make test-python` coverage includes:
 
 - basic `AIOKafkaProducer.send_and_wait` + `AIOKafkaConsumer.getone` roundtrip on partition `0`
