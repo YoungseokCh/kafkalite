@@ -209,6 +209,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_can_auto_create_requested_topic_locally() {
         let broker = test_broker();
+        assert!(broker.cluster().can_auto_create_topics_locally());
         let request = MetadataRequest::default()
             .with_allow_auto_topic_creation(true)
             .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
@@ -228,9 +229,92 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn metadata_requested_topic_without_auto_create_returns_unknown_topic() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(false)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("missing.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 3);
+    }
+
+    #[tokio::test]
+    async fn metadata_auto_create_is_ignored_without_local_controller_authority() {
+        let broker = non_writable_broker();
+        assert!(!broker.cluster().can_auto_create_topics_locally());
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("blocked.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 3);
+    }
+
+    #[tokio::test]
+    async fn metadata_uses_registered_broker_list_when_present() {
+        let broker = test_broker();
+        let registration = broker
+            .cluster()
+            .handle_register_broker(
+                crate::cluster::RegisterBrokerRequest {
+                    node_id: 7,
+                    advertised_host: "registered-broker".to_string(),
+                    advertised_port: 39092,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(registration.accepted);
+
+        let response = handle_metadata(&broker, MetadataRequest::default())
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .brokers
+                .iter()
+                .any(|entry| entry.node_id.0 == 7 && entry.host.to_string() == "registered-broker")
+        );
+    }
+
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
         let config = Config::single_node(dir.join("data"), 9092, 1);
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
+    }
+
+    fn non_writable_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join("data"), 9092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![
+            crate::cluster::ProcessRole::Broker,
+            crate::cluster::ProcessRole::Controller,
+        ];
+        config.cluster.controller_quorum_voters = vec![
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9094,
+            },
+        ];
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
         KafkaBroker::new(config, store).unwrap()
     }
