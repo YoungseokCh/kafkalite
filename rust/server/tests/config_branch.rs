@@ -118,3 +118,25 @@ fn controller_only_role_does_not_require_plaintext_listener() {
     assert_eq!(config.cluster.node_id, 1);
     assert!(config.cluster.listeners.contains_key("CONTROLLER"));
 }
+
+#[test]
+fn rejects_empty_log_dirs_value() {
+    let err = load_err("listeners=PLAINTEXT://:19092\nlog.dirs=, ,\n");
+    assert!(err.contains("expected one directory"));
+}
+
+#[test]
+fn rejects_controller_role_without_quorum_voters() {
+    let err = load_err(
+        "process.roles=broker,controller\nnode.id=1\nlisteners=PLAINTEXT://:19092,CONTROLLER://:19093\ncontroller.listener.names=CONTROLLER\n",
+    );
+    assert!(err.contains("controller.quorum.voters"));
+}
+
+#[test]
+fn rejects_empty_controller_listener_names_value() {
+    let err = load_err(
+        "process.roles=broker,controller\nnode.id=1\nlisteners=PLAINTEXT://:19092,CONTROLLER://:19093\ncontroller.listener.names=, ,\ncontroller.quorum.voters=1@node1:19093\n",
+    );
+    assert!(err.contains("controller.listener.names"));
+}
