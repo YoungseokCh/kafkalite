@@ -392,4 +392,52 @@ mod tests {
         assert_eq!(log_contents.lines().count(), 1);
         assert!(log_contents.ends_with('\n'));
     }
+
+    #[test]
+    fn sync_helpers_return_false_for_noop_updates() {
+        let dir = tempdir().unwrap();
+        let config = Config::single_node(dir.path().join("data"), 29092, 1);
+        let mut store = MetadataStore::open(dir.path(), &config).unwrap();
+
+        assert!(!store.sync_controller(config.broker.broker_id).unwrap());
+
+        let broker = BrokerMetadata {
+            node_id: config.broker.broker_id,
+            host: config.broker.advertised_host.clone(),
+            port: config.broker.advertised_port,
+        };
+        assert!(store.sync_broker(broker.clone()).unwrap());
+        assert!(!store.sync_broker(broker).unwrap());
+
+        let topic = TopicMetadata {
+            name: "topic-a".to_string(),
+            partitions: vec![PartitionMetadata { partition: 0 }],
+        };
+        assert!(store.sync_topics(std::slice::from_ref(&topic), 1).unwrap());
+        assert!(!store.sync_topics(std::slice::from_ref(&topic), 1).unwrap());
+    }
+
+    #[test]
+    fn append_remote_records_accepts_empty_batch_without_mutation() {
+        let dir = tempdir().unwrap();
+        let config = Config::single_node(dir.path().join("data"), 29092, 1);
+        let mut store = MetadataStore::open(dir.path(), &config).unwrap();
+
+        assert!(store.append_remote_records(-1, &[]).unwrap());
+        assert_eq!(store.metadata_offset(), -1);
+    }
+
+    #[test]
+    fn parse_log_entry_supports_legacy_record_lines_and_trim_handles_crlf() {
+        let legacy =
+            serde_json::to_string(&MetadataRecord::SetController { controller_id: 9 }).unwrap();
+        let parsed = parse_log_entry(&legacy).unwrap();
+        assert!(parsed.metadata_offset.is_none());
+        assert_eq!(
+            parsed.record,
+            MetadataRecord::SetController { controller_id: 9 }
+        );
+
+        assert_eq!(trim_line_endings(b"line\r\n"), b"line");
+    }
 }
