@@ -148,6 +148,40 @@ fn load_without_path_or_env_reports_missing_configuration() {
 }
 
 #[test]
+fn load_reports_read_error_for_missing_env_config_path() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(
+            "KAFKALITE_CONFIG",
+            "/tmp/does-not-exist-kafkalite.properties",
+        )
+    };
+
+    let err = Config::load(None).unwrap_err().to_string();
+
+    unsafe { std::env::remove_var("KAFKALITE_CONFIG") };
+    assert!(err.contains("Failed to read configuration file"));
+}
+
+#[test]
+fn explicit_config_path_takes_precedence_over_env_var() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = write_config(dir.path(), "listeners=PLAINTEXT://127.0.0.1:29092\n");
+    unsafe {
+        std::env::set_var(
+            "KAFKALITE_CONFIG",
+            "/tmp/does-not-exist-kafkalite.properties",
+        )
+    };
+
+    let config = Config::load(path.to_str()).unwrap();
+
+    unsafe { std::env::remove_var("KAFKALITE_CONFIG") };
+    assert_eq!(config.broker.port, 29092);
+}
+
+#[test]
 fn rejects_empty_log_dirs_value() {
     let err = load_err("listeners=PLAINTEXT://:19092\nlog.dirs=, ,\n");
     assert!(err.contains("expected one directory"));
