@@ -146,4 +146,72 @@ mod tests {
 
         assert!(!state.record_vote(3, 0));
     }
+
+    #[test]
+    fn same_term_second_candidate_vote_is_rejected() {
+        let mut state = QuorumState::new(&ClusterConfig::default());
+
+        assert!(state.record_vote(1, 1));
+        assert!(!state.record_vote(2, 1));
+    }
+
+    #[test]
+    fn higher_term_vote_replaces_previous_vote() {
+        let mut state = QuorumState::new(&ClusterConfig::default());
+
+        assert!(state.record_vote(1, 1));
+        assert!(state.record_vote(2, 2));
+        assert_eq!(state.current_term(), 2);
+        assert_eq!(state.snapshot().voted_for, Some(2));
+    }
+
+    #[test]
+    fn follow_leader_ignores_stale_term() {
+        let mut state = QuorumState::new(&ClusterConfig::default());
+        state.follow_leader(3, 2);
+        state.follow_leader(4, 1);
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.current_term, 2);
+        assert_eq!(snapshot.leader_id, Some(3));
+    }
+
+    #[test]
+    fn record_vote_rejects_competing_candidate_when_leader_known() {
+        let mut state = QuorumState::new(&ClusterConfig::default());
+        state.follow_leader(3, 2);
+
+        assert!(!state.record_vote(4, 2));
+    }
+
+    #[test]
+    fn majority_and_voter_checks_follow_quorum_shape() {
+        let config = ClusterConfig {
+            node_id: 1,
+            controller_quorum_voters: vec![
+                ControllerQuorumVoter {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                ControllerQuorumVoter {
+                    node_id: 2,
+                    host: "node2".to_string(),
+                    port: 9094,
+                },
+                ControllerQuorumVoter {
+                    node_id: 3,
+                    host: "node3".to_string(),
+                    port: 9095,
+                },
+            ],
+            ..ClusterConfig::default()
+        };
+        let state = QuorumState::new(&config);
+
+        assert!(!state.has_majority(1));
+        assert!(state.has_majority(2));
+        assert!(state.is_voter(2));
+        assert!(!state.is_voter(99));
+    }
 }

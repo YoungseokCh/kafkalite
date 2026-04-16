@@ -89,4 +89,10 @@ mod tests {
         let err = decode_request(&encoded).unwrap_err().to_string();
         assert!(err.contains("length mismatch"));
     }
+
+    #[test]
+    fn decode_rejects_short_frame() {
+        let err = decode_request(&[1, 2, 3]).unwrap_err().to_string();
+        assert!(err.contains("too short"));
+    }
 }

@@ -151,4 +151,17 @@ mod tests {
 
         assert!(!accepted);
     }
+
+    #[test]
+    fn heartbeat_for_unknown_broker_is_rejected() {
+        let mut state = ControllerState::new(&ClusterConfig::default());
+
+        let accepted = state.apply_heartbeat(BrokerHeartbeat {
+            node_id: 42,
+            broker_epoch: 1,
+            timestamp_ms: 200,
+        });
+
+        assert!(!accepted);
+    }
 }

@@ -68,3 +68,24 @@ pub fn peek_key_and_version(buf: &mut Bytes) -> Result<(ApiKey, i16)> {
     let api_version = buf.get_i16();
     Ok((api_key, api_version))
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn peek_key_and_version_rejects_short_header() {
+        let mut buf = Bytes::from_static(&[0, 1, 0]);
+        let err = peek_key_and_version(&mut buf).unwrap_err().to_string();
+        assert!(err.contains("short request header"));
+    }
+
+    #[test]
+    fn peek_key_and_version_rejects_unknown_api_key() {
+        let mut buf = Bytes::from_static(&[0x7f, 0xff, 0, 1]);
+        let err = peek_key_and_version(&mut buf).unwrap_err().to_string();
+        assert!(err.contains("unknown api key"));
+    }
+}
