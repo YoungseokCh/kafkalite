@@ -126,6 +126,8 @@ fn update_partition_leader_validates_epoch_and_noop() {
 fn update_partition_replication_recomputes_high_watermark() {
     let mut image = image_with_partition();
 
+    assert!(!image.update_partition_replication("missing", 0, vec![1, 2], vec![1, 2], 1));
+    assert!(!image.update_partition_replication("topic-a", 99, vec![1, 2], vec![1, 2], 1));
     assert!(!image.update_partition_replication("topic-a", 0, vec![1, 2], vec![1, 2], 0));
     assert!(!image.update_partition_replication("topic-a", 0, vec![1, 2], vec![1, 2], 1));
 
@@ -142,6 +144,16 @@ fn update_replica_progress_reconciles_isr_and_high_watermark() {
     assert!(!image.update_replica_progress(
         "missing",
         0,
+        1,
+        ReplicaProgress {
+            broker_id: 2,
+            log_end_offset: 6,
+            last_caught_up_ms: 100,
+        },
+    ));
+    assert!(!image.update_replica_progress(
+        "topic-a",
+        99,
         1,
         ReplicaProgress {
             broker_id: 2,
@@ -191,12 +203,16 @@ fn reassignment_lifecycle_enforces_preconditions() {
     let mut image = image_with_partition();
 
     assert!(!image.begin_partition_reassignment("topic-a", 0, vec![]));
+    assert!(!image.advance_partition_reassignment("topic-a", 9, ReassignmentStep::ExpandingIsr,));
     assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::ExpandingIsr,));
 
     assert!(image.begin_partition_reassignment("topic-a", 0, vec![3, 1]));
     assert!(!image.begin_partition_reassignment("topic-a", 0, vec![3, 1]));
     assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Planned,));
     assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::ExpandingIsr,));
+    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::LeaderSwitch,));
+    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Shrinking,));
+    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Complete,));
 
     assert!(image.update_replica_progress(
         "topic-a",
