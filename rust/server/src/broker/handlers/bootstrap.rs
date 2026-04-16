@@ -288,6 +288,20 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metadata_auto_create_with_unnamed_topics_is_noop() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(None)]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.is_empty());
+        let metadata = broker.store().topic_metadata(None, 0).unwrap();
+        assert!(metadata.is_empty());
+    }
+
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
         let config = Config::single_node(dir.join("data"), 9092, 1);

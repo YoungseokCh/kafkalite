@@ -74,3 +74,47 @@ fn rejects_num_partitions_less_than_one() {
     let err = load_err("listeners=PLAINTEXT://:19092\nnum.partitions=0\n");
     assert!(err.contains("expected >= 1"));
 }
+
+#[test]
+fn ignores_comment_and_blank_lines_while_loading_defaults() {
+    let dir = TempDir::new().unwrap();
+    let path = write_config(
+        dir.path(),
+        "# comment line\n\nlisteners=PLAINTEXT://127.0.0.1:19092\n",
+    );
+
+    let config = Config::load(path.to_str()).unwrap();
+
+    assert_eq!(config.broker.host, "127.0.0.1");
+    assert_eq!(config.broker.port, 19092);
+    assert_eq!(config.broker.advertised_host, "127.0.0.1");
+    assert_eq!(config.broker.advertised_port, 19092);
+    assert_eq!(config.broker.cluster_id, "kafkalite-single-broker");
+}
+
+#[test]
+fn rejects_empty_process_roles_list() {
+    let err = load_err("process.roles=, ,\nlisteners=PLAINTEXT://:19092\n");
+    assert!(err.contains("at least one role"));
+}
+
+#[test]
+fn rejects_empty_listeners_value() {
+    let err = load_err("listeners=, ,\n");
+    assert!(err.contains("expected at least one listener"));
+}
+
+#[test]
+fn controller_only_role_does_not_require_plaintext_listener() {
+    let dir = TempDir::new().unwrap();
+    let path = write_config(
+        dir.path(),
+        "process.roles=controller\nnode.id=1\nlisteners=CONTROLLER://:19093\ncontroller.listener.names=CONTROLLER\ncontroller.quorum.voters=1@node1:19093\n",
+    );
+
+    let config = Config::load(path.to_str()).unwrap();
+
+    assert_eq!(config.cluster.process_roles.len(), 1);
+    assert_eq!(config.cluster.node_id, 1);
+    assert!(config.cluster.listeners.contains_key("CONTROLLER"));
+}
