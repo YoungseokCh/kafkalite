@@ -1,9 +1,10 @@
+use kafkalite_server::cluster::ApplyReplicaRecordsRequest;
 use kafkalite_server::cluster::{
     AdvancePartitionReassignmentRequest, AppendMetadataRequest, BeginPartitionReassignmentRequest,
-    BrokerHeartbeatRequest, ClusterRuntime, ControllerQuorumVoter, GetPartitionStateRequest,
-    MetadataRecord, ProcessRole, ReassignmentStep, RegisterBrokerRequest, ReplicaFetchRequest,
-    UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, UpdateReplicaProgressRequest,
-    VoteRequest,
+    BrokerHeartbeatRequest, ClusterRpcRequest, ClusterRuntime, ControllerQuorumVoter,
+    GetPartitionStateRequest, MetadataRecord, ProcessRole, ReassignmentStep, RegisterBrokerRequest,
+    ReplicaFetchRequest, UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest,
+    UpdateReplicaProgressRequest, VoteRequest,
 };
 use kafkalite_server::config::Config;
 use tempfile::tempdir;
@@ -479,4 +480,44 @@ fn vote_rejects_non_voter_candidate() {
         })
         .unwrap();
     assert!(!response.vote_granted);
+}
+
+#[test]
+fn dispatch_replica_fetch_bubbles_runtime_transport_error() {
+    let dir = tempdir().unwrap();
+    let config = Config::single_node(dir.path().join("data"), 19092, 1);
+    let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+    let err = runtime
+        .dispatch(ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+            topic_name: "topic-a".to_string(),
+            partition_index: 0,
+            start_offset: 0,
+            max_records: 1,
+        }))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replica fetch requires broker data-plane transport"));
+}
+
+#[test]
+fn dispatch_apply_replica_records_requires_broker_data_plane_transport() {
+    let dir = tempdir().unwrap();
+    let config = Config::single_node(dir.path().join("data"), 19092, 1);
+    let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+    let err = runtime
+        .dispatch(ClusterRpcRequest::ApplyReplicaRecords(
+            ApplyReplicaRecordsRequest {
+                topic_name: "topic-a".to_string(),
+                partition_index: 0,
+                records: vec![],
+                now_ms: 0,
+            },
+        ))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("apply replica records requires broker data-plane transport"));
 }
