@@ -1,6 +1,6 @@
 use kafkalite_server::cluster::{
-    BrokerMetadata, ClusterMetadataImage, MetadataRecord, PartitionMetadataImage, ReassignmentStep,
-    ReplicaProgress, TopicMetadataImage,
+    BrokerMetadata, ClusterMetadataImage, MetadataRecord, PartitionMetadataImage,
+    PartitionReassignment, ReassignmentStep, ReplicaProgress, TopicMetadataImage,
 };
 use kafkalite_server::store::{PartitionMetadata, TopicMetadata};
 
@@ -229,6 +229,25 @@ fn reassignment_lifecycle_enforces_preconditions() {
     assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Shrinking));
     assert!(image.complete_partition_reassignment("topic-a", 0));
     assert!(image.partition_reassignment("topic-a", 0).is_none());
+}
+
+#[test]
+fn leader_switch_with_empty_target_replicas_keeps_current_leader() {
+    let mut image = image_with_partition();
+    image.topics[0].partitions[0].reassignment = Some(PartitionReassignment {
+        target_replicas: vec![],
+        step: ReassignmentStep::Copying,
+    });
+
+    assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::LeaderSwitch));
+
+    let partition = &image.topics[0].partitions[0];
+    assert_eq!(partition.leader_id, 1);
+    assert_eq!(partition.leader_epoch, 1);
+    assert_eq!(
+        partition.reassignment.as_ref().unwrap().step,
+        ReassignmentStep::LeaderSwitch
+    );
 }
 
 #[test]
