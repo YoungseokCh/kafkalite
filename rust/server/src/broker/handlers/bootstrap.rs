@@ -182,3 +182,56 @@ fn topic_partitions(topic: &TopicMetadataImage) -> Vec<MetadataResponsePartition
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::broker::KafkaBroker;
+    use crate::config::Config;
+    use crate::store::FileStore;
+
+    #[tokio::test]
+    async fn metadata_without_topic_filter_returns_all_known_topics() {
+        let broker = test_broker();
+
+        let response = handle_metadata(&broker, MetadataRequest::default())
+            .await
+            .unwrap();
+
+        assert!(response.topics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_can_auto_create_requested_topic_locally() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("autocreate.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.iter().any(|topic| {
+            topic.error_code == 0
+                && topic
+                    .name
+                    .as_ref()
+                    .map(|name| name.0.to_string())
+                    .as_deref()
+                    == Some("autocreate.topic")
+        }));
+    }
+
+    fn test_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let config = Config::single_node(dir.join("data"), 9092, 1);
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
+    }
+}

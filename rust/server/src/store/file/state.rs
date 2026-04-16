@@ -266,4 +266,16 @@ mod tests {
         assert!(snapshots.topics.is_empty());
         assert!(snapshots.offsets.is_empty());
     }
+
+    #[test]
+    fn replay_on_empty_journal_is_noop() {
+        let dir = tempdir().unwrap();
+        let journal = StateJournal::open(dir.path()).unwrap();
+        let mut snapshots = SnapshotSet::load(dir.path()).unwrap();
+
+        journal.replay(&mut snapshots).unwrap();
+
+        assert_eq!(snapshots.producers.next_producer_id, 1);
+        assert!(snapshots.offsets.is_empty());
+    }
 }
