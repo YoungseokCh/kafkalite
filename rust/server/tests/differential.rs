@@ -1137,16 +1137,17 @@ fn wait_for_topic(bootstrap: &str, topic: &str, expected_partition_count: usize)
     let consumer = consumer(bootstrap, &format!("wait-{topic}"));
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
-        if let Ok(metadata) = consumer.fetch_metadata(Some(topic), Duration::from_secs(1))
-            && metadata
+        if let Ok(metadata) = consumer.fetch_metadata(Some(topic), Duration::from_secs(1)) {
+            let topic_visible = metadata
                 .topics()
                 .iter()
                 .find(|metadata_topic| metadata_topic.name() == topic)
                 .is_some_and(|metadata_topic| {
                     metadata_topic.partitions().len() >= expected_partition_count
-                })
-        {
-            return;
+                });
+            if topic_visible {
+                return;
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
