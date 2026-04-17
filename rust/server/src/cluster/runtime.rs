@@ -794,13 +794,14 @@ impl ClusterRuntime {
         } else if config
             .cluster
             .has_role(crate::cluster::ProcessRole::Controller)
-            && let Some(leader_id) = self.quorum_snapshot().leader_id
         {
-            let _ = self
-                .metadata
-                .lock()
-                .expect("cluster metadata mutex poisoned")
-                .sync_controller(leader_id);
+            if let Some(leader_id) = self.quorum_snapshot().leader_id {
+                let _ = self
+                    .metadata
+                    .lock()
+                    .expect("cluster metadata mutex poisoned")
+                    .sync_controller(leader_id);
+            }
         }
     }
 }

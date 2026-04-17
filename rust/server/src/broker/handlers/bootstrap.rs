@@ -57,17 +57,16 @@ pub async fn handle_metadata(
     });
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut created = false;
-    if request.allow_auto_topic_creation
-        && let Some(requested) = names.as_ref()
-        && broker.cluster().can_auto_create_topics_locally()
-    {
-        for topic in requested {
-            broker.store().ensure_topic(
-                topic,
-                broker.config().storage.default_partitions,
-                now_ms,
-            )?;
-            created = true;
+    if request.allow_auto_topic_creation && broker.cluster().can_auto_create_topics_locally() {
+        if let Some(requested) = names.as_ref() {
+            for topic in requested {
+                broker.store().ensure_topic(
+                    topic,
+                    broker.config().storage.default_partitions,
+                    now_ms,
+                )?;
+                created = true;
+            }
         }
     }
     if created {
