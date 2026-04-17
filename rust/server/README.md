@@ -138,7 +138,7 @@ From the repository root:
 ```bash
 make bench
 make bench-runtime
-make bench-runtime LABEL=v1.0.0
+make bench-runtime LABEL=v1.1.0
 make bench-compare BASE=.benchmarks/<old>/result.json NEW=.benchmarks/<new>/result.json
 ```
 

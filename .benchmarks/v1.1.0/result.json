@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-04-17T06:44:07.561527788+00:00",
+  "git_sha": "a4411e4",
+  "dirty": false,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "build": {
+    "profile": "release",
+    "binary_bytes": 5275592,
+    "package_bytes": 126245,
+    "stripped_binary_bytes": null
+  },
+  "scenarios": [
+    {
+      "name": "bench.produce.small",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 1000,
+      "payload_bytes": 100,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 49087.005008,
+        "throughput_msgs_per_sec": 20.371990506184357,
+        "throughput_bytes_per_sec": 2037.1990506184359,
+        "latency_p50_ms": 46.762654,
+        "latency_p95_ms": 53.315803,
+        "latency_p99_ms": 53.367682
+      },
+      "memory": {
+        "peak_rss_kb": 5668,
+        "final_rss_kb": 5668
+      },
+      "storage": {
+        "total_bytes": 370639,
+        "log_bytes": 185000,
+        "index_bytes": 1764,
+        "timeindex_bytes": 1512,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 181619,
+        "bytes_per_record": 370.639,
+        "bytes_per_payload_byte": 3.70639
+      }
+    },
+    {
+      "name": "bench.produce.multi_partition",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 1000,
+      "payload_bytes": 100,
+      "default_partitions": 3,
+      "runtime": {
+        "elapsed_ms": 50700.557833,
+        "throughput_msgs_per_sec": 19.72364886583397,
+        "throughput_bytes_per_sec": 1972.364886583397,
+        "latency_p50_ms": 50.000752000000006,
+        "latency_p95_ms": 53.350533,
+        "latency_p99_ms": 53.40368
+      },
+      "memory": {
+        "peak_rss_kb": 5732,
+        "final_rss_kb": 5732
+      },
+      "storage": {
+        "total_bytes": 645629,
+        "log_bytes": 185000,
+        "index_bytes": 1764,
+        "timeindex_bytes": 1512,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 455697,
+        "bytes_per_record": 645.629,
+        "bytes_per_payload_byte": 6.45629
+      }
+    },
+    {
+      "name": "bench.roundtrip",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 200,
+      "payload_bytes": 512,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 10562.424644,
+        "throughput_msgs_per_sec": 18.935046330826157,
+        "throughput_bytes_per_sec": 9694.743721382993,
+        "latency_p50_ms": 46.687362,
+        "latency_p95_ms": 50.028013,
+        "latency_p99_ms": 53.278147999999995
+      },
+      "memory": {
+        "peak_rss_kb": 6232,
+        "final_rss_kb": 6128
+      },
+      "storage": {
+        "total_bytes": 156032,
+        "log_bytes": 119400,
+        "index_bytes": 364,
+        "timeindex_bytes": 312,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 35219,
+        "bytes_per_record": 780.16,
+        "bytes_per_payload_byte": 1.52375
+      }
+    },
+    {
+      "name": "bench.fetch.multi_partition",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 500,
+      "payload_bytes": 512,
+      "default_partitions": 3,
+      "runtime": {
+        "elapsed_ms": 25337.965632,
+        "throughput_msgs_per_sec": 19.733233806605867,
+        "throughput_bytes_per_sec": 10103.415708982204,
+        "latency_p50_ms": 49.982413,
+        "latency_p95_ms": 53.360892,
+        "latency_p99_ms": 53.429428
+      },
+      "memory": {
+        "peak_rss_kb": 5644,
+        "final_rss_kb": 5644
+      },
+      "storage": {
+        "total_bytes": 524572,
+        "log_bytes": 298500,
+        "index_bytes": 924,
+        "timeindex_bytes": 792,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 222703,
+        "bytes_per_record": 1049.144,
+        "bytes_per_payload_byte": 2.049109375
+      }
+    },
+    {
+      "name": "bench.fetch.tail",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 500,
+      "payload_bytes": 512,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 85.427145,
+        "throughput_msgs_per_sec": 5852.940537811489,
+        "throughput_bytes_per_sec": 2996705.5553594823,
+        "latency_p50_ms": 0.002552,
+        "latency_p95_ms": 85.361196,
+        "latency_p99_ms": 85.361196
+      },
+      "memory": {
+        "peak_rss_kb": 5856,
+        "final_rss_kb": 5876
+      },
+      "storage": {
+        "total_bytes": 390021,
+        "log_bytes": 298500,
+        "index_bytes": 896,
+        "timeindex_bytes": 768,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 89119,
+        "bytes_per_record": 780.042,
+        "bytes_per_payload_byte": 1.52351953125
+      }
+    },
+    {
+      "name": "bench.commit.resume",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 4,
+      "payload_bytes": 256,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 1502.6246039999999,
+        "throughput_msgs_per_sec": 2.662008853942605,
+        "throughput_bytes_per_sec": 681.4742666093068,
+        "latency_p50_ms": 49.963136999999996,
+        "latency_p95_ms": 592.2071370000001,
+        "latency_p99_ms": 592.2071370000001
+      },
+      "memory": {
+        "peak_rss_kb": 5804,
+        "final_rss_kb": 5812
+      },
+      "storage": {
+        "total_bytes": 2966,
+        "log_bytes": 1364,
+        "index_bytes": 28,
+        "timeindex_bytes": 24,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 815,
+        "bytes_per_record": 741.5,
+        "bytes_per_payload_byte": 2.896484375
+      }
+    },
+    {
+      "name": "bench.mixed.handoff",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 200,
+      "payload_bytes": 256,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 11365.876146,
+        "throughput_msgs_per_sec": 17.59653170867836,
+        "throughput_bytes_per_sec": 4504.71211742166,
+        "latency_p50_ms": 46.669008,
+        "latency_p95_ms": 49.696749,
+        "latency_p99_ms": 50.064352
+      },
+      "memory": {
+        "peak_rss_kb": 6000,
+        "final_rss_kb": 6000
+      },
+      "storage": {
+        "total_bytes": 106947,
+        "log_bytes": 68200,
+        "index_bytes": 364,
+        "timeindex_bytes": 312,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 37330,
+        "bytes_per_record": 534.735,
+        "bytes_per_payload_byte": 2.08880859375
+      }
+    },
+    {
+      "name": "bench.cluster.replication.metadata",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 200,
+      "payload_bytes": 1,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 1.588574,
+        "throughput_msgs_per_sec": 125899.07678206997,
+        "throughput_bytes_per_sec": 125899.07678206997,
+        "latency_p50_ms": 0.007791,
+        "latency_p95_ms": 0.007957,
+        "latency_p99_ms": 0.00881
+      },
+      "memory": {
+        "peak_rss_kb": 0,
+        "final_rss_kb": 0
+      },
+      "storage": {
+        "total_bytes": 515,
+        "log_bytes": 0,
+        "index_bytes": 0,
+        "timeindex_bytes": 0,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 0,
+        "bytes_per_record": 2.575,
+        "bytes_per_payload_byte": 2.575
+      }
+    },
+    {
+      "name": "bench.cluster.reassignment.metadata",
+      "iterations": 1,
+      "warmups": 0,
+      "messages": 100,
+      "payload_bytes": 1,
+      "default_partitions": 1,
+      "runtime": {
+        "elapsed_ms": 1.140814,
+        "throughput_msgs_per_sec": 87656.70828022798,
+        "throughput_bytes_per_sec": 87656.70828022798,
+        "latency_p50_ms": 0.011234,
+        "latency_p95_ms": 0.011613,
+        "latency_p99_ms": 0.01344
+      },
+      "memory": {
+        "peak_rss_kb": 0,
+        "final_rss_kb": 0
+      },
+      "storage": {
+        "total_bytes": 1032,
+        "log_bytes": 0,
+        "index_bytes": 0,
+        "timeindex_bytes": 0,
+        "state_snapshot_bytes": 0,
+        "state_journal_bytes": 0,
+        "bytes_per_record": 10.32,
+        "bytes_per_payload_byte": 10.32
+      }
+    }
+  ]
+}
