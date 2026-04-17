@@ -2,17 +2,34 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::broker_process::BrokerProcess;
+use super::report::{MemoryMetrics, RuntimeMetrics, ScenarioReport, StorageMetrics};
 use anyhow::Result;
+use kafkalite_server::cluster::test_support::{ThreeNodeClusterHarness, TwoNodeClusterHarness};
+use kafkalite_server::cluster::{
+    BeginPartitionReassignmentRequest, ClusterRpcRequest, ClusterRpcTransport, ReassignmentStep,
+    UpdatePartitionLeaderRequest, UpdatePartitionReplicationRequest, UpdateReplicaProgressRequest,
+};
+use kafkalite_server::store::{PartitionMetadata, TopicMetadata};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 
-use super::broker_process::BrokerProcess;
-use super::report::{MemoryMetrics, RuntimeMetrics, ScenarioReport, StorageMetrics};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScenarioKind {
+    ProduceOnly,
+    Roundtrip,
+    FetchTail,
+    CommitResume,
+    MixedHandoff,
+    ClusterReplicationMetadata,
+    ClusterReassignmentMetadata,
+}
 
 pub struct ScenarioSpec {
     pub name: &'static str,
+    pub kind: ScenarioKind,
     pub messages: u32,
     pub payload_bytes: u32,
     pub default_partitions: i32,
@@ -192,6 +209,248 @@ pub async fn run_commit_resume(
     ))
 }
 
+pub async fn run_cluster_replication_metadata(
+    root: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
+    fs::create_dir_all(root)?;
+    let harness = TwoNodeClusterHarness::new_controller_pair();
+    harness
+        .node2
+        .runtime
+        .sync_local_topics(&[single_partition_topic(spec.name)], 2)?;
+
+    let transport = harness.transport_from_node(1);
+    let target = transport.resolve_target(2)?;
+
+    let started = Instant::now();
+    let mut latencies = Vec::with_capacity(spec.messages as usize);
+    for index in 0..spec.messages {
+        let op_started = Instant::now();
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdatePartitionLeader(UpdatePartitionLeaderRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: index as i32 + 1,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdatePartitionReplication(UpdatePartitionReplicationRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                leader_epoch: index as i32 + 1,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                leader_epoch: index as i32 + 1,
+                broker_id: 1,
+                log_end_offset: index as i64 + 1,
+                last_caught_up_ms: index as i64,
+            }),
+        )?;
+        let _ = transport.send_to(
+            &target,
+            ClusterRpcRequest::UpdateReplicaProgress(UpdateReplicaProgressRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                leader_epoch: index as i32 + 1,
+                broker_id: 2,
+                log_end_offset: index as i64,
+                last_caught_up_ms: index as i64,
+            }),
+        )?;
+        latencies.push(op_started.elapsed());
+    }
+
+    let runtime = runtime_metrics(
+        started.elapsed(),
+        &latencies,
+        spec.messages,
+        spec.payload_bytes,
+    );
+    let storage = cluster_storage_metrics(
+        &[
+            harness.node1.data_dir.as_path(),
+            harness.node2.data_dir.as_path(),
+        ],
+        spec.messages,
+        spec.payload_bytes,
+    );
+    Ok(ScenarioReport {
+        name: spec.name.to_string(),
+        iterations: 1,
+        warmups: 0,
+        messages: spec.messages,
+        payload_bytes: spec.payload_bytes,
+        default_partitions: spec.default_partitions,
+        runtime,
+        memory: MemoryMetrics {
+            peak_rss_kb: 0,
+            final_rss_kb: 0,
+        },
+        storage,
+    })
+}
+
+pub async fn run_cluster_reassignment_metadata(
+    root: &Path,
+    spec: &ScenarioSpec,
+) -> Result<ScenarioReport> {
+    fs::create_dir_all(root)?;
+    let harness = ThreeNodeClusterHarness::new_controller_triplet();
+    let transport = harness.transport_from_node(1);
+    let target_two = transport.resolve_target(2)?;
+    let target_three = transport.resolve_target(3)?;
+
+    for node in [&harness.node2, &harness.node3] {
+        node.runtime
+            .sync_local_topics(&[single_partition_topic(spec.name)], 1)?;
+        node.runtime
+            .handle_update_partition_leader(UpdatePartitionLeaderRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: 1,
+            })?;
+        node.runtime
+            .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                leader_epoch: 1,
+            })?;
+    }
+
+    let started = Instant::now();
+    let mut latencies = Vec::with_capacity(spec.messages as usize);
+    for index in 0..spec.messages {
+        let op_started = Instant::now();
+        let cycle = index / 2;
+        let (target, target_replicas) = match index % 2 {
+            0 => {
+                let replicas = if cycle % 2 == 0 {
+                    vec![2, 3]
+                } else {
+                    vec![1, 2]
+                };
+                (&target_two, replicas)
+            }
+            _ => {
+                let replicas = if cycle % 2 == 0 {
+                    vec![1, 3]
+                } else {
+                    vec![1, 2]
+                };
+                (&target_three, replicas)
+            }
+        };
+        let _ = transport.send_to(
+            target,
+            ClusterRpcRequest::BeginPartitionReassignment(BeginPartitionReassignmentRequest {
+                topic_name: spec.name.to_string(),
+                partition_index: 0,
+                target_replicas,
+            }),
+        )?;
+        for step in [
+            ReassignmentStep::Copying,
+            ReassignmentStep::ExpandingIsr,
+            ReassignmentStep::LeaderSwitch,
+            ReassignmentStep::Shrinking,
+            ReassignmentStep::Complete,
+        ] {
+            let _ = transport.send_to(
+                target,
+                ClusterRpcRequest::AdvancePartitionReassignment(
+                    kafkalite_server::cluster::AdvancePartitionReassignmentRequest {
+                        topic_name: spec.name.to_string(),
+                        partition_index: 0,
+                        step,
+                    },
+                ),
+            )?;
+        }
+        latencies.push(op_started.elapsed());
+    }
+
+    let runtime = runtime_metrics(
+        started.elapsed(),
+        &latencies,
+        spec.messages,
+        spec.payload_bytes,
+    );
+    let storage = cluster_storage_metrics(
+        &[
+            harness.node1.data_dir.as_path(),
+            harness.node2.data_dir.as_path(),
+            harness.node3.data_dir.as_path(),
+        ],
+        spec.messages,
+        spec.payload_bytes,
+    );
+    Ok(ScenarioReport {
+        name: spec.name.to_string(),
+        iterations: 1,
+        warmups: 0,
+        messages: spec.messages,
+        payload_bytes: spec.payload_bytes,
+        default_partitions: spec.default_partitions,
+        runtime,
+        memory: MemoryMetrics {
+            peak_rss_kb: 0,
+            final_rss_kb: 0,
+        },
+        storage,
+    })
+}
+
+fn single_partition_topic(name: &str) -> TopicMetadata {
+    TopicMetadata {
+        name: name.to_string(),
+        partitions: vec![PartitionMetadata { partition: 0 }],
+    }
+}
+
+fn cluster_storage_metrics(
+    data_dirs: &[&Path],
+    messages: u32,
+    payload_bytes: u32,
+) -> StorageMetrics {
+    let mut total = StorageMetrics {
+        total_bytes: 0,
+        log_bytes: 0,
+        index_bytes: 0,
+        timeindex_bytes: 0,
+        state_snapshot_bytes: 0,
+        state_journal_bytes: 0,
+        bytes_per_record: 0.0,
+        bytes_per_payload_byte: 0.0,
+    };
+    for data_dir in data_dirs {
+        let metrics = storage_metrics(data_dir, messages, payload_bytes);
+        total.total_bytes += metrics.total_bytes;
+        total.log_bytes += metrics.log_bytes;
+        total.index_bytes += metrics.index_bytes;
+        total.timeindex_bytes += metrics.timeindex_bytes;
+        total.state_snapshot_bytes += metrics.state_snapshot_bytes;
+        total.state_journal_bytes += metrics.state_journal_bytes;
+    }
+    let payload_total = messages as f64 * payload_bytes as f64;
+    total.bytes_per_record = total.total_bytes as f64 / messages.max(1) as f64;
+    total.bytes_per_payload_byte = total.total_bytes as f64 / payload_total.max(1.0);
+    total
+}
+
 fn build_report(
     spec: &ScenarioSpec,
     elapsed: Duration,
@@ -363,7 +622,11 @@ fn poll_for_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{partition_for_message, partition_message_count};
+    use tempfile::tempdir;
+
+    use super::{
+        cluster_storage_metrics, partition_for_message, partition_message_count, storage_metrics,
+    };
 
     #[test]
     fn partition_for_message_round_robins_across_partitions() {
@@ -379,5 +642,30 @@ mod tests {
         assert_eq!(partition_message_count(10, 3, 0), 4);
         assert_eq!(partition_message_count(10, 3, 1), 3);
         assert_eq!(partition_message_count(10, 3, 2), 3);
+    }
+
+    #[test]
+    fn cluster_storage_metrics_sums_multiple_data_directories() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        std::fs::write(first.path().join("first.log"), vec![0_u8; 4]).unwrap();
+        std::fs::write(second.path().join("second.index"), vec![0_u8; 6]).unwrap();
+
+        let combined = cluster_storage_metrics(&[first.path(), second.path()], 2, 5);
+        let first_metrics = storage_metrics(first.path(), 2, 5);
+        let second_metrics = storage_metrics(second.path(), 2, 5);
+
+        assert_eq!(
+            combined.total_bytes,
+            first_metrics.total_bytes + second_metrics.total_bytes
+        );
+        assert_eq!(
+            combined.log_bytes,
+            first_metrics.log_bytes + second_metrics.log_bytes
+        );
+        assert_eq!(
+            combined.index_bytes,
+            first_metrics.index_bytes + second_metrics.index_bytes
+        );
     }
 }

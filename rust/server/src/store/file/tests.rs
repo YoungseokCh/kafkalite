@@ -234,6 +234,89 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
 }
 
 #[test]
+fn committed_offset_resume_survives_restart_after_tombstone() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-mixed", 1, 10).unwrap();
+    let subscription = encode_subscription(&["topic-mixed"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-mixed",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let records = vec![
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"key-one")),
+            value: Some(Bytes::from_static(b"payload-one")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 11,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"key-two")),
+            value: None,
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 12,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 2,
+            key: None,
+            value: Some(Bytes::from_static(b"payload-three")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    store
+        .append_records("topic-mixed", 0, &records, 100)
+        .unwrap();
+    store
+        .commit_offset(commit_request(
+            "group-mixed",
+            "member-a",
+            joined.generation_id,
+            "topic-mixed",
+            0,
+            2,
+            200,
+        ))
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened
+            .fetch_offset("group-mixed", "topic-mixed", 0)
+            .unwrap(),
+        Some(2)
+    );
+
+    let fetched = reopened.fetch_records("topic-mixed", 0, 2, 10).unwrap();
+    assert_eq!(fetched.records.len(), 1);
+    assert_eq!(fetched.records[0].offset, 2);
+    assert_eq!(fetched.records[0].key, None);
+    assert_eq!(
+        fetched.records[0].value,
+        Some(Bytes::from_static(b"payload-three"))
+    );
+}
+
+#[test]
 fn heartbeat_does_not_grow_state_journal_but_offset_commit_does() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -570,6 +653,45 @@ fn truncated_tail_is_recovered_on_restart() {
 }
 
 #[test]
+fn truncated_index_tail_is_rebuilt_on_restart() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = (0..4)
+        .map(|sequence| BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10 + i64::from(sequence),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: b"[]".to_vec(),
+        })
+        .collect::<Vec<_>>();
+    store
+        .append_records("recover.index", 0, &records, 10)
+        .unwrap();
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(
+            dir.path()
+                .join("topics/recover.index/partitions/0/00000000000000000000.index"),
+        )
+        .unwrap()
+        .write_all(&[1, 2, 3])
+        .unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let fetched = reopened.fetch_records("recover.index", 0, 2, 10).unwrap();
+
+    assert_eq!(fetched.records.len(), 2);
+    assert_eq!(fetched.records[0].offset, 2);
+    assert_eq!(fetched.records[1].offset, 3);
+}
+
+#[test]
 fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -598,7 +720,7 @@ fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
 }
 
 #[test]
-fn non_idempotent_producer_records_are_not_deduplicated() {
+fn non_idempotent_retries_are_not_deduplicated() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     let records = vec![BrokerRecord {
@@ -613,13 +735,13 @@ fn non_idempotent_producer_records_are_not_deduplicated() {
     }];
 
     let first = store
-        .append_records("non-idempotent.events", 0, &records, 10)
+        .append_records("nonidempotent.events", 0, &records, 10)
         .unwrap();
     let second = store
-        .append_records("non-idempotent.events", 0, &records, 20)
+        .append_records("nonidempotent.events", 0, &records, 20)
         .unwrap();
     let fetched = store
-        .fetch_records("non-idempotent.events", 0, 0, 10)
+        .fetch_records("nonidempotent.events", 0, 0, 10)
         .unwrap();
 
     assert_eq!(first, (0, 0));
@@ -657,6 +779,36 @@ fn non_idempotent_producer_records_append_after_restart() {
     assert_eq!(first, (0, 0));
     assert_eq!(second, (1, 1));
     assert_eq!(fetched.records.len(), 2);
+}
+
+#[test]
+fn truncate_partition_discards_tail_and_rebuilds_indexes() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = (0..3)
+        .map(|sequence| BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10 + i64::from(sequence),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: b"[]".to_vec(),
+        })
+        .collect::<Vec<_>>();
+    store
+        .append_records("truncate.topic", 0, &records, 10)
+        .unwrap();
+
+    store.truncate_partition("truncate.topic", 0, 2).unwrap();
+    let fetched = store.fetch_records("truncate.topic", 0, 0, 10).unwrap();
+
+    assert_eq!(fetched.records.len(), 2);
+    assert_eq!(fetched.records[0].offset, 0);
+    assert_eq!(fetched.records[1].offset, 1);
+    assert_eq!(store.list_offsets("truncate.topic", 0).unwrap().1.offset, 2);
 }
 
 #[test]
@@ -780,6 +932,283 @@ fn replica_apply_rejects_offset_mismatches() {
             expected: 0,
             actual: 1,
         })
+    ));
+}
+
+#[test]
+fn unknown_producer_id_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: 10,
+        producer_epoch: 0,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+
+    let result = store.append_records("unknown-producer.topic", 0, &records, 10);
+    assert!(matches!(result, Err(StoreError::UnknownProducerId { .. })));
+}
+
+#[test]
+fn non_contiguous_idempotent_sequence_is_rejected() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let first = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("seq.topic", 0, &first, 10)
+        .expect("first append should succeed");
+
+    let gapped = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 20,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 2,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value-2")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let result = store.append_records("seq.topic", 0, &gapped, 20);
+
+    assert!(matches!(
+        result,
+        Err(StoreError::InvalidProducerSequence { .. })
+    ));
+}
+
+#[test]
+fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store.append_records("replica.topic", 0, &seed, 1).unwrap();
+
+    let misaligned = vec![BrokerRecord {
+        offset: 5,
+        timestamp_ms: 2,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"m")),
+        value: Some(Bytes::from_static(b"m")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let misaligned_err = store
+        .append_replica_records("replica.topic", 0, &misaligned, 2)
+        .unwrap_err()
+        .to_string();
+    assert!(misaligned_err.contains("expected offset 1"));
+
+    let non_contiguous = vec![
+        BrokerRecord {
+            offset: 1,
+            timestamp_ms: 3,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"a")),
+            value: Some(Bytes::from_static(b"a")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 3,
+            timestamp_ms: 4,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"b")),
+            value: Some(Bytes::from_static(b"b")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    let non_contiguous_err = store
+        .append_replica_records("replica.topic", 0, &non_contiguous, 3)
+        .unwrap_err()
+        .to_string();
+    assert!(non_contiguous_err.contains("must be contiguous"));
+}
+
+#[test]
+fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica-skip.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("replica-skip.topic", 0, &seed, 1)
+        .unwrap();
+
+    let stale = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 2,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"stale")),
+        value: Some(Bytes::from_static(b"stale")),
+        headers_json: b"[]".to_vec(),
+    }];
+    let latest = store
+        .append_replica_records("replica-skip.topic", 0, &stale, 2)
+        .unwrap();
+
+    assert_eq!(latest, 1);
+}
+
+#[test]
+fn replica_append_with_empty_batch_is_a_noop() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica-empty.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("replica-empty.topic", 0, &seed, 1)
+        .unwrap();
+
+    let latest = store
+        .append_replica_records("replica-empty.topic", 0, &[], 2)
+        .unwrap();
+
+    assert_eq!(latest, 1);
+    assert_eq!(
+        store
+            .fetch_records("replica-empty.topic", 0, 0, 10)
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn describe_storage_counts_root_level_topic_files() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let extra = dir.path().join("topics/stray.bin");
+    std::fs::write(&extra, b"topic-root-bytes").unwrap();
+
+    let summary = store.describe_storage().unwrap();
+
+    assert_eq!(summary.log_bytes, 0);
+    assert_eq!(summary.index_bytes, 0);
+    assert_eq!(summary.timeindex_bytes, 0);
+    assert_eq!(summary.state_bytes, 0);
+    assert_eq!(summary.total_bytes, b"topic-root-bytes".len() as u64);
+}
+
+#[test]
+fn describe_storage_tolerates_missing_state_directory() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("storage.topic", 0, &records, 10)
+        .unwrap();
+
+    std::fs::remove_dir_all(dir.path().join("state")).unwrap();
+
+    let summary = store.describe_storage().unwrap();
+
+    assert_eq!(summary.state_bytes, 0);
+    assert!(summary.log_bytes > 0);
+    assert!(summary.total_bytes >= summary.log_bytes);
+}
+
+#[test]
+fn commit_offset_rejects_unknown_partition_before_membership_checks() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+
+    let result = store.commit_offset(commit_request(
+        "group-missing-partition",
+        "member-a",
+        1,
+        "topic-a",
+        1,
+        1,
+        20,
+    ));
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnknownTopicOrPartition {
+            topic,
+            partition: 1,
+        }) if topic == "topic-a"
+    ));
+}
+
+#[test]
+fn fetch_offset_rejects_unknown_partition_before_group_lookup() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+
+    let result = store.fetch_offset("group-missing-partition", "topic-a", 1);
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnknownTopicOrPartition {
+            topic,
+            partition: 1,
+        }) if topic == "topic-a"
     ));
 }
 

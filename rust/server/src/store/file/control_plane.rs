@@ -401,9 +401,6 @@ fn maybe_build_assignments(group: &mut GroupState, topics: &[TopicMetadata]) -> 
     for (topic, mut subscribers) in topic_subscribers {
         if let Some(partitions) = topic_partitions.get(&topic) {
             subscribers.sort();
-            if subscribers.is_empty() {
-                continue;
-            }
             let base = partitions.len() / subscribers.len();
             let remainder = partitions.len() % subscribers.len();
             let mut start = 0_usize;

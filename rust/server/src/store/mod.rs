@@ -59,6 +59,20 @@ pub trait Storage: Send + Sync {
         start_offset: i64,
         limit: usize,
     ) -> Result<ReplicaFetchResult>;
+    fn fetch_records_for_client(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<FetchResult>;
+    fn append_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        now_ms: i64,
+    ) -> Result<i64>;
     fn apply_replica_records(
         &self,
         topic: &str,
@@ -67,6 +81,7 @@ pub trait Storage: Send + Sync {
         leader_high_watermark: i64,
         now_ms: i64,
     ) -> Result<ReplicaApplyResult>;
+    fn truncate_partition(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()>;
     fn list_offsets(
         &self,
         topic: &str,

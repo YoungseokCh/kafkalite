@@ -15,7 +15,7 @@ use super::{
     TopicMetadata,
 };
 use control_plane::{ControlPlaneState, SyncGroupStateRequest};
-use data_plane::{AppendDecision, DataPlaneState};
+use data_plane::{AppendDecision, DataPlaneState, PreparedAppend};
 use log::{RecordLog, StoredBatch};
 #[allow(unused_imports)]
 pub use policy::FileStorePolicy;
@@ -234,6 +234,27 @@ impl Storage for FileStore {
         })
     }
 
+    fn fetch_records_for_client(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        limit: usize,
+    ) -> Result<FetchResult> {
+        let high_watermark = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .high_watermark(topic, partition)?;
+        let records = self
+            .logs
+            .read_records_for_client(topic, partition, start_offset, limit)?;
+        Ok(FetchResult {
+            high_watermark,
+            records,
+        })
+    }
+
     fn replica_fetch_records(
         &self,
         topic: &str,
@@ -256,6 +277,35 @@ impl Storage for FileStore {
         })
     }
 
+    fn append_replica_records(
+        &self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+        now_ms: i64,
+    ) -> Result<i64> {
+        let prepared = {
+            let mut data = self.data.lock().expect("file store mutex poisoned");
+            data.prepare_replica_append(topic, partition, records)?
+        };
+        let Some(prepared) = prepared else {
+            return self
+                .data
+                .lock()
+                .expect("file store mutex poisoned")
+                .latest_offset(topic, partition);
+        };
+        self.logs.ensure_partition(topic, partition)?;
+        self.logs.append_batch(
+            topic,
+            partition,
+            &StoredBatch::from_records(&prepared.records),
+        )?;
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        data.finish_append(&prepared, now_ms)?;
+        data.latest_offset(topic, partition)
+    }
+
     fn apply_replica_records(
         &self,
         topic: &str,
@@ -265,8 +315,9 @@ impl Storage for FileStore {
         now_ms: i64,
     ) -> Result<crate::store::ReplicaApplyResult> {
         let prepared = {
-            let mut data = self.data.lock().expect("file store mutex poisoned");
-            data.prepare_replica_append(topic, partition, records)?
+            let data = self.data.lock().expect("file store mutex poisoned");
+            let expected = data.latest_offset(topic, partition)?;
+            strict_replica_prepare(topic, partition, records, expected)?
         };
         if let Some(prepared) = prepared.as_ref() {
             self.logs.ensure_partition(topic, partition)?;
@@ -284,6 +335,13 @@ impl Storage for FileStore {
             leader_high_watermark,
             now_ms,
         )
+    }
+
+    fn truncate_partition(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()> {
+        self.logs
+            .truncate_to_offset(topic, partition, next_offset)?;
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        data.reconcile_partition_offset(topic, partition, next_offset)
     }
 
     fn list_offsets(
@@ -389,6 +447,39 @@ impl Storage for FileStore {
         let control = self.control.lock().expect("file store mutex poisoned");
         Ok(control.fetch_offset(group_id, topic, partition))
     }
+}
+
+fn strict_replica_prepare(
+    topic: &str,
+    partition: i32,
+    records: &[BrokerRecord],
+    expected_offset: i64,
+) -> Result<Option<PreparedAppend>> {
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    let mut expected = expected_offset;
+    for record in records {
+        if record.offset != expected {
+            return Err(crate::store::StoreError::ReplicaOffsetMismatch {
+                expected,
+                actual: record.offset,
+            });
+        }
+        expected += 1;
+    }
+
+    Ok(Some(PreparedAppend {
+        topic: topic.to_string(),
+        partition,
+        base_offset: records[0].offset,
+        last_offset: records
+            .last()
+            .map(|record| record.offset)
+            .unwrap_or(expected),
+        records: records.to_vec(),
+    }))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::consumer_protocol_assignment::TopicPartition as AssignmentTopicPartition;
 use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+use kafka_protocol::messages::leave_group_request::MemberIdentity;
 use kafka_protocol::messages::offset_commit_request::{
     OffsetCommitRequestPartition, OffsetCommitRequestTopic,
 };
@@ -12,16 +13,15 @@ use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
     ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId, HeartbeatRequest,
-    HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, OffsetCommitRequest,
-    OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader,
-    SyncGroupRequest, SyncGroupResponse, TopicName,
+    HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, LeaveGroupRequest, LeaveGroupResponse,
+    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
+    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
-use kafkalite_server::{
-    Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
-    protocol,
+use kafkalite_server::cluster::{
+    ControllerQuorumVoter, ProcessRole, UpdatePartitionReplicationRequest,
 };
+use kafkalite_server::{Config, FileStore, KafkaBroker, protocol};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -30,6 +30,9 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+const DIFFERENTIAL_DEFAULT_PARTITIONS: i32 = 3;
+const INVALID_PARTITION_INDEX: i32 = 99;
 
 #[derive(Debug, PartialEq, Eq)]
 struct MetadataSnapshot {
@@ -59,6 +62,11 @@ struct MultiPartitionOffsetFetchSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct PartitionScopedResumeSnapshot {
+    resumed: Vec<(i32, Vec<u8>)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ResumeSnapshot {
     first_payload: Vec<u8>,
     resumed_payload: Vec<u8>,
@@ -75,6 +83,13 @@ struct StaleCommitSnapshot {
     offset_after_stale_commit: i64,
     valid_commit_error: i16,
     offset_after_valid_commit: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CurrentMemberStaleCommitSnapshot {
+    current_commit_error: i16,
+    stale_commit_error: i16,
+    offset_after_stale_commit: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +113,12 @@ struct EmptyAssignmentSnapshot {
     assigned_member_error: i16,
     assigned_member_assignment_len: usize,
     assigned_member_assignment_decodable: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LeaveGroupSnapshot {
+    leave_error: i16,
+    post_leave_heartbeat_error: i16,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -167,12 +188,37 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     .await;
     assert_eq!(local_stale_commit, real_stale_commit);
 
+    let current_member_stale_commit_topic = format!("diff.current-member-stale-commit.{suffix}");
+    let real_current_member_stale_commit = current_member_stale_commit_snapshot(
+        &real_bootstrap,
+        &current_member_stale_commit_topic,
+        &format!("group.current-stale.{suffix}"),
+    )
+    .await;
+    let local_current_member_stale_commit = current_member_stale_commit_snapshot(
+        &local_bootstrap,
+        &current_member_stale_commit_topic,
+        &format!("group.current-stale.{suffix}"),
+    )
+    .await;
+    assert_eq!(
+        local_current_member_stale_commit,
+        real_current_member_stale_commit
+    );
+
     let offset_fetch_topic = format!("diff.multi-offsets.{suffix}");
     let real_offset_fetch =
         multi_partition_offset_fetch_snapshot(&real_bootstrap, &offset_fetch_topic).await;
     let local_offset_fetch =
         multi_partition_offset_fetch_snapshot(&local_bootstrap, &offset_fetch_topic).await;
     assert_eq!(local_offset_fetch, real_offset_fetch);
+
+    let partition_scoped_topic = format!("diff.partition-scoped-resume.{suffix}");
+    let real_partition_scoped_resume =
+        partition_scoped_resume_snapshot(&real_bootstrap, &partition_scoped_topic).await;
+    let local_partition_scoped_resume =
+        partition_scoped_resume_snapshot(&local_bootstrap, &partition_scoped_topic).await;
+    assert_eq!(local_partition_scoped_resume, real_partition_scoped_resume);
 
     let heartbeat_topic = format!("diff.stale-heartbeat.{suffix}");
     let real_stale_heartbeat = stale_heartbeat_after_timeout_snapshot(
@@ -219,6 +265,91 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     .await;
     assert_eq!(local_empty_assignment, real_empty_assignment);
 
+    let leave_group_topic = format!("diff.leave-group.{suffix}");
+    let real_leave_group = leave_group_snapshot(
+        &real_bootstrap,
+        &leave_group_topic,
+        &format!("group.leave.{suffix}"),
+    )
+    .await;
+    let local_leave_group = leave_group_snapshot(
+        &local_bootstrap,
+        &leave_group_topic,
+        &format!("group.leave.{suffix}"),
+    )
+    .await;
+    assert_eq!(local_leave_group, real_leave_group);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_reads_are_side_effect_free_for_existing_topics() {
+    let tempdir = tempdir().unwrap();
+    let port = free_port();
+    let mut config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 1);
+    config.cluster.node_id = 1;
+    config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+    config.cluster.controller_quorum_voters = vec![
+        ControllerQuorumVoter {
+            node_id: 1,
+            host: "node1".to_string(),
+            port: 9093,
+        },
+        ControllerQuorumVoter {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9094,
+        },
+    ];
+    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+    let broker = KafkaBroker::new(config, store).unwrap();
+    let broker_handle = broker.clone();
+    let handle = tokio::spawn(async move { broker_handle.run().await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let bootstrap = format!("127.0.0.1:{port}");
+
+    broker
+        .store()
+        .ensure_topic("diff.side-effect", 1, 0)
+        .unwrap();
+    let metadata = broker
+        .store()
+        .topic_metadata(Some(&["diff.side-effect".to_string()]), 0)
+        .unwrap();
+    broker.sync_topic_metadata(&metadata).unwrap();
+    broker
+        .cluster()
+        .handle_update_partition_replication(UpdatePartitionReplicationRequest {
+            topic_name: "diff.side-effect".to_string(),
+            partition_index: 0,
+            replicas: vec![1, 2],
+            isr: vec![1],
+            leader_epoch: 3,
+        })
+        .unwrap();
+    let before = broker.cluster().metadata_image();
+
+    let consumer = consumer(&bootstrap, "metadata-side-effect");
+    let _ = consumer
+        .fetch_metadata(Some("diff.side-effect"), Duration::from_secs(5))
+        .unwrap();
+
+    let after = broker.cluster().metadata_image();
+    assert_eq!(
+        before.topics[0].partitions[0].replicas,
+        after.topics[0].partitions[0].replicas
+    );
+    assert_eq!(
+        before.topics[0].partitions[0].isr,
+        after.topics[0].partitions[0].isr
+    );
+    assert_eq!(
+        before.topics[0].partitions[0].leader_epoch,
+        after.topics[0].partitions[0].leader_epoch
+    );
+
     handle.abort();
     let _ = handle.await;
 }
@@ -257,8 +388,6 @@ async fn real_kafka_and_local_broker_match_empty_assignment_sync() {
 }
 
 async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPartitionSnapshot {
-    const INVALID_PARTITION: i32 = 3;
-
     let producer = producer(bootstrap);
     producer
         .send(
@@ -273,11 +402,11 @@ async fn invalid_partition_snapshot(bootstrap: &str, topic: &str) -> InvalidPart
             FutureRecord::to(topic)
                 .payload("bad")
                 .key("bad-key")
-                .partition(INVALID_PARTITION),
+                .partition(INVALID_PARTITION_INDEX),
             Duration::from_secs(10),
         )
         .await
-        .expect_err("out-of-range partition should fail");
+        .expect_err("invalid partition should fail");
 
     InvalidPartitionSnapshot {
         error: format!("{:?}", error.0),
@@ -379,6 +508,58 @@ async fn stale_commit_after_handoff_snapshot(
         offset_after_stale_commit: offset_after_stale.topics[0].partitions[0].committed_offset,
         valid_commit_error: valid_commit.topics[0].partitions[0].error_code,
         offset_after_valid_commit: offset_after_valid.topics[0].partitions[0].committed_offset,
+    }
+}
+
+async fn current_member_stale_commit_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+) -> CurrentMemberStaleCommitSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join = join_group(bootstrap, group_id, None, topic, b"v1");
+    let assignment = encode_assignment(topic);
+    let _sync = sync_group(
+        bootstrap,
+        group_id,
+        join.generation_id,
+        &join.member_id,
+        &join.member_id,
+        &[(&join.member_id, assignment)],
+    );
+
+    let current_commit = offset_commit(
+        bootstrap,
+        group_id,
+        join.generation_id,
+        &join.member_id,
+        topic,
+        0,
+        1,
+    );
+    let stale_commit = offset_commit(
+        bootstrap,
+        group_id,
+        join.generation_id - 1,
+        &join.member_id,
+        topic,
+        0,
+        2,
+    );
+    let offset_after_stale = offset_fetch(bootstrap, group_id, topic, &[0]);
+
+    CurrentMemberStaleCommitSnapshot {
+        current_commit_error: current_commit.topics[0].partitions[0].error_code,
+        stale_commit_error: stale_commit.topics[0].partitions[0].error_code,
+        offset_after_stale_commit: offset_after_stale.topics[0].partitions[0].committed_offset,
     }
 }
 
@@ -580,6 +761,36 @@ async fn empty_assignment_sync_snapshot(
     }
 }
 
+async fn leave_group_snapshot(bootstrap: &str, topic: &str, group_id: &str) -> LeaveGroupSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("seed").key("seed-key"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let join = complete_join_group(bootstrap, group_id, topic, b"v1");
+    let assignment = encode_assignment(topic);
+    let _sync = sync_group(
+        bootstrap,
+        group_id,
+        join.generation_id,
+        &join.member_id,
+        &join.member_id,
+        &[(&join.member_id, assignment)],
+    );
+
+    let leave = leave_group(bootstrap, group_id, &join.member_id);
+    let post_leave_heartbeat = heartbeat(bootstrap, group_id, join.generation_id, &join.member_id);
+
+    LeaveGroupSnapshot {
+        leave_error: leave.error_code,
+        post_leave_heartbeat_error: post_leave_heartbeat.error_code,
+    }
+}
+
 async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataSnapshot {
     let consumer = consumer(bootstrap, &format!("meta-{topic}"));
     let metadata = consumer
@@ -613,8 +824,9 @@ async fn produce_consume_snapshot(bootstrap: &str, topic: &str) -> ProduceConsum
         .unwrap();
 
     let consumer = consumer(bootstrap, &format!("direct-{topic}"));
+    wait_for_topic(bootstrap, topic, 1);
     let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(topic, 0, Offset::Beginning)
+    tpl.add_partition_offset(topic, partition, Offset::Beginning)
         .unwrap();
     consumer.assign(&tpl).unwrap();
     let message = poll_for_message(&consumer, Duration::from_secs(10));
@@ -691,6 +903,7 @@ async fn multi_partition_roundtrip_snapshot(
         .unwrap();
 
     let consumer = consumer(bootstrap, &format!("multi-{topic}"));
+    wait_for_topic(bootstrap, topic, DIFFERENTIAL_DEFAULT_PARTITIONS as usize);
     let mut tpl = TopicPartitionList::new();
     tpl.add_partition_offset(topic, 1, Offset::Beginning)
         .unwrap();
@@ -776,6 +989,67 @@ async fn multi_partition_offset_fetch_snapshot(
     }
 }
 
+async fn partition_scoped_resume_snapshot(
+    bootstrap: &str,
+    topic: &str,
+) -> PartitionScopedResumeSnapshot {
+    let producer = producer(bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p1-first")
+                .key("k")
+                .partition(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let group_id = format!("group.partition-scoped.{topic}");
+    let consumer = group_consumer(bootstrap, &group_id);
+    consumer.subscribe(&[topic]).unwrap();
+    let first = poll_for_message(&consumer, Duration::from_secs(10));
+    assert_eq!(first.partition(), 1);
+    consumer
+        .commit_message(&first, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+    drop(first);
+    drop(consumer);
+
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p1-second")
+                .key("k")
+                .partition(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload("p2-only")
+                .key("k")
+                .partition(2),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let resumed = group_consumer(bootstrap, &group_id);
+    resumed.subscribe(&[topic]).unwrap();
+    let first = poll_for_message(&resumed, Duration::from_secs(10));
+    let second = poll_for_message(&resumed, Duration::from_secs(10));
+    let mut rows = vec![
+        (first.partition(), first.payload().unwrap().to_vec()),
+        (second.partition(), second.payload().unwrap().to_vec()),
+    ];
+    rows.sort_by_key(|row| row.0);
+
+    PartitionScopedResumeSnapshot { resumed: rows }
+}
+
 async fn start_local_broker() -> (
     String,
     tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -783,19 +1057,13 @@ async fn start_local_broker() -> (
 ) {
     let tempdir = tempdir().unwrap();
     let port = free_port();
-    let config = Config {
-        broker: BrokerConfig {
-            port,
-            advertised_port: port,
-            ..BrokerConfig::default()
-        },
-        storage: StorageConfig {
-            data_dir: tempdir.path().join("kafkalite-data"),
-            default_partitions: 3,
-        },
-    };
+    let config = Config::single_node(
+        tempdir.path().join("kafkalite-data"),
+        port,
+        DIFFERENTIAL_DEFAULT_PARTITIONS,
+    );
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store);
+    let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
     (format!("127.0.0.1:{port}"), handle, tempdir)
@@ -865,6 +1133,26 @@ fn bootstrap_available(bootstrap: &str) -> bool {
         .is_ok()
 }
 
+fn wait_for_topic(bootstrap: &str, topic: &str, expected_partition_count: usize) {
+    let consumer = consumer(bootstrap, &format!("wait-{topic}"));
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if let Ok(metadata) = consumer.fetch_metadata(Some(topic), Duration::from_secs(1))
+            && metadata
+                .topics()
+                .iter()
+                .find(|metadata_topic| metadata_topic.name() == topic)
+                .is_some_and(|metadata_topic| {
+                    metadata_topic.partitions().len() >= expected_partition_count
+                })
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("topic {topic} did not become visible with {expected_partition_count} partitions");
+}
+
 fn join_group(
     bootstrap: &str,
     group_id: &str,
@@ -873,6 +1161,27 @@ fn join_group(
     user_data: &[u8],
 ) -> JoinGroupResponse {
     join_group_with_timeout(bootstrap, group_id, member_id, topic, user_data, 5_000)
+}
+
+fn complete_join_group(
+    bootstrap: &str,
+    group_id: &str,
+    topic: &str,
+    user_data: &[u8],
+) -> JoinGroupResponse {
+    const MEMBER_ID_REQUIRED: i16 = 79;
+
+    let joined = join_group(bootstrap, group_id, None, topic, user_data);
+    if joined.error_code == MEMBER_ID_REQUIRED {
+        return join_group(
+            bootstrap,
+            group_id,
+            Some(joined.member_id.as_ref()),
+            topic,
+            user_data,
+        );
+    }
+    joined
 }
 
 fn join_group_with_timeout(
@@ -915,6 +1224,21 @@ fn heartbeat(
             .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
             .with_generation_id(generation_id)
             .with_member_id(StrBytes::from(member_id.to_string())),
+    )
+}
+
+fn leave_group(bootstrap: &str, group_id: &str, member_id: &str) -> LeaveGroupResponse {
+    send_request::<LeaveGroupRequest, LeaveGroupResponse>(
+        bootstrap,
+        ApiKey::LeaveGroup,
+        protocol::LEAVE_GROUP_VERSION,
+        LeaveGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_members(vec![
+                MemberIdentity::default()
+                    .with_member_id(StrBytes::from(member_id.to_string()))
+                    .with_group_instance_id(None),
+            ]),
     )
 }
 

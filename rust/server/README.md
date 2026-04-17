@@ -99,10 +99,37 @@ make publish-dry-run-dirty
 - `make fmt` checks Rust formatting
 - `make clippy` runs lint checks with warnings denied
 - `make test` runs the Rust server/client suites, including the fast local `tests/contract.rs` contract layer
-- `make test-python` provisions a temporary virtualenv and runs the Python compatibility smoke test
+- `make test-python` provisions a temporary virtualenv and runs the broader aiokafka compatibility matrix
 - `make test-differential` starts a temporary single-node Kafka container and compares supported roundtrips against the local broker
 - `make publish-dry-run` validates the clean release candidate that would be uploaded to crates.io
 - `make publish-dry-run-dirty` is a local-only escape hatch for package iteration before committing
+
+## Fuzzing runbook (PR1)
+
+From the repository root, after installing `cargo-fuzz`:
+
+```bash
+cargo install cargo-fuzz
+cd rust/server/fuzz
+cargo fuzz list
+cargo fuzz run protocol_peek_header -- -runs=1000
+cargo fuzz run cluster_codec_decode -- -runs=1000
+```
+
+- `protocol_peek_header` exercises `peek_key_and_version` parsing behavior on raw request bytes.
+- `cluster_codec_decode` exercises both `cluster::codec::{decode_request, decode_response}`.
+- Keep fuzz corpora/artifacts under `rust/server/fuzz/` and record bounded-smoke outcomes in PR evidence.
+
+Current `make test-python` coverage includes:
+
+- basic `AIOKafkaProducer.send_and_wait` + `AIOKafkaConsumer.getone` roundtrip on partition `0`
+- manual offset commit and committed-offset reload for the same consumer group
+- multi-partition topic metadata via `producer.partitions_for`
+- `beginning_offsets` / `end_offsets` checks for partitions `1` and `2`
+- direct assigned reads with `assign` + `seek` on partitions `1` and `2`
+- batch-style consumption via `AIOKafkaConsumer.getmany`
+- failure-path validation for aiokafka rejecting out-of-range explicit partitions before send
+- Adapter-style adapter flow: JSON serializer/deserializer, headers argument usage, constructor topic subscription, manual commit, and same-group resume
 
 ## Benchmark commands
 

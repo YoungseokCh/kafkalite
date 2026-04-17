@@ -1,0 +1,25 @@
+[package]
+name = "kafkalite-server-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+kafkalite_server = { package = "kafkalite-server", path = ".." }
+bytes = "1.10"
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "protocol_peek_header"
+path = "fuzz_targets/protocol_peek_header.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cluster_codec_decode"
+path = "fuzz_targets/cluster_codec_decode.rs"
+test = false
+doc = false

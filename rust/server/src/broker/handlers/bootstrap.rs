@@ -9,6 +9,7 @@ use kafka_protocol::messages::{
 };
 use kafka_protocol::protocol::StrBytes;
 
+use crate::cluster::{ClusterMetadataImage, TopicMetadataImage};
 use crate::protocol;
 
 use super::super::KafkaBroker;
@@ -55,69 +56,70 @@ pub async fn handle_metadata(
             .collect::<Vec<_>>()
     });
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if request.allow_auto_topic_creation {
-        if let Some(requested) = names.as_ref() {
-            for topic in requested {
-                broker.store().ensure_topic(
-                    topic,
-                    broker.config().storage.default_partitions,
-                    now_ms,
-                )?;
-            }
+    let mut created = false;
+    if request.allow_auto_topic_creation
+        && let Some(requested) = names.as_ref()
+        && broker.cluster().can_auto_create_topics_locally()
+    {
+        for topic in requested {
+            broker.store().ensure_topic(
+                topic,
+                broker.config().storage.default_partitions,
+                now_ms,
+            )?;
+            created = true;
         }
     }
-    let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
-    let known_topics = metadata
-        .into_iter()
-        .map(|topic| (topic.name.clone(), topic))
-        .collect::<std::collections::BTreeMap<_, _>>();
-
-    let node_id = BrokerId(broker.config().broker.broker_id);
+    if created {
+        let metadata = broker.store().topic_metadata(names.as_deref(), now_ms)?;
+        broker.sync_topic_metadata(&metadata)?;
+    }
+    let image = broker.cluster().metadata_image();
 
     let topics = if let Some(requested) = names {
         requested
             .into_iter()
-            .map(|name| match known_topics.get(&name) {
-                Some(topic) => MetadataResponseTopic::default()
-                    .with_error_code(0)
-                    .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
-                    .with_is_internal(false)
-                    .with_partitions(topic_partitions(topic, node_id)),
-                None => MetadataResponseTopic::default()
-                    .with_error_code(3)
-                    .with_name(Some(TopicName(StrBytes::from(name))))
-                    .with_is_internal(false)
-                    .with_partitions(vec![]),
-            })
+            .map(
+                |name| match image.topics.iter().find(|topic| topic.name == name) {
+                    Some(topic) => MetadataResponseTopic::default()
+                        .with_error_code(0)
+                        .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
+                        .with_is_internal(false)
+                        .with_partitions(topic_partitions(topic)),
+                    None => MetadataResponseTopic::default()
+                        .with_error_code(3)
+                        .with_name(Some(TopicName(StrBytes::from(name))))
+                        .with_is_internal(false)
+                        .with_partitions(vec![]),
+                },
+            )
             .collect()
     } else {
-        known_topics
-            .into_values()
+        image
+            .topics
+            .iter()
             .map(|topic| {
                 MetadataResponseTopic::default()
                     .with_error_code(0)
                     .with_name(Some(TopicName(StrBytes::from(topic.name.clone()))))
                     .with_is_internal(false)
-                    .with_partitions(topic_partitions(&topic, node_id))
+                    .with_partitions(topic_partitions(topic))
             })
             .collect()
     };
 
-    let broker_node = MetadataResponseBroker::default()
-        .with_node_id(node_id)
-        .with_host(StrBytes::from(
-            broker.config().broker.advertised_host.clone(),
-        ))
-        .with_port(i32::from(broker.config().broker.advertised_port))
-        .with_rack(None);
+    let brokers = metadata_brokers(&image, broker);
+    let controller_id = broker
+        .cluster()
+        .quorum_snapshot()
+        .leader_id
+        .unwrap_or(image.controller_id);
 
     Ok(MetadataResponse::default()
         .with_throttle_time_ms(0)
-        .with_brokers(vec![broker_node])
-        .with_cluster_id(Some(StrBytes::from(
-            broker.config().broker.cluster_id.clone(),
-        )))
-        .with_controller_id(node_id)
+        .with_brokers(brokers)
+        .with_cluster_id(Some(StrBytes::from(image.cluster_id.clone())))
+        .with_controller_id(BrokerId(controller_id))
         .with_topics(topics))
 }
 
@@ -139,10 +141,32 @@ fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {
         .with_max_version(max_version)
 }
 
-fn topic_partitions(
-    topic: &crate::store::TopicMetadata,
-    node_id: BrokerId,
-) -> Vec<MetadataResponsePartition> {
+fn metadata_brokers(
+    image: &ClusterMetadataImage,
+    broker: &KafkaBroker,
+) -> Vec<MetadataResponseBroker> {
+    let brokers = if image.brokers.is_empty() {
+        vec![crate::cluster::BrokerMetadata {
+            node_id: broker.config().broker.broker_id,
+            host: broker.config().broker.advertised_host.clone(),
+            port: broker.config().broker.advertised_port,
+        }]
+    } else {
+        image.brokers.clone()
+    };
+    brokers
+        .iter()
+        .map(|broker| {
+            MetadataResponseBroker::default()
+                .with_node_id(BrokerId(broker.node_id))
+                .with_host(StrBytes::from(broker.host.clone()))
+                .with_port(i32::from(broker.port))
+                .with_rack(None)
+        })
+        .collect()
+}
+
+fn topic_partitions(topic: &TopicMetadataImage) -> Vec<MetadataResponsePartition> {
     topic
         .partitions
         .iter()
@@ -150,11 +174,198 @@ fn topic_partitions(
             MetadataResponsePartition::default()
                 .with_error_code(0)
                 .with_partition_index(partition.partition)
-                .with_leader_id(node_id)
-                .with_leader_epoch(0)
-                .with_replica_nodes(vec![node_id])
-                .with_isr_nodes(vec![node_id])
+                .with_leader_id(BrokerId(partition.leader_id))
+                .with_leader_epoch(partition.leader_epoch)
+                .with_replica_nodes(partition.replicas.iter().copied().map(BrokerId).collect())
+                .with_isr_nodes(partition.isr.iter().copied().map(BrokerId).collect())
                 .with_offline_replicas(vec![])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::broker::KafkaBroker;
+    use crate::config::Config;
+    use crate::store::FileStore;
+
+    #[tokio::test]
+    async fn metadata_without_topic_filter_returns_all_known_topics() {
+        let broker = test_broker();
+        let create = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("all.topic".to_string())),
+            ))]));
+        let _ = handle_metadata(&broker, create).await.unwrap();
+
+        let mut request = MetadataRequest::default();
+        request.topics = None;
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 0);
+        assert_eq!(
+            response.topics[0].name.as_ref().unwrap().0.to_string(),
+            "all.topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_can_auto_create_requested_topic_locally() {
+        let broker = test_broker();
+        assert!(broker.cluster().can_auto_create_topics_locally());
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("autocreate.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.iter().any(|topic| {
+            topic.error_code == 0
+                && topic
+                    .name
+                    .as_ref()
+                    .map(|name| name.0.to_string())
+                    .as_deref()
+                    == Some("autocreate.topic")
+        }));
+    }
+
+    #[tokio::test]
+    async fn metadata_requested_topic_without_auto_create_returns_unknown_topic() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(false)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("missing.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 3);
+    }
+
+    #[tokio::test]
+    async fn metadata_auto_create_is_ignored_without_local_controller_authority() {
+        let broker = non_writable_broker();
+        assert!(!broker.cluster().can_auto_create_topics_locally());
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from("blocked.topic".to_string())),
+            ))]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].error_code, 3);
+    }
+
+    #[tokio::test]
+    async fn metadata_uses_registered_broker_list_when_present() {
+        let broker = test_broker();
+        let registration = broker
+            .cluster()
+            .handle_register_broker(
+                crate::cluster::RegisterBrokerRequest {
+                    node_id: 7,
+                    advertised_host: "registered-broker".to_string(),
+                    advertised_port: 39092,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(registration.accepted);
+
+        let response = handle_metadata(&broker, MetadataRequest::default())
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .brokers
+                .iter()
+                .any(|entry| entry.node_id.0 == 7 && entry.host.to_string() == "registered-broker")
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_auto_create_with_unnamed_topics_is_noop() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(None)]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.is_empty());
+        let metadata = broker.store().topic_metadata(None, 0).unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_auto_create_enabled_without_topics_does_not_create() {
+        let broker = test_broker();
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(None);
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.is_empty());
+        let metadata = broker.store().topic_metadata(None, 0).unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_with_explicit_empty_topic_list_returns_empty_topics() {
+        let broker = test_broker();
+        let request = MetadataRequest::default().with_topics(Some(vec![]));
+
+        let response = handle_metadata(&broker, request).await.unwrap();
+
+        assert!(response.topics.is_empty());
+    }
+
+    fn test_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let config = Config::single_node(dir.join("data"), 9092, 1);
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
+    }
+
+    fn non_writable_broker() -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join("data"), 9092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![
+            crate::cluster::ProcessRole::Broker,
+            crate::cluster::ProcessRole::Controller,
+        ];
+        config.cluster.controller_quorum_voters = vec![
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9094,
+            },
+        ];
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
+    }
 }

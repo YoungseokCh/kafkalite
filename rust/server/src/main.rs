@@ -31,7 +31,10 @@ async fn main() {
         }),
     );
 
-    let broker = KafkaBroker::new(config.clone(), store);
+    let broker = KafkaBroker::new(config.clone(), store).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize kafkalite broker: {err}");
+        std::process::exit(1);
+    });
     if let Err(err) = broker.run().await {
         eprintln!("Kafka broker failed: {err}");
         std::process::exit(1);
@@ -57,5 +60,27 @@ fn ensure_parent_dir(path: &Path) {
             );
             std::process::exit(1);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn ensure_parent_dir_creates_missing_parent_directories() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/store/log.bin");
+
+        ensure_parent_dir(&path);
+
+        assert!(path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn ensure_parent_dir_is_noop_without_parent_component() {
+        ensure_parent_dir(Path::new("leaf"));
     }
 }

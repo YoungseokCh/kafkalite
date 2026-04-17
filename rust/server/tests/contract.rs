@@ -6,7 +6,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use kafkalite_server::{
     Config, FileStore, KafkaBroker,
-    config::{BrokerConfig, StorageConfig},
     store::{BrokerRecord, Storage, StoreError},
 };
 use rdkafka::config::ClientConfig;
@@ -305,19 +304,13 @@ async fn start_broker_in_dir_with_partitions(
     default_partitions: i32,
 ) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let port = free_port();
-    let config = Config {
-        broker: BrokerConfig {
-            port,
-            advertised_port: port,
-            ..BrokerConfig::default()
-        },
-        storage: StorageConfig {
-            data_dir: tempdir.path().join("kafkalite-data"),
-            default_partitions,
-        },
-    };
+    let config = Config::single_node(
+        tempdir.path().join("kafkalite-data"),
+        port,
+        default_partitions,
+    );
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store);
+    let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
     (format!("127.0.0.1:{port}"), handle)

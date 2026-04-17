@@ -1,5 +1,6 @@
 use anyhow::Result;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use kafka_protocol::indexmap::IndexMap;
 use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsTopicResponse,
@@ -19,6 +20,7 @@ use crate::store::{BrokerRecord, StoreError};
 use super::super::KafkaBroker;
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const UNKNOWN_PRODUCER_ID: i16 = 59;
@@ -42,12 +44,66 @@ pub async fn handle_produce(
                 .collect::<Vec<_>>();
             let now = chrono::Utc::now().timestamp_millis();
             maybe_auto_create_topic(broker, &topic_name, partition_data.index, now)?;
+            if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
+                partitions.push(
+                    PartitionProduceResponse::default()
+                        .with_index(partition_data.index)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_base_offset(-1)
+                        .with_log_append_time_ms(-1)
+                        .with_log_start_offset(0)
+                        .with_record_errors(vec![])
+                        .with_error_message(None),
+                );
+                continue;
+            }
+            let known_local = broker
+                .store()
+                .topic_metadata(Some(std::slice::from_ref(&topic_name)), now)
+                .map(|topics| {
+                    topics.iter().any(|topic| {
+                        topic
+                            .partitions
+                            .iter()
+                            .any(|p| p.partition == partition_data.index)
+                    })
+                })
+                .unwrap_or(false);
+            if !known_local {
+                partitions.push(
+                    PartitionProduceResponse::default()
+                        .with_index(partition_data.index)
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
+                        .with_base_offset(-1)
+                        .with_log_append_time_ms(-1)
+                        .with_log_start_offset(0)
+                        .with_record_errors(vec![])
+                        .with_error_message(None),
+                );
+                continue;
+            }
             let produce_result =
                 broker
                     .store()
                     .append_records(&topic_name, partition_data.index, &flattened, now);
             let (error_code, base_offset) = match produce_result {
-                Ok((base_offset, _)) => (0, base_offset),
+                Ok((base_offset, _)) => {
+                    if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
+                        let _ = broker.store().truncate_partition(
+                            &topic_name,
+                            partition_data.index,
+                            base_offset,
+                        );
+                        (NOT_LEADER_OR_FOLLOWER, -1)
+                    } else {
+                        let _ = broker.update_local_replica_progress(
+                            &topic_name,
+                            partition_data.index,
+                            now,
+                        );
+                        (0, base_offset)
+                    }
+                }
                 Err(StoreError::UnknownTopicOrPartition { .. }) => (UNKNOWN_TOPIC_OR_PARTITION, -1),
                 Err(StoreError::InvalidProducerSequence { .. }) => {
                     (OUT_OF_ORDER_SEQUENCE_NUMBER, -1)
@@ -85,20 +141,50 @@ pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result
         let mut partitions = Vec::new();
         let topic_name = topic.topic.to_string();
         for partition in topic.partitions {
-            match broker.store().fetch_records(
+            if !broker.is_local_partition_leader(&topic_name, partition.partition) {
+                partitions.push(
+                    PartitionData::default()
+                        .with_partition_index(partition.partition)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_high_watermark(-1)
+                        .with_last_stable_offset(-1)
+                        .with_log_start_offset(-1)
+                        .with_aborted_transactions(None)
+                        .with_preferred_read_replica(BrokerId(-1))
+                        .with_records(None),
+                );
+                continue;
+            }
+            match broker.store().fetch_records_for_client(
                 &topic_name,
                 partition.partition,
                 partition.fetch_offset,
                 1_000,
             ) {
                 Ok(fetched) => {
-                    let records = encode_records(&fetched.records)?;
+                    let high_watermark = broker
+                        .partition_high_watermark(&topic_name, partition.partition)
+                        .filter(|_| !fetched.records.is_empty())
+                        .unwrap_or(fetched.high_watermark);
+                    let visible_records = if high_watermark == 0
+                        && !fetched.records.is_empty()
+                        && !broker.partition_has_replica_progress(&topic_name, partition.partition)
+                    {
+                        fetched.records.clone()
+                    } else {
+                        fetched
+                            .records
+                            .into_iter()
+                            .filter(|record| record.offset < high_watermark)
+                            .collect::<Vec<_>>()
+                    };
+                    let records = encode_records(&visible_records)?;
                     partitions.push(
                         PartitionData::default()
                             .with_partition_index(partition.partition)
                             .with_error_code(0)
-                            .with_high_watermark(fetched.high_watermark)
-                            .with_last_stable_offset(fetched.high_watermark)
+                            .with_high_watermark(high_watermark)
+                            .with_last_stable_offset(high_watermark)
                             .with_log_start_offset(0)
                             .with_aborted_transactions(None)
                             .with_preferred_read_replica(BrokerId(-1))
@@ -144,6 +230,17 @@ pub async fn handle_list_offsets(
         let topic_name = topic.name.to_string();
         let mut partitions = Vec::new();
         for partition in topic.partitions {
+            if !broker.is_local_partition_leader(&topic_name, partition.partition_index) {
+                partitions.push(
+                    ListOffsetsPartitionResponse::default()
+                        .with_partition_index(partition.partition_index)
+                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
+                        .with_timestamp(-1)
+                        .with_offset(-1)
+                        .with_leader_epoch(-1),
+                );
+                continue;
+            }
             match broker
                 .store()
                 .list_offsets(&topic_name, partition.partition_index)
@@ -202,9 +299,16 @@ fn maybe_auto_create_topic(
     if partition < 0 || partition >= broker.config().storage.default_partitions {
         return Ok(());
     }
+    if !broker.cluster().can_auto_create_topics_locally() {
+        return Ok(());
+    }
     broker
         .store()
         .ensure_topic(topic, broker.config().storage.default_partitions, now_ms)?;
+    let metadata = broker
+        .store()
+        .topic_metadata(Some(&[topic.to_string()]), now_ms)?;
+    broker.sync_topic_metadata(&metadata)?;
     Ok(())
 }
 
@@ -244,7 +348,7 @@ fn encode_records(records: &[BrokerRecord]) -> Result<bytes::Bytes> {
             timestamp: record.timestamp_ms,
             key: record.key.clone(),
             value: record.value.clone(),
-            headers: Default::default(),
+            headers: decode_headers(&record.headers_json),
         })
         .collect::<Vec<_>>();
     let mut encoded = BytesMut::new();
@@ -259,6 +363,14 @@ fn encode_records(records: &[BrokerRecord]) -> Result<bytes::Bytes> {
     Ok(encoded.freeze())
 }
 
+fn decode_headers(headers_json: &[u8]) -> IndexMap<StrBytes, Option<Bytes>> {
+    serde_json::from_slice::<Vec<(String, Option<Vec<u8>>)>>(headers_json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| (StrBytes::from(key), value.map(Bytes::from)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -268,7 +380,8 @@ mod tests {
     use kafka_protocol::messages::{ProduceRequest, TopicName};
     use tempfile::tempdir;
 
-    use crate::config::{BrokerConfig, Config, StorageConfig};
+    use crate::cluster::{ControllerQuorumVoter, ProcessRole};
+    use crate::config::Config;
     use crate::store::FileStore;
 
     use super::*;
@@ -344,17 +457,1003 @@ mod tests {
         assert_eq!(partition.base_offset, -1);
     }
 
+    #[tokio::test]
+    async fn produce_is_rejected_when_local_broker_is_not_leader() {
+        let broker = test_broker();
+        broker.store().ensure_topic("remote.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["remote.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 9,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "remote.topic".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 0,
+                            leader_id: 9,
+                            leader_epoch: 1,
+                            high_watermark: 0,
+                            replicas: vec![9],
+                            isr: vec![9],
+                            replica_progress: vec![],
+                            reassignment: None,
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let response = handle_produce(&broker, produce_request("remote.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.responses[0].partition_responses[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_and_list_offsets_are_rejected_when_local_broker_is_not_leader() {
+        let broker = test_broker();
+        broker.store().ensure_topic("remote.fetch", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["remote.fetch".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 9,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "remote.fetch".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 0,
+                            leader_id: 9,
+                            leader_epoch: 1,
+                            high_watermark: 0,
+                            replicas: vec![9],
+                            isr: vec![9],
+                            replica_progress: vec![],
+                            reassignment: None,
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("remote.fetch".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fetch.responses[0].partitions[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+
+        let offsets = handle_list_offsets(
+            &broker,
+            ListOffsetsRequest::default().with_topics(vec![
+                kafka_protocol::messages::list_offsets_request::ListOffsetsTopic::default()
+                    .with_name(TopicName(StrBytes::from("remote.fetch".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::list_offsets_request::ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_timestamp(-1),
+                    ]),
+            ]),
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offsets.topics[0].partitions[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+    }
+
+    #[tokio::test]
+    async fn produce_returns_unknown_when_metadata_is_local_but_store_partition_missing() {
+        let broker = test_broker();
+        let initial_offset = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: initial_offset,
+                records: vec![crate::cluster::MetadataRecord::UpsertTopic(
+                    crate::cluster::TopicMetadataImage {
+                        name: "missing-local.topic".to_string(),
+                        partitions: vec![crate::cluster::PartitionMetadataImage {
+                            partition: 1,
+                            leader_id: 1,
+                            leader_epoch: 1,
+                            high_watermark: 0,
+                            replicas: vec![1],
+                            isr: vec![1],
+                            replica_progress: vec![],
+                            reassignment: None,
+                        }],
+                    },
+                )],
+            })
+            .unwrap();
+
+        let response = handle_produce(
+            &broker,
+            produce_request_for_partition("missing-local.topic", 1, -1, -1, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.responses[0].partition_responses[0].error_code,
+            UNKNOWN_TOPIC_OR_PARTITION
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_uses_metadata_high_watermark_when_replication_progress_exists() {
+        let broker = test_broker();
+        broker.store().ensure_topic("hw.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["hw.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+
+        let _ = handle_produce(&broker, produce_request("hw.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        broker
+            .cluster()
+            .handle_update_partition_replication(
+                crate::cluster::UpdatePartitionReplicationRequest {
+                    topic_name: "hw.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![1, 2],
+                    isr: vec![1, 2],
+                    leader_epoch: 1,
+                },
+            )
+            .unwrap();
+        broker
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "hw.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 1,
+                log_end_offset: 1,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        broker
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "hw.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 2,
+                log_end_offset: 0,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("hw.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fetch.responses[0].partitions[0].high_watermark, 0);
+        assert_eq!(fetch.responses[0].partitions[0].last_stable_offset, 0);
+    }
+
+    #[test]
+    fn encode_records_round_trips_nonzero_offsets() {
+        let encoded = encode_records(&[
+            BrokerRecord {
+                offset: 1,
+                timestamp_ms: 100,
+                producer_id: -1,
+                producer_epoch: -1,
+                sequence: -1,
+                key: Some(Bytes::from_static(b"key-1")),
+                value: Some(Bytes::from_static(b"value-1")),
+                headers_json: vec![],
+            },
+            BrokerRecord {
+                offset: 2,
+                timestamp_ms: 101,
+                producer_id: -1,
+                producer_epoch: -1,
+                sequence: -1,
+                key: Some(Bytes::from_static(b"key-2")),
+                value: Some(Bytes::from_static(b"value-2")),
+                headers_json: vec![],
+            },
+        ])
+        .unwrap();
+
+        let mut bytes = encoded.clone();
+        let decoded = RecordBatchDecoder::decode_all(&mut bytes).unwrap();
+        let records = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.offset)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.value.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                Bytes::from_static(b"value-1"),
+                Bytes::from_static(b"value-2")
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_records_round_trips_headers() {
+        let encoded = encode_records(&[BrokerRecord {
+            offset: 0,
+            timestamp_ms: 100,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: -1,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: serde_json::to_vec(&vec![
+                ("trace-id".to_string(), Some(b"abc123".to_vec())),
+                ("empty".to_string(), None),
+            ])
+            .unwrap(),
+        }])
+        .unwrap();
+
+        let mut bytes = encoded.clone();
+        let decoded = RecordBatchDecoder::decode_all(&mut bytes).unwrap();
+        let record = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("trace-id".to_string()))
+                .cloned(),
+            Some(Some(Bytes::from_static(b"abc123")))
+        );
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("empty".to_string()))
+                .cloned(),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_headers_from_produced_records() {
+        let broker = test_broker();
+        let records = vec![Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id: -1,
+            producer_epoch: -1,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence: -1,
+            timestamp: 100,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers: IndexMap::from([
+                (
+                    StrBytes::from("trace-id".to_string()),
+                    Some(Bytes::from_static(b"abc123")),
+                ),
+                (StrBytes::from("empty".to_string()), None),
+            ]),
+        }];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from("headers.topic".to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("headers.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let record = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("trace-id".to_string()))
+                .cloned(),
+            Some(Some(Bytes::from_static(b"abc123")))
+        );
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("empty".to_string()))
+                .cloned(),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_null_values_from_produced_records() {
+        let broker = test_broker();
+        let records = vec![Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id: -1,
+            producer_epoch: -1,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence: -1,
+            timestamp: 100,
+            key: Some(Bytes::from_static(b"tombstone-key")),
+            value: None,
+            headers: Default::default(),
+        }];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from("tombstone.topic".to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("tombstone.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let record = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .next()
+            .unwrap();
+
+        assert_eq!(record.key, Some(Bytes::from_static(b"tombstone-key")));
+        assert_eq!(record.value, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_tombstone_with_headers() {
+        let broker = test_broker();
+        let records = vec![Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id: -1,
+            producer_epoch: -1,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence: -1,
+            timestamp: 100,
+            key: Some(Bytes::from_static(b"tombstone-key")),
+            value: None,
+            headers: IndexMap::from([
+                (
+                    StrBytes::from("trace-id".to_string()),
+                    Some(Bytes::from_static(b"abc123")),
+                ),
+                (StrBytes::from("empty".to_string()), None),
+            ]),
+        }];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from(
+                        "tombstone.headers.topic".to_string(),
+                    )))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from(
+                        "tombstone.headers.topic".to_string(),
+                    )))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let record = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .next()
+            .unwrap();
+
+        assert_eq!(record.key, Some(Bytes::from_static(b"tombstone-key")));
+        assert_eq!(record.value, None);
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("trace-id".to_string()))
+                .cloned(),
+            Some(Some(Bytes::from_static(b"abc123")))
+        );
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from("empty".to_string()))
+                .cloned(),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_mixed_key_value_shapes_in_order() {
+        let broker = test_broker();
+        let records = vec![
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 0,
+                sequence: -1,
+                timestamp: 100,
+                key: Some(Bytes::from_static(b"key-one")),
+                value: Some(Bytes::from_static(b"payload-one")),
+                headers: Default::default(),
+            },
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 1,
+                sequence: -1,
+                timestamp: 101,
+                key: Some(Bytes::from_static(b"key-two")),
+                value: None,
+                headers: Default::default(),
+            },
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 2,
+                sequence: -1,
+                timestamp: 102,
+                key: None,
+                value: Some(Bytes::from_static(b"payload-three")),
+                headers: Default::default(),
+            },
+        ];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from("mixed.topic".to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("mixed.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let records = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .collect::<Vec<_>>();
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].key, Some(Bytes::from_static(b"key-one")));
+        assert_eq!(records[0].value, Some(Bytes::from_static(b"payload-one")));
+        assert_eq!(records[1].key, Some(Bytes::from_static(b"key-two")));
+        assert_eq!(records[1].value, None);
+        assert_eq!(records[2].key, None);
+        assert_eq!(records[2].value, Some(Bytes::from_static(b"payload-three")));
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_timestamps_in_order() {
+        let broker = test_broker();
+        let records = vec![
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 0,
+                sequence: -1,
+                timestamp: 100,
+                key: None,
+                value: Some(Bytes::from_static(b"first")),
+                headers: Default::default(),
+            },
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 1,
+                sequence: -1,
+                timestamp: 101,
+                key: None,
+                value: Some(Bytes::from_static(b"second")),
+                headers: Default::default(),
+            },
+        ];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from("timestamps.topic".to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("timestamps.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let records = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .collect::<Vec<_>>();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].timestamp, 100);
+        assert_eq!(records[1].timestamp, 101);
+        assert!(records[1].timestamp >= records[0].timestamp);
+    }
+
+    #[tokio::test]
+    async fn fetch_from_nonzero_offset_keeps_overlapping_batch() {
+        let broker = test_broker();
+        let records = vec![
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 0,
+                sequence: -1,
+                timestamp: 100,
+                key: Some(Bytes::from_static(b"key-0")),
+                value: Some(Bytes::from_static(b"value-0")),
+                headers: Default::default(),
+            },
+            Record {
+                transactional: false,
+                control: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 1,
+                sequence: -1,
+                timestamp: 101,
+                key: Some(Bytes::from_static(b"key-1")),
+                value: Some(Bytes::from_static(b"value-1")),
+                headers: Default::default(),
+            },
+        ];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let request = ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from("fetch.topic".to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ]);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("fetch.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(1)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let offsets = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .map(|record| record.offset)
+            .collect::<Vec<_>>();
+
+        assert_eq!(offsets, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn fetch_from_nonzero_offset_after_separate_batches_returns_tail_record() {
+        let broker = test_broker();
+        let _ = handle_produce(&broker, produce_request("seek.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        let _ = handle_produce(&broker, produce_request("seek.topic", -1, -1, 1))
+            .await
+            .unwrap();
+
+        let fetch = handle_fetch(
+            &broker,
+            FetchRequest::default().with_topics(vec![
+                kafka_protocol::messages::fetch_request::FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from("seek.topic".to_string())))
+                    .with_partitions(vec![
+                        kafka_protocol::messages::fetch_request::FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(1)
+                            .with_partition_max_bytes(1024),
+                    ]),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let mut payload = fetch.responses[0].partitions[0].records.clone().unwrap();
+        let decoded = RecordBatchDecoder::decode_all(&mut payload).unwrap();
+        let offsets = decoded
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .map(|record| record.offset)
+            .collect::<Vec<_>>();
+
+        assert_eq!(fetch.responses[0].partitions[0].high_watermark, 2);
+        assert_eq!(offsets, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn auto_create_is_disabled_without_local_controller_authority() {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join("data"), 9092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9094,
+            },
+        ];
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        let broker = KafkaBroker::new(config, store).unwrap();
+
+        let response = handle_produce(&broker, produce_request("blocked.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.responses[0].partition_responses[0].error_code,
+            NOT_LEADER_OR_FOLLOWER
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_create_noops_for_out_of_range_partitions() {
+        let broker = test_broker();
+
+        maybe_auto_create_topic(&broker, "bounds.topic", -1, 0).unwrap();
+        maybe_auto_create_topic(
+            &broker,
+            "bounds.topic",
+            broker.config().storage.default_partitions,
+            0,
+        )
+        .unwrap();
+
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["bounds.topic".to_string()]), 0)
+            .unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_create_noops_without_local_controller_authority() {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join("data"), 9092, 1);
+        config.cluster.node_id = 2;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9094,
+            },
+        ];
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        let broker = KafkaBroker::new(config, store).unwrap();
+
+        maybe_auto_create_topic(&broker, "blocked.topic", 0, 0).unwrap();
+
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["blocked.topic".to_string()]), 0)
+            .unwrap();
+        assert!(metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_offsets_sets_leader_epoch_by_api_version() {
+        let broker = test_broker();
+        let _ = handle_produce(&broker, produce_request("offsets.topic", -1, -1, 0))
+            .await
+            .unwrap();
+
+        let request = ListOffsetsRequest::default().with_topics(vec![
+            kafka_protocol::messages::list_offsets_request::ListOffsetsTopic::default()
+                .with_name(TopicName(StrBytes::from("offsets.topic".to_string())))
+                .with_partitions(vec![
+                    kafka_protocol::messages::list_offsets_request::ListOffsetsPartition::default()
+                        .with_partition_index(0)
+                        .with_timestamp(-1),
+                ]),
+        ]);
+
+        let v3 = handle_list_offsets(&broker, request.clone(), 3)
+            .await
+            .unwrap();
+        let v4 = handle_list_offsets(&broker, request, 4).await.unwrap();
+
+        assert_eq!(v3.topics[0].partitions[0].error_code, 0);
+        assert_eq!(v3.topics[0].partitions[0].leader_epoch, -1);
+        assert_eq!(v4.topics[0].partitions[0].error_code, 0);
+        assert_eq!(v4.topics[0].partitions[0].leader_epoch, 0);
+    }
+
     fn test_broker() -> KafkaBroker {
         let dir = tempdir().unwrap().keep();
-        let config = Config {
-            broker: BrokerConfig::default(),
-            storage: StorageConfig {
-                data_dir: dir.join("data"),
-                ..StorageConfig::default()
-            },
-        };
+        let config = Config::single_node(dir.join("data"), 9092, 1);
         let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-        KafkaBroker::new(config, store)
+        KafkaBroker::new(config, store).unwrap()
     }
 
     fn produce_request(

@@ -129,6 +129,42 @@ impl DataPlaneState {
         self.persist_producers(now_ms)
     }
 
+    pub fn prepare_replica_append(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        records: &[BrokerRecord],
+    ) -> Result<Option<PreparedAppend>> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        let next_offset = runtime.state.next_offset;
+        let appended = records
+            .iter()
+            .filter(|record| record.offset >= next_offset)
+            .cloned()
+            .collect::<Vec<_>>();
+        if appended.is_empty() {
+            return Ok(None);
+        }
+        validate_replica_offsets(next_offset, &appended)?;
+        let base_offset = appended[0].offset;
+        let last_offset = appended
+            .last()
+            .map(|record| record.offset)
+            .unwrap_or(base_offset);
+        Ok(Some(PreparedAppend {
+            topic: topic.to_string(),
+            partition,
+            base_offset,
+            last_offset,
+            records: appended,
+        }))
+    }
+
     pub fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
         self.partition_state(topic, partition)
             .map(|partition| partition.high_watermark)
@@ -156,6 +192,23 @@ impl DataPlaneState {
             })
     }
 
+    pub fn reconcile_partition_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<()> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        runtime.state.next_offset = next_offset;
+        runtime.producer_sequences.clear();
+        Ok(())
+    }
+
     pub fn topic_count(&self) -> usize {
         self.catalog.topic_count()
     }
@@ -171,50 +224,6 @@ impl DataPlaneState {
     pub fn ensure_known_partitions(&mut self, topic: &str, partitions: &[i32], now_ms: i64) {
         self.catalog
             .ensure_known_partitions(topic, partitions, now_ms)
-    }
-
-    pub fn prepare_replica_append(
-        &mut self,
-        topic: &str,
-        partition: i32,
-        records: &[BrokerRecord],
-    ) -> Result<Option<PreparedAppend>> {
-        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
-            StoreError::UnknownTopicOrPartition {
-                topic: topic.to_string(),
-                partition,
-            }
-        })?;
-        if records.is_empty() {
-            return Ok(None);
-        }
-
-        let mut expected = runtime.state.next_offset;
-        for record in records {
-            if record.offset != expected {
-                return Err(StoreError::ReplicaOffsetMismatch {
-                    expected,
-                    actual: record.offset,
-                });
-            }
-            expected += 1;
-        }
-
-        let base_offset = records
-            .first()
-            .map(|record| record.offset)
-            .unwrap_or(expected);
-        let last_offset = records
-            .last()
-            .map(|record| record.offset)
-            .unwrap_or(base_offset);
-        Ok(Some(PreparedAppend {
-            topic: topic.to_string(),
-            partition,
-            base_offset,
-            last_offset,
-            records: records.to_vec(),
-        }))
     }
 
     pub fn finish_replica_append(
@@ -388,6 +397,26 @@ fn duplicate_append_result(
 
 fn tracks_producer_state(producer_id: i64) -> bool {
     producer_id >= 0
+}
+
+fn validate_replica_offsets(next_offset: i64, records: &[BrokerRecord]) -> Result<()> {
+    debug_assert!(!records.is_empty(), "replica append must contain records");
+    let first = &records[0];
+    if first.offset != next_offset {
+        return Err(StoreError::Protocol(format!(
+            "replica append expected offset {next_offset} but started at {}",
+            first.offset
+        )));
+    }
+    for window in records.windows(2) {
+        if window[1].offset != window[0].offset + 1 {
+            return Err(StoreError::Protocol(format!(
+                "replica append offsets must be contiguous: {} followed by {}",
+                window[0].offset, window[1].offset
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ProducerBatchInfo {

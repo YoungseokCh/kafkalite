@@ -4,6 +4,11 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
+use crate::cluster::{
+    ClusterRpcRequest, ClusterRpcResponse, ClusterRpcTarget, ClusterRpcTransport, ClusterRuntime,
+    GetPartitionStateRequest, ReplicaFetchRequest, TcpClusterRpcTransport,
+    UpdateReplicaProgressRequest,
+};
 use crate::config::Config;
 use crate::store::Storage;
 
@@ -12,15 +17,50 @@ use super::dispatcher;
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: Config,
+    cluster: ClusterRuntime,
     store: Arc<dyn Storage>,
 }
 
 impl KafkaBroker {
-    pub fn new(config: Config, store: Arc<dyn Storage>) -> Self {
-        Self { config, store }
+    pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
+        let cluster = ClusterRuntime::from_config(&config)?;
+        let broker = Self {
+            config,
+            cluster,
+            store,
+        };
+        if broker.cluster.can_auto_create_topics_locally() {
+            let metadata = broker
+                .store
+                .topic_metadata(None, chrono::Utc::now().timestamp_millis())?;
+            broker.sync_topic_metadata(&metadata)?;
+        }
+        Ok(broker)
     }
 
     pub async fn run(self) -> Result<()> {
+        if let Some(controller_listener) = self.config.cluster.controller_listener() {
+            let controller_addr = controller_listener.socket_addr()?;
+            let controller_runtime = self.cluster.clone();
+            let controller_store = self.store.clone();
+            let listener = TcpListener::bind(controller_addr).await?;
+            info!(
+                address = %controller_addr,
+                node_id = self.config.cluster.node_id,
+                "kafkalite cluster RPC listening"
+            );
+            tokio::spawn(async move {
+                if let Err(err) = TcpClusterRpcTransport::serve_broker_forever(
+                    listener,
+                    controller_runtime,
+                    controller_store,
+                )
+                .await
+                {
+                    error!(error = %err, "cluster rpc service failed");
+                }
+            });
+        }
         let addr = self.config.socket_addr()?;
         let listener = TcpListener::bind(addr).await?;
         info!(
@@ -51,6 +91,196 @@ impl KafkaBroker {
     pub fn store(&self) -> &Arc<dyn Storage> {
         &self.store
     }
+
+    pub fn cluster(&self) -> &ClusterRuntime {
+        &self.cluster
+    }
+
+    pub fn sync_topic_metadata(&self, topics: &[crate::store::TopicMetadata]) -> Result<()> {
+        self.cluster
+            .sync_local_topics(topics, self.config.broker.broker_id)
+    }
+
+    pub fn is_local_partition_leader(&self, topic: &str, partition: i32) -> bool {
+        let leader = self
+            .cluster()
+            .metadata_image()
+            .partition_leader_id(topic, partition);
+        match leader {
+            Some(leader_id) => leader_id == self.config.broker.broker_id,
+            None => self.cluster.config().controller_quorum_voters.is_empty(),
+        }
+    }
+
+    pub fn partition_high_watermark(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.cluster()
+            .metadata_image()
+            .partition_high_watermark(topic, partition)
+    }
+
+    pub fn partition_has_replica_progress(&self, topic: &str, partition: i32) -> bool {
+        self.cluster()
+            .metadata_image()
+            .partition_has_replica_progress(topic, partition)
+    }
+
+    pub fn update_local_replica_progress(
+        &self,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+    ) -> Result<i64> {
+        let (_, latest) = self.store.list_offsets(topic, partition)?;
+        let response =
+            self.cluster
+                .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: topic.to_string(),
+                    partition_index: partition,
+                    leader_epoch: self
+                        .cluster()
+                        .metadata_image()
+                        .partition_state_view(topic, partition)
+                        .map(|(_, epoch, _, _)| epoch)
+                        .unwrap_or(0),
+                    broker_id: self.config.broker.broker_id,
+                    log_end_offset: latest.offset,
+                    last_caught_up_ms: now_ms,
+                })?;
+        Ok(response.high_watermark)
+    }
+
+    pub fn sync_follower_progress_from_remote<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        target: &ClusterRpcTarget,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+    ) -> Result<i64> {
+        let local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
+        let ClusterRpcResponse::GetPartitionState(state) = transport.send_to(
+            target,
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: topic.to_string(),
+                partition_index: partition,
+            }),
+        )?
+        else {
+            unreachable!("unexpected cluster rpc response variant")
+        };
+        if !state.found {
+            return Ok(-1);
+        }
+        if local_state.0 != 0
+            && (state.leader_id != target.node_id
+                || state.leader_id != local_state.0
+                || state.leader_epoch != local_state.1)
+        {
+            anyhow::bail!("stale leader or epoch during follower progress sync")
+        }
+        let (_, latest) = self.store.list_offsets(topic, partition)?;
+        let response =
+            self.cluster
+                .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: topic.to_string(),
+                    partition_index: partition,
+                    leader_epoch: local_state.1,
+                    broker_id: self.config.broker.broker_id,
+                    log_end_offset: latest.offset.min(state.leader_log_end_offset),
+                    last_caught_up_ms: now_ms,
+                })?;
+        Ok(response.high_watermark)
+    }
+
+    pub fn fetch_and_apply_from_remote_leader<T: ClusterRpcTransport>(
+        &self,
+        transport: &T,
+        target: &ClusterRpcTarget,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+    ) -> Result<i64> {
+        let local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
+        let ClusterRpcResponse::GetPartitionState(leader_state) = transport.send_to(
+            target,
+            ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
+                topic_name: topic.to_string(),
+                partition_index: partition,
+            }),
+        )?
+        else {
+            unreachable!("unexpected cluster rpc response variant")
+        };
+        if !leader_state.found {
+            return Ok(-1);
+        }
+        if local_state.0 != 0
+            && (leader_state.leader_id != target.node_id
+                || leader_state.leader_id != local_state.0
+                || leader_state.leader_epoch != local_state.1)
+        {
+            anyhow::bail!("stale leader or epoch during replica fetch")
+        }
+        let (_, latest) = self.store.list_offsets(topic, partition)?;
+        let fetched = transport.replica_fetch_to(
+            target,
+            ReplicaFetchRequest {
+                topic_name: topic.to_string(),
+                partition_index: partition,
+                start_offset: latest.offset,
+                max_records: 1_000,
+            },
+        )?;
+        let refreshed_local_state = self
+            .cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .ok_or_else(|| anyhow::anyhow!("missing local partition metadata"))?;
+        if refreshed_local_state.0 != 0
+            && (refreshed_local_state.0 != leader_state.leader_id
+                || refreshed_local_state.1 != leader_state.leader_epoch)
+        {
+            anyhow::bail!("leadership changed during replica fetch")
+        }
+        if !fetched.found {
+            return Ok(-1);
+        }
+        if fetched.leader_id != leader_state.leader_id
+            || fetched.leader_epoch != leader_state.leader_epoch
+        {
+            anyhow::bail!("leadership changed before replica fetch response applied")
+        }
+        if latest.offset > fetched.leader_log_end_offset {
+            self.store
+                .truncate_partition(topic, partition, fetched.leader_log_end_offset)?;
+        }
+        if !fetched.records.is_empty() {
+            let _ =
+                self.store
+                    .append_replica_records(topic, partition, &fetched.records, now_ms)?;
+        }
+        let response =
+            self.cluster
+                .handle_update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: topic.to_string(),
+                    partition_index: partition,
+                    leader_epoch: local_state.1,
+                    broker_id: self.config.broker.broker_id,
+                    log_end_offset: fetched
+                        .leader_log_end_offset
+                        .min(self.store.list_offsets(topic, partition)?.1.offset),
+                    last_caught_up_ms: now_ms,
+                })?;
+        Ok(response.high_watermark)
+    }
 }
 
 fn is_expected_disconnect(err: &anyhow::Error) -> bool {
@@ -66,4 +296,716 @@ fn is_expected_disconnect(err: &anyhow::Error) -> bool {
                 )
             })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use bytes::Bytes;
+    use bytes::BytesMut;
+    use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
+    use kafka_protocol::messages::{ProduceRequest, TopicName};
+    use kafka_protocol::protocol::StrBytes;
+    use kafka_protocol::records::{
+        Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+    };
+    use tempfile::tempdir;
+
+    use crate::broker::handlers::produce_fetch::handle_produce;
+    use crate::cluster::{
+        ControllerQuorumVoter, InMemoryRemoteClusterRpcTransport, ProcessRole,
+        test_support::{ThreeNodeClusterHarness, TwoNodeClusterHarness},
+    };
+    use crate::config::Config;
+    use crate::store::{BrokerRecord, FileStore};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct ScriptedTransport {
+        responses: Arc<Mutex<VecDeque<ClusterRpcResponse>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = ClusterRpcResponse>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            }
+        }
+    }
+
+    impl ClusterRpcTransport for ScriptedTransport {
+        fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+            unreachable!("scripted transport only supports targeted sends")
+        }
+
+        fn send_to(
+            &self,
+            _target: &ClusterRpcTarget,
+            _request: ClusterRpcRequest,
+        ) -> Result<ClusterRpcResponse> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("missing scripted response"))
+        }
+    }
+
+    #[tokio::test]
+    async fn produce_updates_local_replica_progress() {
+        let broker = test_broker(1, 19092);
+        broker.store().ensure_topic("progress.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["progress.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+
+        let request = produce_request("progress.topic", -1, -1, 0);
+        let _ = handle_produce(&broker, request).await.unwrap();
+
+        assert_eq!(
+            broker
+                .cluster()
+                .metadata_image()
+                .partition_state_view("progress.topic", 0)
+                .map(|(_, _, _, leo)| leo),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn unknown_partition_leader_fails_closed_in_distributed_mode() {
+        let broker = test_broker_with_voters(1, 19092, voter_pair());
+
+        assert!(!broker.is_local_partition_leader("missing.topic", 0));
+    }
+
+    #[test]
+    fn missing_partition_defaults_to_local_leader_without_quorum() {
+        let broker = test_broker(1, 19092);
+
+        assert!(broker.is_local_partition_leader("missing.topic", 0));
+    }
+
+    #[tokio::test]
+    async fn follower_syncs_progress_from_remote_state() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let leader = test_broker_with_voters(1, 19092, voter_pair());
+        let follower = test_broker_with_voters(2, 19093, voter_pair());
+
+        leader
+            .store()
+            .ensure_topic("replicated.topic", 1, 0)
+            .unwrap();
+        let metadata = leader
+            .store()
+            .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
+            .unwrap();
+        leader.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&leader, "replicated.topic", 1, vec![1, 2], vec![1, 2], 1);
+        let request = produce_request("replicated.topic", -1, -1, 0);
+        let _ = handle_produce(&leader, request).await.unwrap();
+
+        follower
+            .store()
+            .ensure_topic("replicated.topic", 1, 0)
+            .unwrap();
+        let follower_metadata = follower
+            .store()
+            .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
+            .unwrap();
+        follower.sync_topic_metadata(&follower_metadata).unwrap();
+        seed_partition_metadata(&follower, "replicated.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        harness.network.register(1, leader.cluster().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&leader.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+        let high_watermark = follower
+            .sync_follower_progress_from_remote(&transport, &target, "replicated.topic", 0, 100)
+            .unwrap();
+
+        assert_eq!(high_watermark, 0);
+        assert_eq!(
+            follower
+                .cluster()
+                .metadata_image()
+                .partition_state_view("replicated.topic", 0)
+                .map(|(_, _, hw, leo)| (hw, leo)),
+            Some((0, 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn follower_syncs_progress_from_remote_state_in_three_node_isr() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let voters = voter_trio();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker
+                .store()
+                .ensure_topic("replicated.topic", 1, 0)
+                .unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["replicated.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            seed_partition_metadata(
+                broker,
+                "replicated.topic",
+                1,
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                1,
+            );
+        }
+
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 1))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("replicated.topic", -1, -1, 2))
+            .await
+            .unwrap();
+
+        follower
+            .store()
+            .append_replica_records(
+                "replicated.topic",
+                0,
+                &[replica_record(0, 100), replica_record(1, 101)],
+                101,
+            )
+            .unwrap();
+        follower
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "replicated.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 1,
+                log_end_offset: 3,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        follower
+            .cluster()
+            .handle_update_replica_progress(crate::cluster::UpdateReplicaProgressRequest {
+                topic_name: "replicated.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 3,
+                log_end_offset: 3,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+        let high_watermark = follower
+            .sync_follower_progress_from_remote(&transport, &target, "replicated.topic", 0, 200)
+            .unwrap();
+
+        assert_eq!(high_watermark, 2);
+        let image = follower.cluster().metadata_image();
+        let partition = &image.topics[0].partitions[0];
+        assert_eq!(partition.high_watermark, 2);
+        assert_eq!(partition.replica_progress.len(), 3);
+        assert_eq!(partition.replica_progress[0].log_end_offset, 3);
+        assert_eq!(partition.replica_progress[1].log_end_offset, 2);
+        assert_eq!(partition.replica_progress[2].log_end_offset, 3);
+    }
+
+    #[tokio::test]
+    async fn follower_fetches_and_applies_remote_records() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let voters = voter_trio();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            seed_partition_metadata(broker, "rf.topic", 1, vec![1, 2, 3], vec![1, 2, 3], 1);
+        }
+
+        let _ = handle_produce(&leader, produce_request("rf.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        let _ = handle_produce(&leader, produce_request("rf.topic", -1, -1, 1))
+            .await
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        harness.network.register_store(1, leader.store().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+
+        let high_watermark = follower
+            .fetch_and_apply_from_remote_leader(&transport, &target, "rf.topic", 0, 200)
+            .unwrap();
+
+        let fetched = follower
+            .store()
+            .fetch_records("rf.topic", 0, 0, 10)
+            .unwrap();
+        assert_eq!(fetched.records.len(), 2);
+        assert_eq!(fetched.records[0].offset, 0);
+        assert_eq!(fetched.records[1].offset, 1);
+        assert_eq!(high_watermark, 0);
+    }
+
+    #[tokio::test]
+    async fn follower_reconciles_divergence_when_ahead_of_leader() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let voters = voter_pair();
+        let leader = test_broker_with_voters(1, 19092, voters.clone());
+        let follower = test_broker_with_voters(2, 19093, voters);
+
+        for broker in [&leader, &follower] {
+            broker.store().ensure_topic("diverge.topic", 1, 0).unwrap();
+            let metadata = broker
+                .store()
+                .topic_metadata(Some(&["diverge.topic".to_string()]), 0)
+                .unwrap();
+            broker.sync_topic_metadata(&metadata).unwrap();
+            seed_partition_metadata(broker, "diverge.topic", 1, vec![1], vec![1], 1);
+        }
+
+        let _ = handle_produce(&leader, produce_request("diverge.topic", -1, -1, 0))
+            .await
+            .unwrap();
+        follower
+            .store()
+            .append_replica_records(
+                "diverge.topic",
+                0,
+                &[replica_record(0, 100), replica_record(1, 101)],
+                101,
+            )
+            .unwrap();
+
+        harness.network.register(1, leader.cluster().clone());
+        harness.network.register_store(1, leader.store().clone());
+        let transport =
+            InMemoryRemoteClusterRpcTransport::new(&follower.config().cluster, harness.network);
+        let target = transport.resolve_target(1).unwrap();
+
+        let high_watermark = follower
+            .fetch_and_apply_from_remote_leader(&transport, &target, "diverge.topic", 0, 200)
+            .unwrap();
+        let fetched = follower
+            .store()
+            .fetch_records("diverge.topic", 0, 0, 10)
+            .unwrap();
+
+        assert_eq!(high_watermark, 0);
+        assert_eq!(fetched.records.len(), 1);
+        assert_eq!(fetched.records[0].offset, 0);
+    }
+
+    #[test]
+    fn sync_follower_progress_returns_minus_one_when_remote_partition_missing() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: false,
+                leader_id: -1,
+                leader_epoch: -1,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+            },
+        )]);
+
+        let high_watermark = broker
+            .sync_follower_progress_from_remote(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, -1);
+    }
+
+    #[test]
+    fn sync_follower_progress_rejects_stale_remote_leader_metadata() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 9,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+            },
+        )]);
+
+        let err = broker
+            .sync_follower_progress_from_remote(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("stale leader or epoch during follower progress sync"));
+    }
+
+    #[test]
+    fn fetch_and_apply_returns_minus_one_when_remote_partition_missing() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: false,
+                leader_id: -1,
+                leader_epoch: -1,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+            },
+        )]);
+
+        let high_watermark = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, -1);
+    }
+
+    #[test]
+    fn fetch_and_apply_rejects_changed_leadership_in_fetch_response() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::GetPartitionState(crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 1,
+            }),
+            ClusterRpcResponse::ReplicaFetch(crate::cluster::ReplicaFetchResponse {
+                found: true,
+                leader_id: 9,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 1,
+                records: Vec::new(),
+            }),
+        ]);
+
+        let err = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("leadership changed before replica fetch response applied"));
+    }
+
+    #[test]
+    fn fetch_and_apply_accepts_empty_fetch_response() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::GetPartitionState(crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+            }),
+            ClusterRpcResponse::ReplicaFetch(crate::cluster::ReplicaFetchResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+                records: Vec::new(),
+            }),
+        ]);
+
+        let high_watermark = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, 0);
+        assert!(
+            broker
+                .store()
+                .fetch_records("rf.topic", 0, 0, 10)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+    }
+
+    fn test_broker(node_id: i32, port: u16) -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join(format!("node-{node_id}")), port, 1);
+        config.broker.broker_id = node_id;
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        KafkaBroker::new(config, store).unwrap()
+    }
+
+    fn test_broker_with_voters(
+        node_id: i32,
+        port: u16,
+        voters: Vec<ControllerQuorumVoter>,
+    ) -> KafkaBroker {
+        let dir = tempdir().unwrap().keep();
+        let mut config = Config::single_node(dir.join(format!("node-{node_id}")), port, 1);
+        config.cluster.node_id = node_id;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = voters;
+        config.broker.broker_id = node_id;
+        let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+        let broker = KafkaBroker::new(config, store).unwrap();
+        let _ = broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: 1,
+                leader_id: node_id,
+                prev_metadata_offset: broker.cluster().metadata_image().metadata_offset,
+                records: vec![crate::cluster::MetadataRecord::SetController {
+                    controller_id: node_id,
+                }],
+            })
+            .unwrap();
+        broker
+    }
+
+    fn voter_pair() -> Vec<ControllerQuorumVoter> {
+        vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+        ]
+    }
+
+    fn voter_trio() -> Vec<ControllerQuorumVoter> {
+        vec![
+            ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+            ControllerQuorumVoter {
+                node_id: 3,
+                host: "node3".to_string(),
+                port: 9093,
+            },
+        ]
+    }
+
+    fn seed_partition_metadata(
+        broker: &KafkaBroker,
+        topic: &str,
+        leader_id: i32,
+        replicas: Vec<i32>,
+        isr: Vec<i32>,
+        leader_epoch: i32,
+    ) {
+        let append_leader = broker
+            .cluster()
+            .quorum_snapshot()
+            .leader_id
+            .unwrap_or(leader_id);
+        let prev = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: i64::from(leader_epoch.max(1)),
+                leader_id: append_leader,
+                prev_metadata_offset: prev,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionLeader {
+                    topic_name: topic.to_string(),
+                    partition_index: 0,
+                    leader_id,
+                    leader_epoch,
+                }],
+            })
+            .unwrap();
+        let prev = broker.cluster().metadata_image().metadata_offset;
+        broker
+            .cluster()
+            .handle_append_metadata(crate::cluster::AppendMetadataRequest {
+                term: i64::from(leader_epoch.max(1)),
+                leader_id: append_leader,
+                prev_metadata_offset: prev,
+                records: vec![crate::cluster::MetadataRecord::UpdatePartitionReplication {
+                    topic_name: topic.to_string(),
+                    partition_index: 0,
+                    replicas,
+                    isr,
+                    leader_epoch,
+                }],
+            })
+            .unwrap();
+    }
+
+    fn replica_record(offset: i64, timestamp_ms: i64) -> BrokerRecord {
+        BrokerRecord {
+            offset,
+            timestamp_ms,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: offset as i32,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers_json: vec![],
+        }
+    }
+
+    fn produce_request(
+        topic: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        sequence: i32,
+    ) -> ProduceRequest {
+        let records = vec![Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id,
+            producer_epoch,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence,
+            timestamp: 100,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"value")),
+            headers: Default::default(),
+        }];
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        ProduceRequest::default()
+            .with_acks(1)
+            .with_timeout_ms(5_000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(encoded.freeze())),
+                    ]),
+            ])
+    }
 }
