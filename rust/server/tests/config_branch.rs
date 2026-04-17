@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use kafkalite_server::Config;
+use kafkalite_server::cluster::{ClusterConfig, ListenerConfig};
 use tempfile::TempDir;
 
 static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -46,6 +47,19 @@ fn rejects_invalid_listener_shape() {
 fn rejects_invalid_listener_port() {
     let err = load_err("listeners=PLAINTEXT://127.0.0.1:not-a-port\n");
     assert!(err.contains("Invalid port"));
+}
+
+#[test]
+fn rejects_invalid_advertised_listener_shape() {
+    let err =
+        load_err("listeners=PLAINTEXT://127.0.0.1:19092\nadvertised.listeners=PLAINTEXT:29092\n");
+    assert!(err.contains("Invalid listener for advertised.listeners"));
+}
+
+#[test]
+fn rejects_invalid_node_id() {
+    let err = load_err("node.id=not-a-number\nlisteners=PLAINTEXT://127.0.0.1:19092\n");
+    assert!(err.contains("Invalid integer for node.id"));
 }
 
 #[test]
@@ -201,4 +215,50 @@ fn rejects_empty_controller_listener_names_value() {
         "process.roles=broker,controller\nnode.id=1\nlisteners=PLAINTEXT://:19092,CONTROLLER://:19093\ncontroller.listener.names=, ,\ncontroller.quorum.voters=1@node1:19093\n",
     );
     assert!(err.contains("controller.listener.names"));
+}
+
+#[test]
+fn controller_only_config_keeps_default_broker_endpoint_without_plaintext_listener() {
+    let dir = TempDir::new().unwrap();
+    let path = write_config(
+        dir.path(),
+        "process.roles=controller\nnode.id=1\nlisteners=CONTROLLER://127.0.0.1:19093\nadvertised.listeners=CONTROLLER://controller.local:29093\ncontroller.listener.names=CONTROLLER\ncontroller.quorum.voters=1@node1:19093\n",
+    );
+
+    let config = Config::load(path.to_str()).unwrap();
+
+    assert_eq!(config.broker.host, "127.0.0.1");
+    assert_eq!(config.broker.port, 9092);
+    assert_eq!(config.broker.advertised_host, "127.0.0.1");
+    assert_eq!(config.broker.advertised_port, 9092);
+    assert!(config.cluster.client_listener().is_none());
+    assert!(config.cluster.advertised_client_listener().is_none());
+    assert_eq!(
+        config
+            .cluster
+            .controller_listener()
+            .map(|listener| listener.port),
+        Some(19093)
+    );
+}
+
+#[test]
+fn controller_listener_lookup_returns_none_when_named_listener_is_missing() {
+    let config = ClusterConfig {
+        controller_listener_names: vec!["CONTROLLER".to_string()],
+        ..ClusterConfig::default()
+    };
+
+    assert!(config.controller_listener().is_none());
+}
+
+#[test]
+fn listener_socket_addr_rejects_invalid_host() {
+    let listener = ListenerConfig {
+        name: "PLAINTEXT".to_string(),
+        host: "invalid host".to_string(),
+        port: 19092,
+    };
+
+    assert!(listener.socket_addr().is_err());
 }

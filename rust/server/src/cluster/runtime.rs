@@ -807,6 +807,7 @@ impl ClusterRuntime {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
 
@@ -817,6 +818,23 @@ mod tests {
     use crate::config::Config;
 
     use super::*;
+
+    #[derive(Clone, Copy)]
+    struct FailingTransport;
+
+    impl ClusterRpcTransport for FailingTransport {
+        fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+            Err(anyhow!("scripted transport failure"))
+        }
+
+        fn send_to(
+            &self,
+            _target: &crate::cluster::ClusterRpcTarget,
+            _request: ClusterRpcRequest,
+        ) -> Result<ClusterRpcResponse> {
+            Err(anyhow!("scripted transport failure"))
+        }
+    }
 
     #[test]
     fn controller_role_bootstraps_local_leader() {
@@ -853,6 +871,21 @@ mod tests {
         assert_eq!(controller.leader_id, None);
         assert_eq!(controller.registered_brokers.len(), 1);
         assert_eq!(runtime.metadata_image().brokers.len(), 1);
+    }
+
+    #[test]
+    fn from_config_propagates_metadata_store_open_errors() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("not-a-directory");
+        std::fs::write(&file_path, b"blocked").unwrap();
+        let mut config = Config::single_node(file_path, 19092, 1);
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+
+        let err = ClusterRuntime::from_config(&config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Not a directory") || err.contains("not a directory"));
     }
 
     #[test]
@@ -1762,5 +1795,83 @@ mod tests {
             runtime.metadata_image().topics[0].partitions[0].replicas,
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn single_voter_controller_can_auto_create_without_waiting_for_election() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 1;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![crate::cluster::ControllerQuorumVoter {
+            node_id: 1,
+            host: "node1".to_string(),
+            port: 9093,
+        }];
+
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+        assert!(runtime.can_auto_create_topics_locally());
+    }
+
+    #[test]
+    fn run_election_propagates_transport_errors() {
+        let harness = ThreeNodeClusterHarness::new_controller_triplet();
+        let target = harness.transport_from_node(1).resolve_target(2).unwrap();
+        assert!(
+            FailingTransport
+                .send(ClusterRpcRequest::Vote(VoteRequest {
+                    term: 1,
+                    candidate_id: 1,
+                    last_metadata_offset: 0,
+                }))
+                .is_err()
+        );
+
+        let err = harness
+            .node1
+            .runtime
+            .run_election(&FailingTransport, &[target])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("scripted transport failure"));
+    }
+
+    #[test]
+    fn append_with_retry_returns_error_after_retry_budget() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 1;
+        config.cluster.process_roles = vec![ProcessRole::Controller];
+        config.cluster.controller_quorum_voters = vec![
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 1,
+                host: "node1".to_string(),
+                port: 9093,
+            },
+            crate::cluster::ControllerQuorumVoter {
+                node_id: 2,
+                host: "node2".to_string(),
+                port: 9093,
+            },
+        ];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+
+        let err = runtime
+            .append_with_retry(
+                |prev_metadata_offset, term, _leader_id| AppendMetadataRequest {
+                    term,
+                    leader_id: 99,
+                    prev_metadata_offset,
+                    records: vec![crate::cluster::MetadataRecord::SetController {
+                        controller_id: 99,
+                    }],
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("metadata append rejected after retry budget"));
     }
 }

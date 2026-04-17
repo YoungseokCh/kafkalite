@@ -679,6 +679,10 @@ impl ClusterRpcTransport for LocalClusterRpcTransport {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
     use tempfile::tempdir;
     use tokio::net::TcpListener;
 
@@ -686,8 +690,32 @@ mod tests {
         ClusterRuntime, ControllerQuorumVoter, ProcessRole, test_support::TwoNodeClusterHarness,
     };
     use crate::config::Config;
+    use crate::store::FileStore;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct ScriptedTransport {
+        responses: Arc<Mutex<VecDeque<ClusterRpcResponse>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = ClusterRpcResponse>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            }
+        }
+    }
+
+    impl ClusterRpcTransport for ScriptedTransport {
+        fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("missing scripted response"))
+        }
+    }
 
     #[test]
     fn local_transport_dispatches_register_and_heartbeat() {
@@ -1621,5 +1649,1002 @@ mod tests {
 
         server.abort();
         let _ = server.await;
+    }
+
+    #[test]
+    fn in_memory_remote_transport_replica_fetch_without_store_reports_missing() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let transport = harness.transport_from_node1();
+        let target = transport.resolve_target(2).unwrap();
+
+        let response = transport
+            .replica_fetch_to(
+                &target,
+                ReplicaFetchRequest {
+                    topic_name: "missing.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 10,
+                },
+            )
+            .unwrap();
+
+        assert!(!response.found);
+        assert!(response.records.is_empty());
+    }
+
+    #[test]
+    fn in_memory_remote_transport_replica_fetch_unknown_topic_reports_missing() {
+        let harness = TwoNodeClusterHarness::new_controller_pair();
+        let transport = harness.transport_from_node1();
+        let dir = tempdir().unwrap();
+        harness.network.register_store(
+            2,
+            Arc::new(FileStore::open(dir.path().join("node-2-data")).unwrap()),
+        );
+        let target = transport.resolve_target(2).unwrap();
+
+        let response = transport
+            .replica_fetch_to(
+                &target,
+                ReplicaFetchRequest {
+                    topic_name: "missing.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 10,
+                },
+            )
+            .unwrap();
+
+        assert!(!response.found);
+        assert_eq!(response.leader_log_end_offset, -1);
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_typed_wrappers_reject_unexpected_response_variants() {
+        async fn expect_unexpected_response<T>(fut: impl std::future::Future<Output = Result<T>>) {
+            let err = match fut.await {
+                Ok(_) => panic!("expected unexpected response error"),
+                Err(err) => err.to_string(),
+            };
+            assert!(err.contains("unexpected RPC response"));
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..6 {
+                TcpClusterRpcTransport::serve_once(&listener, |_| {
+                    Ok(ClusterRpcResponse::Vote(VoteResponse {
+                        term: 1,
+                        vote_granted: true,
+                    }))
+                })
+                .await
+                .unwrap();
+            }
+        });
+        let target = ClusterRpcTarget {
+            node_id: 4,
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        };
+        let transport = TcpClusterRpcTransport;
+
+        expect_unexpected_response(transport.register_broker_to(
+            &target,
+            RegisterBrokerRequest {
+                node_id: 9,
+                advertised_host: "broker-9.local".to_string(),
+                advertised_port: 39092,
+            },
+        ))
+        .await;
+        expect_unexpected_response(transport.broker_heartbeat_to(
+            &target,
+            BrokerHeartbeatRequest {
+                node_id: 9,
+                broker_epoch: 1,
+                timestamp_ms: 123,
+            },
+        ))
+        .await;
+        expect_unexpected_response(transport.update_partition_replication_to(
+            &target,
+            UpdatePartitionReplicationRequest {
+                topic_name: "missing.topic".to_string(),
+                partition_index: 0,
+                replicas: vec![4],
+                isr: vec![4],
+                leader_epoch: 1,
+            },
+        ))
+        .await;
+        expect_unexpected_response(transport.begin_partition_reassignment_to(
+            &target,
+            BeginPartitionReassignmentRequest {
+                topic_name: "missing.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![4],
+            },
+        ))
+        .await;
+        expect_unexpected_response(transport.update_replica_progress_to(
+            &target,
+            UpdateReplicaProgressRequest {
+                topic_name: "missing.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 4,
+                log_end_offset: 0,
+                last_caught_up_ms: 1,
+            },
+        ))
+        .await;
+        expect_unexpected_response(transport.apply_replica_records_to(
+            &target,
+            ApplyReplicaRecordsRequest {
+                topic_name: "missing.topic".to_string(),
+                partition_index: 0,
+                records: Vec::new(),
+                now_ms: 1,
+            },
+        ))
+        .await;
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_typed_wrappers_accept_expected_response_variants() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                TcpClusterRpcTransport::serve_once(&listener, |request| match request {
+                    ClusterRpcRequest::UpdatePartitionReplication(_) => {
+                        Ok(ClusterRpcResponse::UpdatePartitionReplication(
+                            UpdatePartitionReplicationResponse {
+                                accepted: true,
+                                metadata_offset: 11,
+                            },
+                        ))
+                    }
+                    ClusterRpcRequest::BeginPartitionReassignment(_) => {
+                        Ok(ClusterRpcResponse::BeginPartitionReassignment(
+                            PartitionReassignmentResponse {
+                                accepted: true,
+                                metadata_offset: 12,
+                            },
+                        ))
+                    }
+                    ClusterRpcRequest::UpdateReplicaProgress(_) => Ok(
+                        ClusterRpcResponse::UpdateReplicaProgress(UpdateReplicaProgressResponse {
+                            accepted: true,
+                            metadata_offset: 13,
+                            high_watermark: 13,
+                        }),
+                    ),
+                    ClusterRpcRequest::ApplyReplicaRecords(_) => Ok(
+                        ClusterRpcResponse::ApplyReplicaRecords(ApplyReplicaRecordsResponse {
+                            accepted: true,
+                            next_offset: 14,
+                        }),
+                    ),
+                    other => panic!("unexpected request {other:?}"),
+                })
+                .await
+                .unwrap();
+            }
+        });
+        let target = ClusterRpcTarget {
+            node_id: 4,
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        };
+        let transport = TcpClusterRpcTransport;
+
+        let replication = transport
+            .update_partition_replication_to(
+                &target,
+                UpdatePartitionReplicationRequest {
+                    topic_name: "typed-success.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![1, 2],
+                    isr: vec![1],
+                    leader_epoch: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(replication.accepted);
+        assert_eq!(replication.metadata_offset, 11);
+
+        let reassignment = transport
+            .begin_partition_reassignment_to(
+                &target,
+                BeginPartitionReassignmentRequest {
+                    topic_name: "typed-success.topic".to_string(),
+                    partition_index: 0,
+                    target_replicas: vec![2, 3],
+                },
+            )
+            .await
+            .unwrap();
+        assert!(reassignment.accepted);
+        assert_eq!(reassignment.metadata_offset, 12);
+
+        let progress = transport
+            .update_replica_progress_to(
+                &target,
+                UpdateReplicaProgressRequest {
+                    topic_name: "typed-success.topic".to_string(),
+                    partition_index: 0,
+                    leader_epoch: 1,
+                    broker_id: 2,
+                    log_end_offset: 9,
+                    last_caught_up_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(progress.accepted);
+        assert_eq!(progress.high_watermark, 13);
+
+        let applied = transport
+            .apply_replica_records_to(
+                &target,
+                ApplyReplicaRecordsRequest {
+                    topic_name: "typed-success.topic".to_string(),
+                    partition_index: 0,
+                    records: Vec::new(),
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(applied.accepted);
+        assert_eq!(applied.next_offset, 14);
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_update_partition_leader_wrapper_rejects_unexpected_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            TcpClusterRpcTransport::serve_once(&listener, |_| {
+                Ok(ClusterRpcResponse::Vote(VoteResponse {
+                    term: 1,
+                    vote_granted: true,
+                }))
+            })
+            .await
+            .unwrap();
+        });
+        let transport = TcpClusterRpcTransport;
+
+        let err = transport
+            .update_partition_leader_to(
+                &ClusterRpcTarget {
+                    node_id: 4,
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                },
+                UpdatePartitionLeaderRequest {
+                    topic_name: "typed-error.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 4,
+                    leader_epoch: 1,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unexpected RPC response"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_broker_transport_serves_replica_fetch_apply_and_runtime_dispatch() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::single_node(dir.path().join("data"), 19092, 1);
+        config.cluster.node_id = 1;
+        config.cluster.process_roles = vec![ProcessRole::Broker, ProcessRole::Controller];
+        let runtime = ClusterRuntime::from_config(&config).unwrap();
+        runtime
+            .sync_local_topics(
+                &[crate::store::TopicMetadata {
+                    name: "broker.topic".to_string(),
+                    partitions: vec![crate::store::PartitionMetadata { partition: 0 }],
+                }],
+                1,
+            )
+            .unwrap();
+        let store = Arc::new(FileStore::open(dir.path().join("broker-store")).unwrap());
+        store.ensure_topic("broker.topic", 1, 0).unwrap();
+        store.ensure_topic("store-only.topic", 1, 0).unwrap();
+        store
+            .append_replica_records(
+                "store-only.topic",
+                0,
+                &[crate::store::BrokerRecord {
+                    offset: 0,
+                    timestamp_ms: 100,
+                    producer_id: -1,
+                    producer_epoch: -1,
+                    sequence: 0,
+                    key: Some(bytes::Bytes::from_static(b"k")),
+                    value: Some(bytes::Bytes::from_static(b"v")),
+                    headers_json: vec![],
+                }],
+                100,
+            )
+            .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(TcpClusterRpcTransport::serve_broker_forever(
+            listener,
+            runtime.clone(),
+            store.clone(),
+        ));
+        let transport = TcpClusterRpcTransport;
+        let target = ClusterRpcTarget {
+            node_id: 1,
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        };
+
+        let applied = transport
+            .apply_replica_records_to(
+                &target,
+                ApplyReplicaRecordsRequest {
+                    topic_name: "broker.topic".to_string(),
+                    partition_index: 0,
+                    records: vec![crate::store::BrokerRecord {
+                        offset: 0,
+                        timestamp_ms: 101,
+                        producer_id: -1,
+                        producer_epoch: -1,
+                        sequence: 0,
+                        key: Some(bytes::Bytes::from_static(b"k1")),
+                        value: Some(bytes::Bytes::from_static(b"v1")),
+                        headers_json: vec![],
+                    }],
+                    now_ms: 101,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(applied.accepted);
+        assert_eq!(applied.next_offset, 1);
+
+        let fetched = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                    topic_name: "broker.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 10,
+                }),
+            )
+            .await
+            .unwrap();
+        let ClusterRpcResponse::ReplicaFetch(fetched) = fetched else {
+            panic!("unexpected response variant");
+        };
+        assert!(fetched.found);
+        assert_eq!(fetched.leader_id, 1);
+        assert_eq!(fetched.leader_log_end_offset, 1);
+        assert_eq!(fetched.records.len(), 1);
+
+        let fallback_fetch = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                    topic_name: "store-only.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 10,
+                }),
+            )
+            .await
+            .unwrap();
+        let ClusterRpcResponse::ReplicaFetch(fallback_fetch) = fallback_fetch else {
+            panic!("unexpected response variant");
+        };
+        assert!(fallback_fetch.found);
+        assert_eq!(fallback_fetch.leader_id, -1);
+        assert_eq!(fallback_fetch.high_watermark, 1);
+
+        let missing = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
+                    topic_name: "missing.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 10,
+                }),
+            )
+            .await
+            .unwrap();
+        let ClusterRpcResponse::ReplicaFetch(missing) = missing else {
+            panic!("unexpected response variant");
+        };
+        assert!(!missing.found);
+
+        let vote = transport
+            .send_to(
+                &target,
+                ClusterRpcRequest::Vote(VoteRequest {
+                    term: 2,
+                    candidate_id: 1,
+                    last_metadata_offset: runtime.metadata_image().metadata_offset,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(vote, ClusterRpcResponse::Vote(_)));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[test]
+    fn scripted_transport_covers_remaining_wrapper_variants() {
+        let target = ClusterRpcTarget {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        };
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::GetPartitionState(GetPartitionStateResponse {
+                found: true,
+                leader_id: 2,
+                leader_epoch: 3,
+                high_watermark: 5,
+                leader_log_end_offset: 8,
+            }),
+            ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                found: true,
+                leader_id: 2,
+                leader_epoch: 3,
+                high_watermark: 5,
+                leader_log_end_offset: 8,
+                records: Vec::new(),
+            }),
+            ClusterRpcResponse::BeginPartitionReassignment(PartitionReassignmentResponse {
+                accepted: true,
+                metadata_offset: 21,
+            }),
+            ClusterRpcResponse::AdvancePartitionReassignment(PartitionReassignmentResponse {
+                accepted: true,
+                metadata_offset: 22,
+            }),
+            ClusterRpcResponse::AdvancePartitionReassignment(PartitionReassignmentResponse {
+                accepted: true,
+                metadata_offset: 23,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 7,
+                vote_granted: true,
+            }),
+        ]);
+
+        let state = transport
+            .get_partition_state(GetPartitionStateRequest {
+                topic_name: "scripted.topic".to_string(),
+                partition_index: 0,
+            })
+            .unwrap();
+        assert!(state.found);
+        assert_eq!(state.leader_epoch, 3);
+
+        let fetched = transport
+            .replica_fetch_to(
+                &target,
+                ReplicaFetchRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    start_offset: 0,
+                    max_records: 1,
+                },
+            )
+            .unwrap();
+        assert!(fetched.found);
+        assert_eq!(fetched.leader_log_end_offset, 8);
+
+        let begin = transport
+            .begin_partition_reassignment(BeginPartitionReassignmentRequest {
+                topic_name: "scripted.topic".to_string(),
+                partition_index: 0,
+                target_replicas: vec![2, 3],
+            })
+            .unwrap();
+        assert!(begin.accepted);
+        assert_eq!(begin.metadata_offset, 21);
+
+        let advance = transport
+            .advance_partition_reassignment(AdvancePartitionReassignmentRequest {
+                topic_name: "scripted.topic".to_string(),
+                partition_index: 0,
+                step: crate::cluster::ReassignmentStep::ExpandingIsr,
+            })
+            .unwrap();
+        assert!(advance.accepted);
+        assert_eq!(advance.metadata_offset, 22);
+
+        let advance_to = transport
+            .advance_partition_reassignment_to(
+                &target,
+                AdvancePartitionReassignmentRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    step: crate::cluster::ReassignmentStep::LeaderSwitch,
+                },
+            )
+            .unwrap();
+        assert!(advance_to.accepted);
+        assert_eq!(advance_to.metadata_offset, 23);
+
+        let vote = transport
+            .vote_to(
+                &target,
+                VoteRequest {
+                    term: 7,
+                    candidate_id: 2,
+                    last_metadata_offset: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(vote.term, 7);
+        assert!(vote.vote_granted);
+    }
+
+    #[test]
+    fn scripted_transport_covers_targeted_wrapper_success_variants() {
+        let target = ClusterRpcTarget {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        };
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::UpdatePartitionReplication(UpdatePartitionReplicationResponse {
+                accepted: true,
+                metadata_offset: 31,
+            }),
+            ClusterRpcResponse::UpdateReplicaProgress(UpdateReplicaProgressResponse {
+                accepted: true,
+                metadata_offset: 32,
+                high_watermark: 5,
+            }),
+            ClusterRpcResponse::UpdateReplicaProgress(UpdateReplicaProgressResponse {
+                accepted: true,
+                metadata_offset: 33,
+                high_watermark: 6,
+            }),
+            ClusterRpcResponse::BeginPartitionReassignment(PartitionReassignmentResponse {
+                accepted: true,
+                metadata_offset: 34,
+            }),
+            ClusterRpcResponse::AdvancePartitionReassignment(PartitionReassignmentResponse {
+                accepted: true,
+                metadata_offset: 35,
+            }),
+        ]);
+
+        let replication = transport
+            .update_partition_replication_to(
+                &target,
+                UpdatePartitionReplicationRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![2],
+                    isr: vec![2],
+                    leader_epoch: 1,
+                },
+            )
+            .unwrap();
+        assert!(replication.accepted);
+        assert_eq!(replication.metadata_offset, 31);
+
+        let progress = transport
+            .update_replica_progress(UpdateReplicaProgressRequest {
+                topic_name: "scripted.topic".to_string(),
+                partition_index: 0,
+                leader_epoch: 1,
+                broker_id: 2,
+                log_end_offset: 5,
+                last_caught_up_ms: 100,
+            })
+            .unwrap();
+        assert!(progress.accepted);
+        assert_eq!(progress.high_watermark, 5);
+
+        let progress_to = transport
+            .update_replica_progress_to(
+                &target,
+                UpdateReplicaProgressRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    leader_epoch: 1,
+                    broker_id: 2,
+                    log_end_offset: 6,
+                    last_caught_up_ms: 101,
+                },
+            )
+            .unwrap();
+        assert!(progress_to.accepted);
+        assert_eq!(progress_to.high_watermark, 6);
+
+        let begin = transport
+            .begin_partition_reassignment_to(
+                &target,
+                BeginPartitionReassignmentRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    target_replicas: vec![2, 3],
+                },
+            )
+            .unwrap();
+        assert!(begin.accepted);
+        assert_eq!(begin.metadata_offset, 34);
+
+        let advance = transport
+            .advance_partition_reassignment_to(
+                &target,
+                AdvancePartitionReassignmentRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    step: crate::cluster::ReassignmentStep::LeaderSwitch,
+                },
+            )
+            .unwrap();
+        assert!(advance.accepted);
+        assert_eq!(advance.metadata_offset, 35);
+    }
+
+    #[test]
+    fn scripted_transport_rejects_unexpected_remaining_wrapper_variants() {
+        let target = ClusterRpcTarget {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        };
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::AppendMetadata(AppendMetadataResponse {
+                term: 1,
+                accepted: true,
+                last_metadata_offset: 1,
+            }),
+        ]);
+
+        for err in [
+            transport
+                .get_partition_state(GetPartitionStateRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .replica_fetch_to(
+                    &target,
+                    ReplicaFetchRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        start_offset: 0,
+                        max_records: 1,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .begin_partition_reassignment(BeginPartitionReassignmentRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    target_replicas: vec![2, 3],
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .advance_partition_reassignment(AdvancePartitionReassignmentRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    step: crate::cluster::ReassignmentStep::ExpandingIsr,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .advance_partition_reassignment_to(
+                    &target,
+                    AdvancePartitionReassignmentRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        step: crate::cluster::ReassignmentStep::LeaderSwitch,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .vote_to(
+                    &target,
+                    VoteRequest {
+                        term: 7,
+                        candidate_id: 2,
+                        last_metadata_offset: 8,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(err.contains("unexpected RPC response"));
+        }
+    }
+
+    #[test]
+    fn scripted_transport_rejects_unexpected_core_wrapper_variants() {
+        let target = ClusterRpcTarget {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        };
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+        ]);
+
+        for err in [
+            transport
+                .register_broker(RegisterBrokerRequest {
+                    node_id: 2,
+                    advertised_host: "node2".to_string(),
+                    advertised_port: 9092,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .append_metadata(AppendMetadataRequest {
+                    term: 1,
+                    leader_id: 1,
+                    prev_metadata_offset: -1,
+                    records: vec![],
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .broker_heartbeat(BrokerHeartbeatRequest {
+                    node_id: 2,
+                    broker_epoch: 1,
+                    timestamp_ms: 1,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_partition_leader(UpdatePartitionLeaderRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    leader_id: 2,
+                    leader_epoch: 1,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_partition_leader_to(
+                    &target,
+                    UpdatePartitionLeaderRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        leader_id: 2,
+                        leader_epoch: 1,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_partition_replication(UpdatePartitionReplicationRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    replicas: vec![2],
+                    isr: vec![2],
+                    leader_epoch: 1,
+                })
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_partition_replication_to(
+                    &target,
+                    UpdatePartitionReplicationRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        replicas: vec![2],
+                        isr: vec![2],
+                        leader_epoch: 1,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_replica_progress(UpdateReplicaProgressRequest {
+                    topic_name: "scripted.topic".to_string(),
+                    partition_index: 0,
+                    leader_epoch: 1,
+                    broker_id: 2,
+                    log_end_offset: 1,
+                    last_caught_up_ms: 1,
+                })
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(err.contains("unexpected RPC response"));
+        }
+    }
+
+    #[test]
+    fn scripted_transport_rejects_unexpected_targeted_wrapper_variants() {
+        let target = ClusterRpcTarget {
+            node_id: 2,
+            host: "node2".to_string(),
+            port: 9093,
+        };
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+            ClusterRpcResponse::Vote(VoteResponse {
+                term: 1,
+                vote_granted: true,
+            }),
+        ]);
+
+        for err in [
+            transport
+                .update_replica_progress_to(
+                    &target,
+                    UpdateReplicaProgressRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        leader_epoch: 1,
+                        broker_id: 2,
+                        log_end_offset: 1,
+                        last_caught_up_ms: 1,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .begin_partition_reassignment_to(
+                    &target,
+                    BeginPartitionReassignmentRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        target_replicas: vec![2, 3],
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+            transport
+                .update_partition_replication_to(
+                    &target,
+                    UpdatePartitionReplicationRequest {
+                        topic_name: "scripted.topic".to_string(),
+                        partition_index: 0,
+                        replicas: vec![2],
+                        isr: vec![2],
+                        leader_epoch: 1,
+                    },
+                )
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(err.contains("unexpected RPC response"));
+        }
+    }
+
+    #[test]
+    fn remote_transports_require_explicit_target_nodes() {
+        let remote = RemoteClusterRpcTransport::new(&ClusterConfig::default());
+        let err = remote
+            .send(ClusterRpcRequest::Vote(VoteRequest {
+                term: 1,
+                candidate_id: 1,
+                last_metadata_offset: 0,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a target node"));
+
+        let err = remote
+            .send_to(
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                ClusterRpcRequest::Vote(VoteRequest {
+                    term: 1,
+                    candidate_id: 1,
+                    last_metadata_offset: 0,
+                }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("remote cluster rpc not implemented yet"));
+
+        let in_memory = InMemoryRemoteClusterRpcTransport::new(
+            &ClusterConfig::default(),
+            InMemoryClusterNetwork::default(),
+        );
+        let err = in_memory
+            .send(ClusterRpcRequest::Vote(VoteRequest {
+                term: 1,
+                candidate_id: 1,
+                last_metadata_offset: 0,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a target node"));
     }
 }

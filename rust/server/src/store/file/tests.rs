@@ -912,6 +912,127 @@ fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
     assert_eq!(latest, 1);
 }
 
+#[test]
+fn replica_append_with_empty_batch_is_a_noop() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("replica-empty.topic", 1, 0).unwrap();
+    let producer = store.init_producer(1).unwrap();
+    let seed = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 1,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"seed")),
+        value: Some(Bytes::from_static(b"seed")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("replica-empty.topic", 0, &seed, 1)
+        .unwrap();
+
+    let latest = store
+        .append_replica_records("replica-empty.topic", 0, &[], 2)
+        .unwrap();
+
+    assert_eq!(latest, 1);
+    assert_eq!(
+        store
+            .fetch_records("replica-empty.topic", 0, 0, 10)
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn describe_storage_counts_root_level_topic_files() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let extra = dir.path().join("topics/stray.bin");
+    std::fs::write(&extra, b"topic-root-bytes").unwrap();
+
+    let summary = store.describe_storage().unwrap();
+
+    assert_eq!(summary.log_bytes, 0);
+    assert_eq!(summary.index_bytes, 0);
+    assert_eq!(summary.timeindex_bytes, 0);
+    assert_eq!(summary.state_bytes, 0);
+    assert_eq!(summary.total_bytes, b"topic-root-bytes".len() as u64);
+}
+
+#[test]
+fn describe_storage_tolerates_missing_state_directory() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = vec![BrokerRecord {
+        offset: 0,
+        timestamp_ms: 10,
+        producer_id: producer.producer_id,
+        producer_epoch: producer.producer_epoch,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers_json: b"[]".to_vec(),
+    }];
+    store
+        .append_records("storage.topic", 0, &records, 10)
+        .unwrap();
+
+    std::fs::remove_dir_all(dir.path().join("state")).unwrap();
+
+    let summary = store.describe_storage().unwrap();
+
+    assert_eq!(summary.state_bytes, 0);
+    assert!(summary.log_bytes > 0);
+    assert!(summary.total_bytes >= summary.log_bytes);
+}
+
+#[test]
+fn commit_offset_rejects_unknown_partition_before_membership_checks() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+
+    let result = store.commit_offset(commit_request(
+        "group-missing-partition",
+        "member-a",
+        1,
+        "topic-a",
+        1,
+        1,
+        20,
+    ));
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnknownTopicOrPartition {
+            topic,
+            partition: 1,
+        }) if topic == "topic-a"
+    ));
+}
+
+#[test]
+fn fetch_offset_rejects_unknown_partition_before_group_lookup() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+
+    let result = store.fetch_offset("group-missing-partition", "topic-a", 1);
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnknownTopicOrPartition {
+            topic,
+            partition: 1,
+        }) if topic == "topic-a"
+    ));
+}
+
 fn encode_subscription(topics: &[&str]) -> Vec<u8> {
     let subscription = ConsumerProtocolSubscription::default().with_topics(
         topics

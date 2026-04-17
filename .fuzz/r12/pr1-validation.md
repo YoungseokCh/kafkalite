@@ -1,13 +1,15 @@
-# PR1 validation log (fuzz bootstrap)
+# R12 PR1 Fuzz Validation (Robustness)
 
-## Scope
+## Scope validated
 
-- PR1 targets from `.context/plans/R12-merged.md` only:
+- Fuzz scaffold present at `rust/server/fuzz/`.
+- Exactly two fuzz targets are registered:
   - `protocol_peek_header`
   - `cluster_codec_decode`
-- No CI/OSS-Fuzz changes, no additional fuzz targets.
 
-## Commands executed (repo root)
+## Quality gates
+
+Executed from repository root:
 
 ```bash
 make fmt
@@ -15,25 +17,40 @@ make clippy
 make test
 ```
 
-## Fuzz smoke commands
+Result: all passed.
+
+## Fuzz smoke runs (bounded)
+
+Executed from `rust/server/fuzz`:
 
 ```bash
-cd rust/server/fuzz
 cargo fuzz list
 cargo fuzz run protocol_peek_header -- -runs=1000
 cargo fuzz run cluster_codec_decode -- -runs=1000
 ```
 
-## Observed results
+Observed results:
 
-- `make fmt` passed.
-- `make clippy` passed.
-- `make test` passed (`143 +` unit tests and branch/differential test suites).
-- `cargo fuzz list` output:
-  - `cluster_codec_decode`
-  - `protocol_peek_header`
-- `cargo fuzz run protocol_peek_header -- -runs=1000` completed with **0 crashes**.
-- `cargo fuzz run cluster_codec_decode -- -runs=1000` completed with **0 crashes**.
+- `cargo fuzz list` reported both targets.
+- `protocol_peek_header` completed `-runs=1000` with no crash.
+- `cluster_codec_decode` completed `-runs=1000` with no crash.
 
-Artifacts were written by libFuzzer in `rust/server/fuzz/artifacts/` (directory ignored for VCS by
-`rust/server/fuzz/.gitignore`).
+## Artifacts
+
+- Fuzzer-generated corpus/artifacts are under:
+  - `rust/server/fuzz/corpus/`
+  - `rust/server/fuzz/artifacts/`
+
+## Benchmark snapshot
+
+Executed from repository root:
+
+```bash
+make bench-runtime LABEL=r12-pr1-tcp-route
+```
+
+Observed results from `bench.cluster.reassignment.metadata` and representative peers:
+
+- `bench.cluster.reassignment.metadata`: 1.11ms (90,127.44 msgs/sec)
+- `bench.cluster.replication.metadata`: 1.95ms (102,350.48 msgs/sec)
+- `bench.produce.small`: 48,472.07ms (20.63 msgs/sec)

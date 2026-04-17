@@ -62,3 +62,25 @@ fn ensure_parent_dir(path: &Path) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn ensure_parent_dir_creates_missing_parent_directories() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/store/log.bin");
+
+        ensure_parent_dir(&path);
+
+        assert!(path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn ensure_parent_dir_is_noop_without_parent_component() {
+        ensure_parent_dir(Path::new("leaf"));
+    }
+}

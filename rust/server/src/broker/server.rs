@@ -300,7 +300,8 @@ fn is_expected_disconnect(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
     use bytes::BytesMut;
@@ -321,6 +322,37 @@ mod tests {
     use crate::store::{BrokerRecord, FileStore};
 
     use super::*;
+
+    #[derive(Clone)]
+    struct ScriptedTransport {
+        responses: Arc<Mutex<VecDeque<ClusterRpcResponse>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = ClusterRpcResponse>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            }
+        }
+    }
+
+    impl ClusterRpcTransport for ScriptedTransport {
+        fn send(&self, _request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
+            unreachable!("scripted transport only supports targeted sends")
+        }
+
+        fn send_to(
+            &self,
+            _target: &ClusterRpcTarget,
+            _request: ClusterRpcRequest,
+        ) -> Result<ClusterRpcResponse> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("missing scripted response"))
+        }
+    }
 
     #[tokio::test]
     async fn produce_updates_local_replica_progress() {
@@ -350,6 +382,13 @@ mod tests {
         let broker = test_broker_with_voters(1, 19092, voter_pair());
 
         assert!(!broker.is_local_partition_leader("missing.topic", 0));
+    }
+
+    #[test]
+    fn missing_partition_defaults_to_local_leader_without_quorum() {
+        let broker = test_broker(1, 19092);
+
+        assert!(broker.is_local_partition_leader("missing.topic", 0));
     }
 
     #[tokio::test]
@@ -579,6 +618,222 @@ mod tests {
         assert_eq!(high_watermark, 0);
         assert_eq!(fetched.records.len(), 1);
         assert_eq!(fetched.records[0].offset, 0);
+    }
+
+    #[test]
+    fn sync_follower_progress_returns_minus_one_when_remote_partition_missing() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: false,
+                leader_id: -1,
+                leader_epoch: -1,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+            },
+        )]);
+
+        let high_watermark = broker
+            .sync_follower_progress_from_remote(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, -1);
+    }
+
+    #[test]
+    fn sync_follower_progress_rejects_stale_remote_leader_metadata() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 9,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+            },
+        )]);
+
+        let err = broker
+            .sync_follower_progress_from_remote(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("stale leader or epoch during follower progress sync"));
+    }
+
+    #[test]
+    fn fetch_and_apply_returns_minus_one_when_remote_partition_missing() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([ClusterRpcResponse::GetPartitionState(
+            crate::cluster::GetPartitionStateResponse {
+                found: false,
+                leader_id: -1,
+                leader_epoch: -1,
+                high_watermark: -1,
+                leader_log_end_offset: -1,
+            },
+        )]);
+
+        let high_watermark = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, -1);
+    }
+
+    #[test]
+    fn fetch_and_apply_rejects_changed_leadership_in_fetch_response() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::GetPartitionState(crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 1,
+            }),
+            ClusterRpcResponse::ReplicaFetch(crate::cluster::ReplicaFetchResponse {
+                found: true,
+                leader_id: 9,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 1,
+                records: Vec::new(),
+            }),
+        ]);
+
+        let err = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("leadership changed before replica fetch response applied"));
+    }
+
+    #[test]
+    fn fetch_and_apply_accepts_empty_fetch_response() {
+        let broker = test_broker_with_voters(2, 19093, voter_pair());
+        broker.store().ensure_topic("rf.topic", 1, 0).unwrap();
+        let metadata = broker
+            .store()
+            .topic_metadata(Some(&["rf.topic".to_string()]), 0)
+            .unwrap();
+        broker.sync_topic_metadata(&metadata).unwrap();
+        seed_partition_metadata(&broker, "rf.topic", 1, vec![1, 2], vec![1, 2], 1);
+
+        let transport = ScriptedTransport::new([
+            ClusterRpcResponse::GetPartitionState(crate::cluster::GetPartitionStateResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+            }),
+            ClusterRpcResponse::ReplicaFetch(crate::cluster::ReplicaFetchResponse {
+                found: true,
+                leader_id: 1,
+                leader_epoch: 1,
+                high_watermark: 0,
+                leader_log_end_offset: 0,
+                records: Vec::new(),
+            }),
+        ]);
+
+        let high_watermark = broker
+            .fetch_and_apply_from_remote_leader(
+                &transport,
+                &ClusterRpcTarget {
+                    node_id: 1,
+                    host: "node1".to_string(),
+                    port: 9093,
+                },
+                "rf.topic",
+                0,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(high_watermark, 0);
+        assert!(
+            broker
+                .store()
+                .fetch_records("rf.topic", 0, 0, 10)
+                .unwrap()
+                .records
+                .is_empty()
+        );
     }
 
     fn test_broker(node_id: i32, port: u16) -> KafkaBroker {

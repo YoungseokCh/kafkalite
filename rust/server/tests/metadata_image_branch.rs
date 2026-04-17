@@ -57,6 +57,53 @@ fn upsert_broker_and_topic_detect_noop_updates() {
 }
 
 #[test]
+fn upsert_broker_and_topic_replace_changed_existing_entries() {
+    let mut image = ClusterMetadataImage::new("cluster-a".to_string(), 1);
+
+    assert!(image.upsert_broker(BrokerMetadata {
+        node_id: 1,
+        host: "node1".to_string(),
+        port: 9092,
+    }));
+    assert!(image.upsert_broker(BrokerMetadata {
+        node_id: 1,
+        host: "node1-updated".to_string(),
+        port: 19092,
+    }));
+    assert_eq!(image.brokers[0].host, "node1-updated");
+    assert_eq!(image.brokers[0].port, 19092);
+
+    assert!(image.upsert_topic(TopicMetadataImage {
+        name: "topic-a".to_string(),
+        partitions: vec![PartitionMetadataImage {
+            partition: 0,
+            leader_id: 1,
+            leader_epoch: 0,
+            high_watermark: 0,
+            replicas: vec![1],
+            isr: vec![1],
+            replica_progress: vec![],
+            reassignment: None,
+        }],
+    }));
+    assert!(image.upsert_topic(TopicMetadataImage {
+        name: "topic-a".to_string(),
+        partitions: vec![PartitionMetadataImage {
+            partition: 0,
+            leader_id: 2,
+            leader_epoch: 1,
+            high_watermark: 3,
+            replicas: vec![2],
+            isr: vec![2],
+            replica_progress: vec![],
+            reassignment: None,
+        }],
+    }));
+    assert_eq!(image.topics[0].partitions[0].leader_id, 2);
+    assert_eq!(image.topics[0].partitions[0].high_watermark, 3);
+}
+
+#[test]
 fn merge_store_topic_only_adds_missing_partitions() {
     let mut image = ClusterMetadataImage {
         cluster_id: "cluster-a".to_string(),
