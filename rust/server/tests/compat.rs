@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kafkalite_server::{Config, FileStore, KafkaBroker};
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -202,6 +204,64 @@ async fn metadata_reports_unknown_topic_until_first_produce() {
     let topic = find_topic(&metadata, "dynamic.events.project.processor");
     assert_eq!(topic.partitions().len(), 1);
     assert_eq!(topic.partitions()[0].id(), 0);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_consumer_subscribed_before_produce_receives_after_topic_materializes() {
+    init_test_logging();
+    let (bootstrap, handle, _tempdir) = start_broker().await;
+    let topic = "event_ready.project.processor";
+    let consumer = group_consumer(&bootstrap, "subscribe-before-produce");
+    consumer.subscribe(&[topic]).unwrap();
+    drive_group_consumer(&consumer, Duration::from_secs(2));
+
+    let producer = producer(&bootstrap);
+    producer
+        .send(
+            FutureRecord::to(topic).payload("released").key("project"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    let message = poll_for_message(&consumer, Duration::from_secs(10));
+    assert_eq!(message.payload(), Some(&b"released"[..]));
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_client_create_topics_materializes_topic() {
+    init_test_logging();
+    let (bootstrap, handle, _tempdir) = start_broker().await;
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap)
+        .create()
+        .unwrap();
+
+    let results = admin
+        .create_topics(
+            &[NewTopic::new(
+                "admin.compat.topic",
+                1,
+                TopicReplication::Fixed(1),
+            )],
+            &AdminOptions::new().operation_timeout(Some(Duration::from_secs(3))),
+        )
+        .await
+        .unwrap();
+    assert!(results[0].is_ok());
+
+    let consumer = base_consumer(&bootstrap, "admin-compat-meta");
+    let metadata = consumer
+        .fetch_metadata(Some("admin.compat.topic"), Duration::from_secs(5))
+        .unwrap();
+    let topic = find_topic(&metadata, "admin.compat.topic");
+    assert_eq!(topic.partitions().len(), 1);
 
     handle.abort();
     let _ = handle.await;

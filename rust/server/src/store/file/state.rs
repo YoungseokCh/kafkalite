@@ -133,10 +133,7 @@ impl StateJournal {
 
     pub fn replay(&self, snapshots: &mut SnapshotSet) -> Result<()> {
         let mut reader = BufReader::new(File::open(&self.path)?);
-        loop {
-            let Some(entry) = read_journal_entry(&mut reader)? else {
-                break;
-            };
+        while let Some(entry) = read_journal_entry(&mut reader)? {
             match entry {
                 JournalEntry::Topics(topics) => snapshots.topics = topics,
                 JournalEntry::Producers(producers) => snapshots.producers = producers,

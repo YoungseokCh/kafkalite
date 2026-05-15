@@ -8,7 +8,7 @@ use tracing::debug;
 use crate::protocol;
 
 use super::KafkaBroker;
-use super::handlers::{bootstrap, groups, produce_fetch};
+use super::handlers::{admin, bootstrap, groups, produce_fetch};
 
 pub async fn serve_connection(
     mut stream: TcpStream,
@@ -42,6 +42,22 @@ pub async fn serve_connection(
                     header.request_api_version,
                 )?;
                 let response = bootstrap::handle_metadata(&broker, request).await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
+            ApiKey::CreateTopics => {
+                let request = protocol::decode_body::<kafka_protocol::messages::CreateTopicsRequest>(
+                    &frame,
+                    api_key,
+                    header.request_api_version,
+                )?;
+                let response = admin::handle_create_topics(&broker, request).await?;
                 protocol::write_response(
                     &mut stream,
                     api_key,

@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 
 pub const API_VERSIONS_VERSION: i16 = 3;
 pub const METADATA_VERSION: i16 = 12;
+pub const CREATE_TOPICS_VERSION: i16 = 7;
 pub const PRODUCE_VERSION: i16 = 9;
 pub const FETCH_VERSION: i16 = 11;
 pub const LIST_OFFSETS_VERSION: i16 = 7;

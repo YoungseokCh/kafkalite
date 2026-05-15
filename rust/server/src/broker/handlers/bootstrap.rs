@@ -18,6 +18,7 @@ pub fn handle_api_versions() -> ApiVersionsResponse {
     let apis = vec![
         api(ApiKey::ApiVersions, 0, protocol::API_VERSIONS_VERSION),
         api(ApiKey::Metadata, 1, protocol::METADATA_VERSION),
+        api(ApiKey::CreateTopics, 2, protocol::CREATE_TOPICS_VERSION),
         api(
             ApiKey::InitProducerId,
             0,
