@@ -403,10 +403,10 @@ fn validate_replica_offsets(next_offset: i64, records: &[BrokerRecord]) -> Resul
     debug_assert!(!records.is_empty(), "replica append must contain records");
     let first = &records[0];
     if first.offset != next_offset {
-        return Err(StoreError::Protocol(format!(
-            "replica append expected offset {next_offset} but started at {}",
-            first.offset
-        )));
+        return Err(StoreError::ReplicaOffsetMismatch {
+            expected: next_offset,
+            actual: first.offset,
+        });
     }
     for window in records.windows(2) {
         if window[1].offset != window[0].offset + 1 {

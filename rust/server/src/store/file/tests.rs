@@ -1019,11 +1019,14 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
         value: Some(Bytes::from_static(b"m")),
         headers_json: b"[]".to_vec(),
     }];
-    let misaligned_err = store
-        .append_replica_records("replica.topic", 0, &misaligned, 2)
-        .unwrap_err()
-        .to_string();
-    assert!(misaligned_err.contains("expected offset 1"));
+    let misaligned_err = store.append_replica_records("replica.topic", 0, &misaligned, 2);
+    assert!(matches!(
+        misaligned_err,
+        Err(StoreError::ReplicaOffsetMismatch {
+            expected: 1,
+            actual: 5,
+        })
+    ));
 
     let non_contiguous = vec![
         BrokerRecord {
