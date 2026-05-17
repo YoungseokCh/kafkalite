@@ -1,27 +1,18 @@
 use std::fs;
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, ValueEnum};
+use clap::{ArgAction, Parser};
 
+mod bench_modes;
 mod bench_support;
 
+use bench_modes::{BenchMode, specs_for_mode};
 use bench_support::mixed::run_mixed_handoff;
 use bench_support::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
 use bench_support::scenarios::{
-    ScenarioKind, ScenarioSpec, run_cluster_reassignment_metadata,
-    run_cluster_replication_metadata, run_commit_resume, run_fetch_tail, run_produce_only,
-    run_roundtrip,
+    ScenarioKind, run_cluster_reassignment_metadata, run_cluster_replication_metadata,
+    run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
 };
-
-#[derive(Clone, Debug, ValueEnum)]
-enum BenchMode {
-    Quick,
-    Full,
-    Size,
-    Runtime,
-    Memory,
-    Storage,
-}
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -108,186 +99,6 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
     Ok(reports)
 }
 
-fn specs_for_mode(mode: &BenchMode) -> Vec<ScenarioSpec> {
-    match mode {
-        BenchMode::Quick => vec![ScenarioSpec {
-            name: "bench.produce.small",
-            kind: ScenarioKind::ProduceOnly,
-            messages: 1_000,
-            payload_bytes: 100,
-            default_partitions: 1,
-        }],
-        BenchMode::Size => Vec::new(),
-        BenchMode::Runtime => vec![
-            ScenarioSpec {
-                name: "bench.produce.small",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 1_000,
-                payload_bytes: 100,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.produce.multi_partition",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 1_000,
-                payload_bytes: 100,
-                default_partitions: 3,
-            },
-            ScenarioSpec {
-                name: "bench.roundtrip",
-                kind: ScenarioKind::Roundtrip,
-                messages: 200,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.fetch.multi_partition",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 500,
-                payload_bytes: 512,
-                default_partitions: 3,
-            },
-            ScenarioSpec {
-                name: "bench.fetch.tail",
-                kind: ScenarioKind::FetchTail,
-                messages: 500,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.commit.resume",
-                kind: ScenarioKind::CommitResume,
-                messages: 4,
-                payload_bytes: 256,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.mixed.handoff",
-                kind: ScenarioKind::MixedHandoff,
-                messages: 200,
-                payload_bytes: 256,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.cluster.replication.metadata",
-                kind: ScenarioKind::ClusterReplicationMetadata,
-                messages: 200,
-                payload_bytes: 1,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.cluster.reassignment.metadata",
-                kind: ScenarioKind::ClusterReassignmentMetadata,
-                messages: 100,
-                payload_bytes: 1,
-                default_partitions: 1,
-            },
-        ],
-        BenchMode::Memory => vec![
-            ScenarioSpec {
-                name: "bench.produce.small",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 1_000,
-                payload_bytes: 100,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.roundtrip",
-                kind: ScenarioKind::Roundtrip,
-                messages: 200,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.fetch.tail",
-                kind: ScenarioKind::FetchTail,
-                messages: 500,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-        ],
-        BenchMode::Storage => vec![ScenarioSpec {
-            name: "bench.produce.medium",
-            kind: ScenarioKind::ProduceOnly,
-            messages: 500,
-            payload_bytes: 1024,
-            default_partitions: 1,
-        }],
-        BenchMode::Full => vec![
-            ScenarioSpec {
-                name: "bench.produce.small",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 1_000,
-                payload_bytes: 100,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.produce.medium",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 500,
-                payload_bytes: 1024,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.produce.multi_partition",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 1_000,
-                payload_bytes: 100,
-                default_partitions: 3,
-            },
-            ScenarioSpec {
-                name: "bench.roundtrip",
-                kind: ScenarioKind::Roundtrip,
-                messages: 200,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.fetch.tail",
-                kind: ScenarioKind::FetchTail,
-                messages: 500,
-                payload_bytes: 512,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.fetch.multi_partition",
-                kind: ScenarioKind::ProduceOnly,
-                messages: 500,
-                payload_bytes: 512,
-                default_partitions: 3,
-            },
-            ScenarioSpec {
-                name: "bench.commit.resume",
-                kind: ScenarioKind::CommitResume,
-                messages: 4,
-                payload_bytes: 256,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.mixed.handoff",
-                kind: ScenarioKind::MixedHandoff,
-                messages: 200,
-                payload_bytes: 256,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.cluster.replication.metadata",
-                kind: ScenarioKind::ClusterReplicationMetadata,
-                messages: 200,
-                payload_bytes: 1,
-                default_partitions: 1,
-            },
-            ScenarioSpec {
-                name: "bench.cluster.reassignment.metadata",
-                kind: ScenarioKind::ClusterReassignmentMetadata,
-                messages: 100,
-                payload_bytes: 1,
-                default_partitions: 1,
-            },
-        ],
-    }
-}
-
 fn to_csv(report: &BenchmarkReport) -> String {
     let mut lines = vec!["name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes".to_string()];
     for scenario in &report.scenarios {
@@ -335,32 +146,4 @@ fn to_markdown(report: &BenchmarkReport) -> String {
         ));
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BenchMode, ScenarioKind, specs_for_mode};
-
-    #[test]
-    fn runtime_mode_includes_both_cluster_metadata_benchmarks() {
-        let specs = specs_for_mode(&BenchMode::Runtime);
-
-        assert!(specs.iter().any(|spec| {
-            spec.name == "bench.cluster.replication.metadata"
-                && spec.kind == ScenarioKind::ClusterReplicationMetadata
-        }));
-        assert!(specs.iter().any(|spec| {
-            spec.name == "bench.cluster.reassignment.metadata"
-                && spec.kind == ScenarioKind::ClusterReassignmentMetadata
-        }));
-    }
-
-    #[test]
-    fn quick_mode_stays_single_produce_scenario() {
-        let specs = specs_for_mode(&BenchMode::Quick);
-
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].kind, ScenarioKind::ProduceOnly);
-        assert_eq!(specs[0].name, "bench.produce.small");
-    }
 }
