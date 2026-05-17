@@ -1,6 +1,4 @@
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
-use kafka_protocol::indexmap::IndexMap;
 use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsTopicResponse,
@@ -11,13 +9,16 @@ use kafka_protocol::messages::{
     ProduceResponse, TopicName,
 };
 use kafka_protocol::protocol::StrBytes;
-use kafka_protocol::records::{
-    Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
-};
+use kafka_protocol::records::RecordBatchDecoder;
 
-use crate::store::{BrokerRecord, StoreError};
+use self::auto_create::maybe_auto_create_topic;
+use self::records::{encode_records, to_broker_record};
+use crate::store::StoreError;
 
 use super::super::KafkaBroker;
+
+mod auto_create;
+mod records;
 
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 const NOT_LEADER_OR_FOLLOWER: i16 = 6;
@@ -284,105 +285,22 @@ pub async fn handle_list_offsets(
         .with_topics(topics))
 }
 
-fn maybe_auto_create_topic(
-    broker: &KafkaBroker,
-    topic: &str,
-    partition: i32,
-    now_ms: i64,
-) -> Result<()> {
-    let known = broker
-        .store()
-        .topic_metadata(Some(&[topic.to_string()]), now_ms)?;
-    if !known.is_empty() {
-        return Ok(());
-    }
-    if partition < 0 || partition >= broker.config().storage.default_partitions {
-        return Ok(());
-    }
-    if !broker.cluster().can_auto_create_topics_locally() {
-        return Ok(());
-    }
-    broker
-        .store()
-        .ensure_topic(topic, broker.config().storage.default_partitions, now_ms)?;
-    let metadata = broker
-        .store()
-        .topic_metadata(Some(&[topic.to_string()]), now_ms)?;
-    broker.sync_topic_metadata(&metadata)?;
-    Ok(())
-}
-
-fn to_broker_record(record: Record) -> BrokerRecord {
-    BrokerRecord {
-        offset: record.offset,
-        timestamp_ms: record.timestamp,
-        producer_id: record.producer_id,
-        producer_epoch: record.producer_epoch,
-        sequence: record.sequence,
-        key: record.key,
-        value: record.value,
-        headers_json: serde_json::to_vec(
-            &record
-                .headers
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.clone().map(|bytes| bytes.to_vec())))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| b"[]".to_vec()),
-    }
-}
-
-fn encode_records(records: &[BrokerRecord]) -> Result<bytes::Bytes> {
-    let kafka_records = records
-        .iter()
-        .enumerate()
-        .map(|(index, record)| Record {
-            transactional: false,
-            control: false,
-            partition_leader_epoch: 0,
-            producer_id: -1,
-            producer_epoch: -1,
-            timestamp_type: TimestampType::Creation,
-            offset: record.offset.max(index as i64),
-            sequence: record.sequence,
-            timestamp: record.timestamp_ms,
-            key: record.key.clone(),
-            value: record.value.clone(),
-            headers: decode_headers(&record.headers_json),
-        })
-        .collect::<Vec<_>>();
-    let mut encoded = BytesMut::new();
-    RecordBatchEncoder::encode(
-        &mut encoded,
-        &kafka_records,
-        &RecordEncodeOptions {
-            version: 2,
-            compression: Compression::None,
-        },
-    )?;
-    Ok(encoded.freeze())
-}
-
-fn decode_headers(headers_json: &[u8]) -> IndexMap<StrBytes, Option<Bytes>> {
-    serde_json::from_slice::<Vec<(String, Option<Vec<u8>>)>>(headers_json)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, value)| (StrBytes::from(key), value.map(Bytes::from)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
+    use kafka_protocol::indexmap::IndexMap;
     use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
     use kafka_protocol::messages::{ProduceRequest, TopicName};
+    use kafka_protocol::records::{
+        Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+    };
     use tempfile::tempdir;
 
     use crate::cluster::{ControllerQuorumVoter, ProcessRole};
     use crate::config::Config;
-    use crate::store::FileStore;
+    use crate::store::{BrokerRecord, FileStore};
 
     use super::*;
 
