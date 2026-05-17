@@ -5,7 +5,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use super::*;
-use crate::store::{GroupJoinRequest, OffsetCommitRequest, StoreError};
+use crate::store::{BrokerRecord, GroupJoinRequest, OffsetCommitRequest, Storage, StoreError};
 
 #[test]
 fn appends_and_fetches_records() {

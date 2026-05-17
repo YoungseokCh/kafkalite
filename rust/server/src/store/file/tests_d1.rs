@@ -2,6 +2,7 @@ use bytes::Bytes;
 use tempfile::tempdir;
 
 use super::*;
+use crate::store::{BrokerRecord, Storage};
 
 #[test]
 fn append_only_adds_one_state_journal_entry_per_write() {
