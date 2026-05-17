@@ -93,6 +93,21 @@ fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::
         .expect("topic metadata should exist")
 }
 
+fn direct_consumer_at_beginning(
+    bootstrap: &str,
+    group_id: &str,
+    topic: &str,
+    partition: i32,
+) -> BaseConsumer {
+    let consumer = base_consumer(bootstrap, group_id);
+    let mut assignment = TopicPartitionList::new();
+    assignment
+        .add_partition_offset(topic, partition, Offset::Beginning)
+        .unwrap();
+    consumer.assign(&assignment).unwrap();
+    consumer
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rdkafka_group_consumer_commit_smoke() {
     init_test_logging();
@@ -148,16 +163,7 @@ async fn records_survive_broker_restart() {
     let _ = handle.await;
 
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &bootstrap)
-        .set("group.id", "restart-direct")
-        .set("auto.offset.reset", "earliest")
-        .create()
-        .unwrap();
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset("restart.events", 0, Offset::Beginning)
-        .unwrap();
-    consumer.assign(&tpl).unwrap();
+    let consumer = direct_consumer_at_beginning(&bootstrap, "restart-direct", "restart.events", 0);
 
     let message = poll_for_message(&consumer, Duration::from_secs(5));
     assert_eq!(message.payload(), Some(&b"persisted"[..]));
@@ -327,11 +333,7 @@ async fn multiple_topics_keep_independent_offsets() {
         ("events.alpha", b"alpha-1".as_slice()),
         ("events.beta", b"beta-1".as_slice()),
     ] {
-        let consumer = base_consumer(&bootstrap, topic);
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition_offset(topic, 0, Offset::Beginning)
-            .unwrap();
-        consumer.assign(&tpl).unwrap();
+        let consumer = direct_consumer_at_beginning(&bootstrap, topic, topic, 0);
         let message = poll_for_message(&consumer, Duration::from_secs(5));
         assert_eq!(message.payload(), Some(expected));
     }
@@ -422,11 +424,7 @@ async fn multi_partition_metadata_and_direct_fetch_work() {
     assert_eq!(topic.partitions()[1].id(), 1);
     assert_eq!(topic.partitions()[2].id(), 2);
 
-    let direct = base_consumer(&bootstrap, "compat-multi-direct");
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset("compat.multi", 2, Offset::Beginning)
-        .unwrap();
-    direct.assign(&tpl).unwrap();
+    let direct = direct_consumer_at_beginning(&bootstrap, "compat-multi-direct", "compat.multi", 2);
     let message = poll_for_message(&direct, Duration::from_secs(5));
     assert_eq!(message.payload(), Some(&b"p2"[..]));
 
