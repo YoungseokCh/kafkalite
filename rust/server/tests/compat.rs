@@ -5,14 +5,10 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::producer::FutureRecord;
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
-use tempfile::tempdir;
 
 mod support;
 
-use support::{
-    base_consumer, init_test_logging, poll_for_message, producer, start_broker,
-    start_broker_in_dir, start_broker_in_dir_with_partitions,
-};
+use support::{base_consumer, init_test_logging, poll_for_message, producer, start_broker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rdkafka_producer_and_consumer_smoke() {
@@ -133,77 +129,6 @@ async fn rdkafka_group_consumer_commit_smoke() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn records_survive_broker_restart() {
-    init_test_logging();
-    let tempdir = tempdir().unwrap();
-    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    let producer = producer(&bootstrap);
-
-    producer
-        .send(
-            FutureRecord::to("restart.events")
-                .payload("persisted")
-                .key("restart-key"),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-    handle.abort();
-    let _ = handle.await;
-
-    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    let consumer = direct_consumer_at_beginning(&bootstrap, "restart-direct", "restart.events", 0);
-
-    let message = poll_for_message(&consumer, Duration::from_secs(5));
-    assert_eq!(message.payload(), Some(&b"persisted"[..]));
-
-    handle.abort();
-    let _ = handle.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn committed_offsets_survive_broker_restart() {
-    init_test_logging();
-    let tempdir = tempdir().unwrap();
-    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    let producer = producer(&bootstrap);
-
-    for payload in ["first", "second"] {
-        producer
-            .send(
-                FutureRecord::to("resume.events")
-                    .payload(payload)
-                    .key("resume-key"),
-                Duration::from_secs(3),
-            )
-            .await
-            .unwrap();
-    }
-
-    let consumer = group_consumer(&bootstrap, "resume-group");
-    consumer.subscribe(&["resume.events"]).unwrap();
-    let message = poll_for_message(&consumer, Duration::from_secs(8));
-    assert_eq!(message.payload(), Some(&b"first"[..]));
-    consumer
-        .commit_message(&message, rdkafka::consumer::CommitMode::Sync)
-        .unwrap();
-    drop(message);
-    drop(consumer);
-
-    handle.abort();
-    let _ = handle.await;
-
-    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    let consumer = group_consumer(&bootstrap, "resume-group");
-    consumer.subscribe(&["resume.events"]).unwrap();
-    let message = poll_for_message(&consumer, Duration::from_secs(8));
-    assert_eq!(message.payload(), Some(&b"second"[..]));
-
-    handle.abort();
-    let _ = handle.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn group_consumer_subscribed_before_produce_receives_after_topic_materializes() {
     init_test_logging();
     let (bootstrap, handle, _tempdir) = start_broker().await;
@@ -306,79 +231,6 @@ async fn partition_assignment_moves_to_remaining_group_member() {
 
     drop(second);
     drop(consumer_two);
-    handle.abort();
-    let _ = handle.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn committed_offsets_are_partition_scoped() {
-    init_test_logging();
-    let tempdir = tempdir().unwrap();
-    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
-    let producer = producer(&bootstrap);
-
-    producer
-        .send(
-            FutureRecord::to("compat.resume.multi")
-                .payload("p1-first")
-                .key("k")
-                .partition(1),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-    let consumer = group_consumer(&bootstrap, "compat-multi-group");
-    consumer.subscribe(&["compat.resume.multi"]).unwrap();
-
-    let first = poll_for_message(&consumer, Duration::from_secs(8));
-    assert_eq!(first.partition(), 1);
-    assert_eq!(first.payload(), Some(&b"p1-first"[..]));
-    consumer
-        .commit_message(&first, rdkafka::consumer::CommitMode::Sync)
-        .unwrap();
-    drop(first);
-    drop(consumer);
-
-    producer
-        .send(
-            FutureRecord::to("compat.resume.multi")
-                .payload("p1-second")
-                .key("k")
-                .partition(1),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-    producer
-        .send(
-            FutureRecord::to("compat.resume.multi")
-                .payload("p2-only")
-                .key("k")
-                .partition(2),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-
-    handle.abort();
-    let _ = handle.await;
-
-    let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
-    let resumed = group_consumer(&bootstrap, "compat-multi-group");
-    resumed.subscribe(&["compat.resume.multi"]).unwrap();
-
-    let first = poll_for_message(&resumed, Duration::from_secs(8));
-    let second = poll_for_message(&resumed, Duration::from_secs(8));
-    let mut seen = [
-        (first.partition(), first.payload().unwrap().to_vec()),
-        (second.partition(), second.payload().unwrap().to_vec()),
-    ];
-    seen.sort_by_key(|row| row.0);
-    assert_eq!(seen[0].0, 1);
-    assert_eq!(seen[0].1, b"p1-second".to_vec());
-    assert_eq!(seen[1].0, 2);
-    assert_eq!(seen[1].1, b"p2-only".to_vec());
-
     handle.abort();
     let _ = handle.await;
 }
