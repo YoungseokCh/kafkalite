@@ -5,7 +5,7 @@ import sys
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.structs import TopicPartition
 
-TIMEOUT_SECONDS = 8
+from py_support import TIMEOUT_SECONDS, wait_for_message, wait_for_records
 
 
 async def basic_produce_consume(bootstrap: str) -> None:
@@ -259,30 +259,6 @@ async def adapter_style_adapter_matrix(bootstrap: str) -> None:
         assert resumed_committed == 1
     finally:
         await resumed.stop()
-
-
-async def wait_for_message(consumer: AIOKafkaConsumer):
-    return await asyncio.wait_for(consumer.getone(), timeout=TIMEOUT_SECONDS)
-
-
-async def wait_for_records(
-    consumer: AIOKafkaConsumer, topic_partition: TopicPartition, expected_count: int
-):
-    deadline = asyncio.get_running_loop().time() + TIMEOUT_SECONDS
-    records = []
-    while len(records) < expected_count:
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            break
-        batch = await consumer.getmany(
-            topic_partition, timeout_ms=250, max_records=expected_count
-        )
-        records.extend(batch.get(topic_partition, []))
-    if len(records) < expected_count:
-        raise AssertionError(
-            f"expected {expected_count} records for {topic_partition}, got {len(records)}"
-        )
-    return records[:expected_count]
 
 
 async def run_scenario(name: str, scenario) -> None:
