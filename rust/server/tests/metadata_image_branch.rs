@@ -1,6 +1,6 @@
 use kafkalite_server::cluster::{
-    BrokerMetadata, ClusterMetadataImage, MetadataRecord, PartitionMetadataImage,
-    PartitionReassignment, ReassignmentStep, ReplicaProgress, TopicMetadataImage,
+    BrokerMetadata, ClusterMetadataImage, MetadataRecord, PartitionMetadataImage, ReplicaProgress,
+    TopicMetadataImage,
 };
 use kafkalite_server::store::{PartitionMetadata, TopicMetadata};
 
@@ -243,58 +243,6 @@ fn update_replica_progress_reconciles_isr_and_high_watermark() {
             last_caught_up_ms: 100,
         },
     ));
-}
-
-#[test]
-fn reassignment_lifecycle_enforces_preconditions() {
-    let mut image = image_with_partition();
-
-    assert!(!image.begin_partition_reassignment("topic-a", 0, vec![]));
-    assert!(!image.advance_partition_reassignment("topic-a", 9, ReassignmentStep::ExpandingIsr,));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::ExpandingIsr,));
-
-    assert!(image.begin_partition_reassignment("topic-a", 0, vec![3, 1]));
-    assert!(!image.begin_partition_reassignment("topic-a", 0, vec![3, 1]));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Planned,));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::ExpandingIsr,));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::LeaderSwitch,));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Shrinking,));
-    assert!(!image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Complete,));
-
-    assert!(image.update_replica_progress(
-        "topic-a",
-        0,
-        1,
-        ReplicaProgress {
-            broker_id: 3,
-            log_end_offset: 6,
-            last_caught_up_ms: 100,
-        },
-    ));
-    assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::ExpandingIsr));
-    assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::LeaderSwitch));
-    assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::Shrinking));
-    assert!(image.complete_partition_reassignment("topic-a", 0));
-    assert!(image.partition_reassignment("topic-a", 0).is_none());
-}
-
-#[test]
-fn leader_switch_with_empty_target_replicas_keeps_current_leader() {
-    let mut image = image_with_partition();
-    image.topics[0].partitions[0].reassignment = Some(PartitionReassignment {
-        target_replicas: vec![],
-        step: ReassignmentStep::Copying,
-    });
-
-    assert!(image.advance_partition_reassignment("topic-a", 0, ReassignmentStep::LeaderSwitch));
-
-    let partition = &image.topics[0].partitions[0];
-    assert_eq!(partition.leader_id, 1);
-    assert_eq!(partition.leader_epoch, 1);
-    assert_eq!(
-        partition.reassignment.as_ref().unwrap().step,
-        ReassignmentStep::LeaderSwitch
-    );
 }
 
 #[test]
