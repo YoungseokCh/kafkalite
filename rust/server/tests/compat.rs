@@ -1,17 +1,21 @@
-use std::net::TcpListener;
-use std::sync::Arc;
 use std::time::Duration;
 
-use kafkalite_server::{Config, FileStore, KafkaBroker};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::metadata::Metadata;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::FutureRecord;
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use tempfile::tempdir;
+
+mod support;
+
+use support::{
+    base_consumer, init_test_logging, poll_for_message, producer, start_broker,
+    start_broker_in_dir, start_broker_in_dir_with_partitions,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rdkafka_producer_and_consumer_smoke() {
@@ -52,6 +56,41 @@ async fn rdkafka_producer_and_consumer_smoke() {
 
     handle.abort();
     let _ = handle.await;
+}
+
+fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
+    group_consumer_with_session_timeout(bootstrap, group_id, 45_000)
+}
+
+fn group_consumer_with_session_timeout(
+    bootstrap: &str,
+    group_id: &str,
+    session_timeout_ms: i32,
+) -> BaseConsumer {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group_id)
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .set("session.timeout.ms", session_timeout_ms.to_string())
+        .set("debug", "protocol,broker,cgrp,fetch")
+        .create()
+        .unwrap()
+}
+
+fn drive_group_consumer(consumer: &BaseConsumer, timeout: Duration) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        let _ = consumer.poll(Duration::from_millis(250));
+    }
+}
+
+fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::MetadataTopic {
+    metadata
+        .topics()
+        .iter()
+        .find(|topic| topic.name() == name)
+        .expect("topic metadata should exist")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -507,115 +546,4 @@ async fn committed_offsets_are_partition_scoped() {
 
     handle.abort();
     let _ = handle.await;
-}
-
-fn init_test_logging() {
-    let _ = env_logger::builder().is_test(true).try_init();
-}
-
-async fn start_broker() -> (
-    String,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-    tempfile::TempDir,
-) {
-    let tempdir = tempdir().unwrap();
-    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
-    (bootstrap, handle, tempdir)
-}
-
-async fn start_broker_in_dir(
-    tempdir: &tempfile::TempDir,
-) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
-    start_broker_in_dir_with_partitions(tempdir, 1).await
-}
-
-async fn start_broker_in_dir_with_partitions(
-    tempdir: &tempfile::TempDir,
-    default_partitions: i32,
-) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
-    let port = free_port();
-    let config = Config::single_node(
-        tempdir.path().join("kafkalite-data"),
-        port,
-        default_partitions,
-    );
-    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
-    let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    (format!("127.0.0.1:{port}"), handle)
-}
-
-fn producer(bootstrap: &str) -> FutureProducer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .set("message.timeout.ms", "3000")
-        .set("enable.idempotence", "true")
-        .create()
-        .unwrap()
-}
-
-fn base_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .set("group.id", group_id)
-        .set("auto.offset.reset", "earliest")
-        .create()
-        .unwrap()
-}
-
-fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
-    group_consumer_with_session_timeout(bootstrap, group_id, 45_000)
-}
-
-fn group_consumer_with_session_timeout(
-    bootstrap: &str,
-    group_id: &str,
-    session_timeout_ms: i32,
-) -> BaseConsumer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .set("group.id", group_id)
-        .set("auto.offset.reset", "earliest")
-        .set("enable.auto.commit", "false")
-        .set("session.timeout.ms", session_timeout_ms.to_string())
-        .set("debug", "protocol,broker,cgrp,fetch")
-        .create()
-        .unwrap()
-}
-
-fn poll_for_message(
-    consumer: &BaseConsumer,
-    timeout: Duration,
-) -> rdkafka::message::BorrowedMessage<'_> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < timeout {
-        if let Some(result) = consumer.poll(Duration::from_millis(250)) {
-            return result.expect("expected a message");
-        }
-    }
-    panic!("expected a fetch result");
-}
-
-fn drive_group_consumer(consumer: &BaseConsumer, timeout: Duration) {
-    let started = std::time::Instant::now();
-    while started.elapsed() < timeout {
-        let _ = consumer.poll(Duration::from_millis(250));
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn find_topic<'a>(metadata: &'a Metadata, name: &str) -> &'a rdkafka::metadata::MetadataTopic {
-    metadata
-        .topics()
-        .iter()
-        .find(|topic| topic.name() == name)
-        .expect("topic metadata should exist")
 }
