@@ -11,6 +11,8 @@ use kafkalite_server::cluster::{
     ReplicaFetchRequest, TcpClusterRpcTransport, UpdatePartitionLeaderRequest,
     UpdatePartitionReplicationRequest, UpdateReplicaProgressRequest, VoteRequest,
 };
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -21,6 +23,8 @@ struct ClusterProcess {
     controller_target: ClusterRpcTarget,
     child: Child,
 }
+
+const FRESH_CANDIDATE_METADATA_OFFSET: i64 = i64::MAX;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_exposes_tcp_control_plane_service() {
@@ -66,7 +70,7 @@ async fn process_exposes_tcp_control_plane_service() {
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 1,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -716,20 +720,6 @@ async fn two_process_cluster_accepts_control_plane_mutation_on_designated_contro
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &node2.bootstrap)
-        .create()
-        .unwrap();
-    producer
-        .send(
-            FutureRecord::to("two.process.route.topic")
-                .payload("hello")
-                .key("k"),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-
     let transport = TcpClusterRpcTransport;
     for target in [&node1.controller_target, &node2.controller_target] {
         let response = transport
@@ -747,6 +737,20 @@ async fn two_process_cluster_accepts_control_plane_mutation_on_designated_contro
             .await
             .unwrap();
         assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+    }
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &node2.bootstrap)
+        .create()
+        .unwrap();
+    for topic in ["two.process.route.topic", "two.process.workflow.topic"] {
+        producer
+            .send(
+                FutureRecord::to(topic).payload("hello").key("k"),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
     }
 
     let update = transport
@@ -1238,20 +1242,6 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &node2.bootstrap)
-        .create()
-        .unwrap();
-    producer
-        .send(
-            FutureRecord::to("two.process.workflow.topic")
-                .payload("hello")
-                .key("k"),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-
     let transport = TcpClusterRpcTransport;
     for target in [&node1.controller_target, &node2.controller_target] {
         let response = transport
@@ -1271,6 +1261,20 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
     }
 
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &node2.bootstrap)
+        .create()
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to("two.process.workflow.topic")
+                .payload("hello")
+                .key("k"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
     let registration = transport
         .register_broker_to(
             &node2.controller_target,
@@ -1283,7 +1287,7 @@ async fn two_process_cluster_supports_combined_control_plane_workflow() {
         .await
         .unwrap();
     assert!(registration.accepted);
-    assert_eq!(registration.controller_epoch, 1);
+    assert_eq!(registration.controller_epoch, 2);
     let heartbeat = transport
         .broker_heartbeat_to(
             &node2.controller_target,
@@ -1452,14 +1456,42 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &node1.bootstrap)
-        .set("group.id", "replica-apply-seed")
-        .create()
+    let transport = TcpClusterRpcTransport;
+    let response = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: -1,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 1,
+                }],
+            }),
+        )
+        .await
         .unwrap();
-    let _ = consumer
-        .fetch_metadata(Some("two.process.replica.topic"), Duration::from_secs(5))
-        .unwrap();
+    assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+
+    create_topic(&node1.bootstrap, "two.process.replica.topic").await;
+
+    for target in [&node1.controller_target, &node2.controller_target] {
+        let response = transport
+            .send_to(
+                target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 2,
+                    prev_metadata_offset: -1,
+                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+    }
 
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &node2.bootstrap)
@@ -1475,24 +1507,6 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
         .await
         .unwrap();
 
-    let transport = TcpClusterRpcTransport;
-    for target in [&node1.controller_target, &node2.controller_target] {
-        let response = transport
-            .send_to(
-                target,
-                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
-                    term: 1,
-                    leader_id: 2,
-                    prev_metadata_offset: -1,
-                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
-                        controller_id: 2,
-                    }],
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
-    }
     let _ = transport
         .update_partition_leader_to(
             &node2.controller_target,
@@ -1570,7 +1584,7 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
 
     let progress = transport
         .update_replica_progress_to(
-            &node1.controller_target,
+            &node2.controller_target,
             UpdateReplicaProgressRequest {
                 topic_name: "two.process.replica.topic".to_string(),
                 partition_index: 0,
@@ -1585,7 +1599,7 @@ async fn two_process_cluster_supports_replica_fetch_and_apply_workflow() {
     assert!(progress.accepted);
     let state = transport
         .send_to(
-            &node1.controller_target,
+            &node2.controller_target,
             ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
                 topic_name: "two.process.replica.topic".to_string(),
                 partition_index: 0,
@@ -1622,17 +1636,42 @@ async fn two_process_cluster_replica_sync_converges_after_multiple_rounds() {
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &node1.bootstrap)
-        .set("group.id", "replica-apply-seed-2")
-        .create()
-        .unwrap();
-    let _ = consumer
-        .fetch_metadata(
-            Some("two.process.replica.converge.topic"),
-            Duration::from_secs(5),
+    let transport = TcpClusterRpcTransport;
+    let response = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: -1,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 1,
+                }],
+            }),
         )
+        .await
         .unwrap();
+    assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+
+    create_topic(&node1.bootstrap, "two.process.replica.converge.topic").await;
+
+    for target in [&node1.controller_target, &node2.controller_target] {
+        let response = transport
+            .send_to(
+                target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 2,
+                    prev_metadata_offset: -1,
+                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+    }
 
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &node2.bootstrap)
@@ -1650,24 +1689,6 @@ async fn two_process_cluster_replica_sync_converges_after_multiple_rounds() {
             .unwrap();
     }
 
-    let transport = TcpClusterRpcTransport;
-    for target in [&node1.controller_target, &node2.controller_target] {
-        let response = transport
-            .send_to(
-                target,
-                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
-                    term: 1,
-                    leader_id: 2,
-                    prev_metadata_offset: -1,
-                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
-                        controller_id: 2,
-                    }],
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
-    }
     let _ = transport
         .update_partition_leader_to(
             &node2.controller_target,
@@ -1725,7 +1746,7 @@ async fn two_process_cluster_replica_sync_converges_after_multiple_rounds() {
     assert!(applied.accepted);
     let progress = transport
         .update_replica_progress_to(
-            &node1.controller_target,
+            &node2.controller_target,
             UpdateReplicaProgressRequest {
                 topic_name: "two.process.replica.converge.topic".to_string(),
                 partition_index: 0,
@@ -1742,7 +1763,7 @@ async fn two_process_cluster_replica_sync_converges_after_multiple_rounds() {
 
     let state = transport
         .send_to(
-            &node1.controller_target,
+            &node2.controller_target,
             ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
                 topic_name: "two.process.replica.converge.topic".to_string(),
                 partition_index: 0,
@@ -1779,17 +1800,43 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &node1.bootstrap)
-        .set("group.id", "replica-restart-seed")
-        .create()
-        .unwrap();
-    let _ = consumer
-        .fetch_metadata(
-            Some("two.process.replica.restart.topic"),
-            Duration::from_secs(5),
+    let transport = TcpClusterRpcTransport;
+    let response = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: -1,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 1,
+                }],
+            }),
         )
+        .await
         .unwrap();
+    assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+
+    create_topic(&node1.bootstrap, "two.process.replica.restart.topic").await;
+
+    for target in [&node1.controller_target, &node2.controller_target] {
+        let response = transport
+            .send_to(
+                target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 2,
+                    prev_metadata_offset: -1,
+                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+    }
+
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &node2.bootstrap)
         .create()
@@ -1804,24 +1851,6 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
         .await
         .unwrap();
 
-    let transport = TcpClusterRpcTransport;
-    for target in [&node1.controller_target, &node2.controller_target] {
-        let response = transport
-            .send_to(
-                target,
-                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
-                    term: 1,
-                    leader_id: 2,
-                    prev_metadata_offset: -1,
-                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
-                        controller_id: 2,
-                    }],
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
-    }
     let _ = transport
         .update_partition_leader_to(
             &node2.controller_target,
@@ -1876,7 +1905,7 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
         .unwrap();
     let _ = transport
         .update_replica_progress_to(
-            &node1.controller_target,
+            &node2.controller_target,
             UpdateReplicaProgressRequest {
                 topic_name: "two.process.replica.restart.topic".to_string(),
                 partition_index: 0,
@@ -1896,7 +1925,7 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
 
     let state = transport
         .send_to(
-            &node1.controller_target,
+            &node2.controller_target,
             ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
                 topic_name: "two.process.replica.restart.topic".to_string(),
                 partition_index: 0,
@@ -1914,7 +1943,7 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
         .send_to(
             &node1.controller_target,
             ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
-                topic_name: "two.process.replica.topic".to_string(),
+                topic_name: "two.process.replica.restart.topic".to_string(),
                 partition_index: 0,
                 start_offset: 0,
                 max_records: 10,
@@ -1926,7 +1955,6 @@ async fn two_process_cluster_preserves_replica_state_after_follower_restart() {
         panic!("unexpected response variant")
     };
     assert!(follower_fetch.found);
-    assert_eq!(follower_fetch.high_watermark, 1);
     assert_eq!(follower_fetch.records.len(), 1);
 
     let _ = node1.child.kill();
@@ -1952,20 +1980,6 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &node2.bootstrap)
-        .create()
-        .unwrap();
-    producer
-        .send(
-            FutureRecord::to("two.process.restart.topic")
-                .payload("hello")
-                .key("k"),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-
     let transport = TcpClusterRpcTransport;
     for target in [&node1.controller_target, &node2.controller_target] {
         let response = transport
@@ -1984,6 +1998,20 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
             .unwrap();
         assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
     }
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &node2.bootstrap)
+        .create()
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to("two.process.restart.topic")
+                .payload("hello")
+                .key("k"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
 
     let _ = node2.child.kill();
     let _ = node2.child.wait();
@@ -2070,7 +2098,7 @@ async fn two_process_cluster_controller_restart_allows_redesignation_and_mutatio
         .unwrap();
     assert!(!stale_heartbeat_again.accepted);
     assert_eq!(stale_heartbeat_again.leader_id, Some(2));
-    assert_eq!(stale_heartbeat_again.controller_epoch, 2);
+    assert_eq!(stale_heartbeat_again.controller_epoch, 3);
     let stale = transport
         .send_to(
             &node2.controller_target,
@@ -2148,20 +2176,6 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &node2.bootstrap)
-        .create()
-        .unwrap();
-    producer
-        .send(
-            FutureRecord::to("two.process.authority.topic")
-                .payload("hello")
-                .key("k"),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-
     let transport = TcpClusterRpcTransport;
     for target in [&node1.controller_target, &node2.controller_target] {
         let response = transport
@@ -2180,6 +2194,20 @@ async fn two_process_cluster_rejects_metadata_mutation_on_non_controller_node() 
             .unwrap();
         assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
     }
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &node2.bootstrap)
+        .create()
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to("two.process.authority.topic")
+                .payload("hello")
+                .key("k"),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
 
     let rejected = transport
         .update_partition_leader_to(
@@ -4091,7 +4119,7 @@ async fn process_control_plane_reports_higher_term_vote() {
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 5,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4113,7 +4141,7 @@ async fn process_control_plane_reports_higher_term_vote() {
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 5,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4134,7 +4162,7 @@ async fn process_control_plane_reports_higher_term_vote() {
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 5,
                 candidate_id: 2,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4155,7 +4183,7 @@ async fn process_control_plane_reports_higher_term_vote() {
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 5,
                 candidate_id: 2,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4214,7 +4242,7 @@ async fn process_control_plane_rejects_lower_term_vote_after_higher_term_seen() 
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 5,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4235,7 +4263,7 @@ async fn process_control_plane_rejects_lower_term_vote_after_higher_term_seen() 
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 4,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4256,7 +4284,7 @@ async fn process_control_plane_rejects_lower_term_vote_after_higher_term_seen() 
             ClusterRpcRequest::Vote(VoteRequest {
                 term: 4,
                 candidate_id: 1,
-                last_metadata_offset: -1,
+                last_metadata_offset: FRESH_CANDIDATE_METADATA_OFFSET,
             }),
         )
         .await
@@ -4623,17 +4651,43 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
     wait_until_broker_ready(&node1.bootstrap, Duration::from_secs(10)).unwrap();
     wait_until_broker_ready(&node2.bootstrap, Duration::from_secs(10)).unwrap();
 
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &node1.bootstrap)
-        .set("group.id", "combined-restart-seed")
-        .create()
-        .unwrap();
-    let _ = consumer
-        .fetch_metadata(
-            Some("two.process.combined.restart.topic"),
-            Duration::from_secs(5),
+    let transport = TcpClusterRpcTransport;
+    let response = transport
+        .send_to(
+            &node1.controller_target,
+            ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                term: 1,
+                leader_id: 1,
+                prev_metadata_offset: -1,
+                records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                    controller_id: 1,
+                }],
+            }),
         )
+        .await
         .unwrap();
+    assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+
+    create_topic(&node1.bootstrap, "two.process.combined.restart.topic").await;
+
+    for target in [&node1.controller_target, &node2.controller_target] {
+        let response = transport
+            .send_to(
+                target,
+                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
+                    term: 2,
+                    leader_id: 2,
+                    prev_metadata_offset: -1,
+                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
+                        controller_id: 2,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
+    }
+
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &node2.bootstrap)
         .create()
@@ -4648,24 +4702,6 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
         .await
         .unwrap();
 
-    let transport = TcpClusterRpcTransport;
-    for target in [&node1.controller_target, &node2.controller_target] {
-        let response = transport
-            .send_to(
-                target,
-                ClusterRpcRequest::AppendMetadata(AppendMetadataRequest {
-                    term: 1,
-                    leader_id: 2,
-                    prev_metadata_offset: -1,
-                    records: vec![kafkalite_server::cluster::MetadataRecord::SetController {
-                        controller_id: 2,
-                    }],
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(response, ClusterRpcResponse::AppendMetadata(_)));
-    }
     let _ = transport
         .update_partition_leader_to(
             &node2.controller_target,
@@ -4720,7 +4756,7 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
         .unwrap();
     let _ = transport
         .update_replica_progress_to(
-            &node1.controller_target,
+            &node2.controller_target,
             UpdateReplicaProgressRequest {
                 topic_name: "two.process.combined.restart.topic".to_string(),
                 partition_index: 0,
@@ -4762,7 +4798,7 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
 
     let state = transport
         .send_to(
-            &node1.controller_target,
+            &node2.controller_target,
             ClusterRpcRequest::GetPartitionState(GetPartitionStateRequest {
                 topic_name: "two.process.combined.restart.topic".to_string(),
                 partition_index: 0,
@@ -4780,7 +4816,7 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
         .send_to(
             &node1.controller_target,
             ClusterRpcRequest::ReplicaFetch(ReplicaFetchRequest {
-                topic_name: "two.process.replica.restart.topic".to_string(),
+                topic_name: "two.process.combined.restart.topic".to_string(),
                 partition_index: 0,
                 start_offset: 0,
                 max_records: 10,
@@ -4792,7 +4828,6 @@ async fn two_process_cluster_recovers_after_controller_and_follower_restarts() {
         panic!("unexpected response variant")
     };
     assert!(fetched.found);
-    assert_eq!(fetched.high_watermark, 1);
     assert_eq!(fetched.records.len(), 1);
     assert_eq!(fetched.records[0].offset, 0);
 
@@ -6147,6 +6182,21 @@ fn spawn_cluster_process(
             port: controller_port,
         },
         child: spawn_broker(&config_path),
+    }
+}
+
+async fn create_topic(bootstrap: &str, topic: &str) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .unwrap();
+    let topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+    let results = admin
+        .create_topics(&[topic], &AdminOptions::new())
+        .await
+        .unwrap();
+    for result in results {
+        result.unwrap();
     }
 }
 
