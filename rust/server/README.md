@@ -37,21 +37,6 @@ Installed binaries:
 - `OffsetCommit` (v0-7)
 - `OffsetFetch` (v1-7)
 
-## Behavioral notes
-
-- metadata requests can auto-create topics when the request enables auto topic creation
-- produce requests also create topics on first successful write when the requested partition is within the configured `default_partitions` range
-- metadata advertises every configured partition for known topics
-- direct produce/fetch/list-offsets operate on any existing partition in the configured range; out-of-range partitions return `UNKNOWN_TOPIC_OR_PARTITION`
-- committed offsets are stored per `(group, topic, partition)`
-- idempotent producer support covers validated duplicate retry replay, stale epoch rejection, and unknown producer id rejection for the current single-broker flow
-- producer transactions and full multi-broker EOS semantics are out of scope
-
-## Migration note
-
-- storage configuration now uses `data_dir`
-- older `db_path`-based configs are obsolete and should be migrated to the directory-based layout
-
 ## Configuration
 
 The server reads a Kafka-style `.properties` file.

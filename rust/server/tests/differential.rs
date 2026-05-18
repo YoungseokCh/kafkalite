@@ -13,6 +13,8 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::metadata::Metadata;
@@ -154,6 +156,13 @@ fn consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
         .unwrap()
 }
 
+fn admin_client(bootstrap: &str) -> AdminClient<DefaultClientContext> {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .unwrap()
+}
+
 fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
@@ -226,4 +235,26 @@ fn wait_for_topic(bootstrap: &str, topic: &str, expected_partition_count: usize)
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("topic {topic} did not become visible with {expected_partition_count} partitions");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_broker_supports_librdkafka_create_topics_admin_api() {
+    let (local_bootstrap, handle, _tempdir) = start_local_broker().await;
+    let topic = format!("diff.admin.{}", uuid::Uuid::new_v4().simple());
+    let admin = admin_client(&local_bootstrap);
+    let specs = [NewTopic::new(&topic, 1, TopicReplication::Fixed(1))];
+
+    let result = admin
+        .create_topics(&specs, &AdminOptions::new())
+        .await
+        .expect("librdkafka admin CreateTopics request should be supported");
+
+    assert!(
+        result.iter().all(Result::is_ok),
+        "topic creation should succeed: {result:?}"
+    );
+    wait_for_topic(&local_bootstrap, &topic, 1);
+
+    handle.abort();
+    let _ = handle.await;
 }
