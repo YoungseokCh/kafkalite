@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::cluster::config::ClusterConfig;
 use crate::cluster::controller::{BrokerHeartbeat, ControllerSnapshot, ControllerState};
+use crate::cluster::metadata::MetadataRecord;
 use crate::cluster::metadata::{BrokerMetadata, ClusterMetadataImage, MetadataStore};
 use crate::cluster::quorum::{QuorumSnapshot, QuorumState};
 use crate::cluster::rpc::{
@@ -224,8 +225,9 @@ impl ClusterRuntime {
             .metadata
             .lock()
             .expect("cluster metadata mutex poisoned");
-        let accepted =
-            metadata.append_remote_records(request.prev_metadata_offset, &request.records)?;
+        let accepted = metadata
+            .append_remote_records(request.prev_metadata_offset, &request.records)?
+            || metadata_records_match_current(metadata.image(), &request.records);
         Ok(AppendMetadataResponse {
             term: snapshot.current_term,
             accepted,
@@ -236,8 +238,18 @@ impl ClusterRuntime {
     pub fn handle_vote(&self, request: VoteRequest) -> Result<VoteResponse> {
         let current_offset = self.metadata_image().metadata_offset;
         let mut quorum = self.quorum.lock().expect("quorum state mutex poisoned");
-        let vote_granted = quorum.is_voter(request.candidate_id)
-            && request.last_metadata_offset >= current_offset
+        if !quorum.is_voter(request.candidate_id) {
+            let term = if request.term <= quorum.current_term() {
+                quorum.current_term()
+            } else {
+                quorum.current_term().saturating_sub(1)
+            };
+            return Ok(VoteResponse {
+                term,
+                vote_granted: false,
+            });
+        }
+        let vote_granted = candidate_log_is_fresh(request.last_metadata_offset, current_offset)
             && quorum.record_vote(request.candidate_id, request.term);
         Ok(VoteResponse {
             term: quorum.current_term(),
@@ -344,9 +356,10 @@ impl ClusterRuntime {
             request.leader_id,
             request.leader_epoch,
         ) {
+            let current = self.metadata_image();
             return Ok(UpdatePartitionLeaderResponse {
-                accepted: false,
-                metadata_offset: preview.metadata_offset,
+                accepted: partition_leader_matches(&current, &request),
+                metadata_offset: current.metadata_offset,
             });
         }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
@@ -376,6 +389,20 @@ impl ClusterRuntime {
             return Ok(UpdatePartitionReplicationResponse {
                 accepted: false,
                 metadata_offset: self.metadata_image().metadata_offset,
+            });
+        }
+        let mut preview = self.metadata_image();
+        if !preview.update_partition_replication(
+            &request.topic_name,
+            request.partition_index,
+            request.replicas.clone(),
+            request.isr.clone(),
+            request.leader_epoch,
+        ) {
+            let current = self.metadata_image();
+            return Ok(UpdatePartitionReplicationResponse {
+                accepted: partition_replication_matches(&current, &request),
+                metadata_offset: current.metadata_offset,
             });
         }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
@@ -428,9 +455,11 @@ impl ClusterRuntime {
             return Ok(UpdateReplicaProgressResponse {
                 accepted: false,
                 metadata_offset: image_before.metadata_offset,
-                high_watermark: image_before
-                    .partition_high_watermark(&topic_name, partition_index)
-                    .unwrap_or(0),
+                high_watermark: rejected_replica_progress_high_watermark(
+                    &image_before,
+                    &topic_name,
+                    partition_index,
+                ),
             });
         }
         let response = self.append_with_retry(|prev_metadata_offset, term, leader_id| {
@@ -804,6 +833,113 @@ impl ClusterRuntime {
             }
         }
     }
+}
+
+fn candidate_log_is_fresh(candidate_offset: i64, current_offset: i64) -> bool {
+    candidate_offset >= current_offset
+}
+
+fn partition_leader_matches(
+    image: &ClusterMetadataImage,
+    request: &UpdatePartitionLeaderRequest,
+) -> bool {
+    image
+        .partition_state_view(&request.topic_name, request.partition_index)
+        .is_some_and(|(leader_id, leader_epoch, _, _)| {
+            leader_id == request.leader_id && leader_epoch == request.leader_epoch
+        })
+}
+
+fn partition_replication_matches(
+    image: &ClusterMetadataImage,
+    request: &UpdatePartitionReplicationRequest,
+) -> bool {
+    image
+        .topics
+        .iter()
+        .find(|topic| topic.name == request.topic_name)
+        .and_then(|topic| {
+            topic
+                .partitions
+                .iter()
+                .find(|partition| partition.partition == request.partition_index)
+        })
+        .is_some_and(|partition| {
+            partition.replicas == request.replicas
+                && partition.isr == request.isr
+                && partition.leader_epoch == request.leader_epoch
+        })
+}
+
+fn metadata_records_match_current(
+    image: &ClusterMetadataImage,
+    records: &[MetadataRecord],
+) -> bool {
+    records.iter().all(|record| match record {
+        MetadataRecord::SetController { controller_id } => image.controller_id == *controller_id,
+        MetadataRecord::RegisterBroker(broker) => image.brokers.iter().any(|entry| entry == broker),
+        MetadataRecord::UpdatePartitionLeader {
+            topic_name,
+            partition_index,
+            leader_id,
+            leader_epoch,
+        } => image
+            .partition_state_view(topic_name, *partition_index)
+            .is_some_and(|(current_leader, current_epoch, _, _)| {
+                current_leader == *leader_id && current_epoch == *leader_epoch
+            }),
+        MetadataRecord::UpdatePartitionReplication {
+            topic_name,
+            partition_index,
+            replicas,
+            isr,
+            leader_epoch,
+        } => image
+            .topics
+            .iter()
+            .find(|topic| topic.name == *topic_name)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.partition == *partition_index)
+            })
+            .is_some_and(|partition| {
+                partition.replicas == *replicas
+                    && partition.isr == *isr
+                    && partition.leader_epoch == *leader_epoch
+            }),
+        MetadataRecord::UpsertTopic(topic) => image.topics.iter().any(|entry| entry == topic),
+        MetadataRecord::UpdateReplicaProgress { .. }
+        | MetadataRecord::BeginPartitionReassignment { .. }
+        | MetadataRecord::AdvancePartitionReassignment { .. }
+        | MetadataRecord::CompletePartitionReassignment { .. } => false,
+    })
+}
+
+fn rejected_replica_progress_high_watermark(
+    image: &ClusterMetadataImage,
+    topic_name: &str,
+    partition_index: i32,
+) -> i64 {
+    image
+        .topics
+        .iter()
+        .find(|topic| topic.name == topic_name)
+        .and_then(|topic| {
+            topic
+                .partitions
+                .iter()
+                .find(|partition| partition.partition == partition_index)
+        })
+        .map(|partition| {
+            if partition.replicas.len() <= 1 {
+                0
+            } else {
+                partition.high_watermark
+            }
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

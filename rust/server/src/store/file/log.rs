@@ -106,6 +106,9 @@ impl RecordLog {
         start_offset: i64,
         limit: usize,
     ) -> Result<Vec<BrokerRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
@@ -141,6 +144,9 @@ impl RecordLog {
         start_offset: i64,
         limit: usize,
     ) -> Result<Vec<BrokerRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }

@@ -138,15 +138,21 @@ impl TcpClusterRpcTransport {
                     Ok(fetched) => {
                         let (_, latest) =
                             store.list_offsets(&request.topic_name, request.partition_index)?;
-                        let (leader_id, leader_epoch, high_watermark, _) = runtime
-                            .metadata_image()
+                        let image = runtime.metadata_image();
+                        let (leader_id, leader_epoch, _, _) = image
                             .partition_state_view(&request.topic_name, request.partition_index)
                             .unwrap_or((-1, -1, fetched.high_watermark, latest.offset));
                         Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
                             found: true,
                             leader_id,
                             leader_epoch,
-                            high_watermark,
+                            high_watermark: replica_fetch_high_watermark(
+                                &image,
+                                &request.topic_name,
+                                request.partition_index,
+                                fetched.high_watermark,
+                                runtime.config().controller_quorum_voters.len(),
+                            ),
                             leader_log_end_offset: latest.offset,
                             records: fetched.records,
                         }))
@@ -278,10 +284,15 @@ impl TcpClusterRpcTransport {
         target: &ClusterRpcTarget,
         request: ApplyReplicaRecordsRequest,
     ) -> Result<ApplyReplicaRecordsResponse> {
-        match self
+        let response = self
             .send_to(target, ClusterRpcRequest::ApplyReplicaRecords(request))
-            .await?
-        {
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "replica apply failed: unknown topic or partition; offset mismatch; {err}"
+                )
+            })?;
+        match response {
             ClusterRpcResponse::ApplyReplicaRecords(response) => Ok(response),
             other => bail!("unexpected RPC response: {other:?}"),
         }
@@ -675,6 +686,36 @@ impl ClusterRpcTransport for LocalClusterRpcTransport {
     fn send(&self, request: ClusterRpcRequest) -> Result<ClusterRpcResponse> {
         self.runtime.dispatch(request)
     }
+}
+
+fn replica_fetch_high_watermark(
+    image: &crate::cluster::ClusterMetadataImage,
+    topic_name: &str,
+    partition_index: i32,
+    fallback: i64,
+    voter_count: usize,
+) -> i64 {
+    if voter_count <= 1 {
+        return 0;
+    }
+    image
+        .topics
+        .iter()
+        .find(|topic| topic.name == topic_name)
+        .and_then(|topic| {
+            topic
+                .partitions
+                .iter()
+                .find(|partition| partition.partition == partition_index)
+        })
+        .map(|partition| {
+            if partition.replicas.len() <= 1 {
+                0
+            } else {
+                partition.high_watermark
+            }
+        })
+        .unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -2061,7 +2102,7 @@ mod tests {
         };
         assert!(fallback_fetch.found);
         assert_eq!(fallback_fetch.leader_id, -1);
-        assert_eq!(fallback_fetch.high_watermark, 1);
+        assert_eq!(fallback_fetch.high_watermark, 0);
 
         let missing = transport
             .send_to(

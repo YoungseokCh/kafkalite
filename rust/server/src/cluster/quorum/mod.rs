@@ -71,6 +71,11 @@ impl QuorumState {
             self.current_term = term;
             self.leader_id = Some(leader_id);
             self.voted_for = None;
+            self.controller_epoch = if leader_id == self.local_node_id {
+                term + 1
+            } else {
+                term
+            };
         }
     }
 
