@@ -102,6 +102,30 @@ fn replace_manifest_file_bytes(
     entry.bytes = bytes;
 }
 
+fn append_expected_index_entry(
+    bytes: &mut Vec<u8>,
+    base_offset: i64,
+    position: u64,
+    length: usize,
+    last_offset: i64,
+) {
+    bytes.extend_from_slice(&base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
+    bytes.extend_from_slice(&(length as u32).to_le_bytes());
+    bytes.extend_from_slice(&last_offset.to_le_bytes());
+}
+
+fn append_expected_time_index_entry(
+    bytes: &mut Vec<u8>,
+    max_timestamp_ms: i64,
+    base_offset: i64,
+    position: u64,
+) {
+    bytes.extend_from_slice(&max_timestamp_ms.to_le_bytes());
+    bytes.extend_from_slice(&base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
+}
+
 fn collect_manifest_entries(
     root: &Path,
     current: &Path,

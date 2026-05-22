@@ -38,18 +38,16 @@ impl Storage for FileStore {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<(i64, i64)> {
-        let decision = {
-            let mut data = self.data.lock().expect("file store mutex poisoned");
-            match data.prepare_append(topic, partition, records, now_ms) {
-                Ok(decision) => decision,
-                Err(crate::store::StoreError::UnknownTopicOrPartition { .. }) if partition == 0 => {
-                    drop(data);
-                    self.ensure_topic(topic, 1, now_ms)?;
-                    let mut data = self.data.lock().expect("file store mutex poisoned");
-                    data.prepare_append(topic, partition, records, now_ms)?
-                }
-                Err(err) => return Err(err),
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        let decision = match data.prepare_append(topic, partition, records, now_ms) {
+            Ok(decision) => decision,
+            Err(crate::store::StoreError::UnknownTopicOrPartition { .. }) if partition == 0 => {
+                drop(data);
+                self.ensure_topic(topic, 1, now_ms)?;
+                data = self.data.lock().expect("file store mutex poisoned");
+                data.prepare_append(topic, partition, records, now_ms)?
             }
+            Err(err) => return Err(err),
         };
         match decision {
             AppendDecision::Duplicate {
@@ -64,7 +62,6 @@ impl Storage for FileStore {
                     &StoredBatch::from_records(&prepared.records),
                 )?;
                 let result = (prepared.base_offset, prepared.last_offset);
-                let mut data = self.data.lock().expect("file store mutex poisoned");
                 data.finish_append(&prepared, now_ms)?;
                 Ok(result)
             }
@@ -142,16 +139,10 @@ impl Storage for FileStore {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<i64> {
-        let prepared = {
-            let mut data = self.data.lock().expect("file store mutex poisoned");
-            data.prepare_replica_append(topic, partition, records)?
-        };
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        let prepared = data.prepare_replica_append(topic, partition, records)?;
         let Some(prepared) = prepared else {
-            return self
-                .data
-                .lock()
-                .expect("file store mutex poisoned")
-                .latest_offset(topic, partition);
+            return data.latest_offset(topic, partition);
         };
         self.logs.ensure_partition(topic, partition)?;
         self.logs.append_batch(
@@ -159,7 +150,6 @@ impl Storage for FileStore {
             partition,
             &StoredBatch::from_records(&prepared.records),
         )?;
-        let mut data = self.data.lock().expect("file store mutex poisoned");
         data.finish_append(&prepared, now_ms)?;
         data.latest_offset(topic, partition)
     }
@@ -172,11 +162,9 @@ impl Storage for FileStore {
         leader_high_watermark: i64,
         now_ms: i64,
     ) -> Result<crate::store::ReplicaApplyResult> {
-        let prepared = {
-            let data = self.data.lock().expect("file store mutex poisoned");
-            let expected = data.latest_offset(topic, partition)?;
-            strict_replica_prepare(topic, partition, records, expected)?
-        };
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        let expected = data.latest_offset(topic, partition)?;
+        let prepared = strict_replica_prepare(topic, partition, records, expected)?;
         if let Some(prepared) = prepared.as_ref() {
             self.logs.ensure_partition(topic, partition)?;
             self.logs.append_batch(
@@ -185,7 +173,6 @@ impl Storage for FileStore {
                 &StoredBatch::from_records(&prepared.records),
             )?;
         }
-        let mut data = self.data.lock().expect("file store mutex poisoned");
         data.finish_replica_append(
             prepared.as_ref(),
             topic,

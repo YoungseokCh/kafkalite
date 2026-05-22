@@ -235,6 +235,52 @@ fn handoff_native_kafka_layout_appends_and_fetches_contiguous_offsets() {
     );
 }
 
+#[test]
+fn concurrent_appends_to_same_partition_remain_contiguous_after_reopen() {
+    const THREADS: usize = 32;
+
+    let dir = tempdir().unwrap();
+    let store = std::sync::Arc::new(FileStore::open(dir.path()).unwrap());
+    store.ensure_topic("race.append", 1, 0).unwrap();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+    let handles = (0..THREADS)
+        .map(|thread_id| {
+            let store = store.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let record = non_idempotent_record(0, thread_id as i64, b"race");
+                start.wait();
+                store
+                    .append_records("race.append", 0, &[record], thread_id as i64)
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut offsets = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().0)
+        .collect::<Vec<_>>();
+    offsets.sort_unstable();
+    drop(store);
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let fetched = reopened
+        .fetch_records("race.append", 0, 0, THREADS)
+        .unwrap();
+
+    assert_eq!(offsets, (0..THREADS as i64).collect::<Vec<_>>());
+    assert_eq!(fetched.records.len(), THREADS);
+    assert_eq!(
+        fetched
+            .records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        (0..THREADS as i64).collect::<Vec<_>>()
+    );
+}
+
 fn non_idempotent_record(offset: i64, timestamp_ms: i64, value: &'static [u8]) -> BrokerRecord {
     BrokerRecord {
         offset,
@@ -246,28 +292,4 @@ fn non_idempotent_record(offset: i64, timestamp_ms: i64, value: &'static [u8]) -
         value: Some(Bytes::from_static(value)),
         headers_json: b"[]".to_vec(),
     }
-}
-
-fn append_expected_index_entry(
-    bytes: &mut Vec<u8>,
-    base_offset: i64,
-    position: u64,
-    length: usize,
-    last_offset: i64,
-) {
-    bytes.extend_from_slice(&base_offset.to_le_bytes());
-    bytes.extend_from_slice(&position.to_le_bytes());
-    bytes.extend_from_slice(&(length as u32).to_le_bytes());
-    bytes.extend_from_slice(&last_offset.to_le_bytes());
-}
-
-fn append_expected_time_index_entry(
-    bytes: &mut Vec<u8>,
-    max_timestamp_ms: i64,
-    base_offset: i64,
-    position: u64,
-) {
-    bytes.extend_from_slice(&max_timestamp_ms.to_le_bytes());
-    bytes.extend_from_slice(&base_offset.to_le_bytes());
-    bytes.extend_from_slice(&position.to_le_bytes());
 }

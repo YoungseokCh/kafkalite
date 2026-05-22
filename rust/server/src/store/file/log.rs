@@ -34,6 +34,7 @@ impl StorageBytes {
 pub struct RecordLog {
     root: PathBuf,
     append_count: std::sync::atomic::AtomicU64,
+    append_lock: std::sync::Mutex<()>,
 }
 
 impl RecordLog {
@@ -41,6 +42,7 @@ impl RecordLog {
         let log = Self {
             root: root.to_path_buf(),
             append_count: std::sync::atomic::AtomicU64::new(0),
+            append_lock: std::sync::Mutex::new(()),
         };
         log.recover()?;
         Ok(log)
@@ -68,6 +70,7 @@ impl RecordLog {
     }
 
     pub fn append_batch(&self, topic: &str, partition: i32, batch: &StoredBatch) -> Result<()> {
+        let _append_guard = self.append_lock.lock().expect("record log mutex poisoned");
         self.ensure_partition(topic, partition)?;
         let mut segment = OpenOptions::new()
             .append(true)
