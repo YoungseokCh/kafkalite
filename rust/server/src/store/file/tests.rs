@@ -90,6 +90,18 @@ fn filesystem_manifest(root: &Path) -> BTreeMap<String, ManifestEntry> {
     entries
 }
 
+fn replace_manifest_file_bytes(
+    manifest: &mut BTreeMap<String, ManifestEntry>,
+    path: &str,
+    bytes: Vec<u8>,
+) {
+    let entry = manifest.get_mut(path).unwrap();
+    assert_eq!(entry.file_type, ManifestFileType::File);
+    entry.size = bytes.len() as u64;
+    entry.content_hash = fnv1a64(&bytes);
+    entry.bytes = bytes;
+}
+
 fn collect_manifest_entries(
     root: &Path,
     current: &Path,

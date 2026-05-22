@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::file::log::StoredBatch;
 
 #[test]
 fn truncated_tail_is_recovered_on_restart() {
@@ -146,4 +147,91 @@ fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
 
     assert_eq!(filesystem_manifest(dir.path()), before);
     assert_eq!(root_directories(dir.path()), vec!["byte-exact.open-0"]);
+}
+
+#[test]
+fn appending_to_valid_kafka_layout_changes_only_expected_log_and_indexes() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let initial_records = (0..16)
+        .map(|offset| non_idempotent_record(offset, 10 + offset, b"initial"))
+        .collect::<Vec<_>>();
+    store
+        .append_records("byte-exact.append", 0, &initial_records, 20)
+        .unwrap();
+    drop(store);
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let appended = non_idempotent_record(16, 100, b"tail");
+    reopened
+        .append_records("byte-exact.append", 0, std::slice::from_ref(&appended), 100)
+        .unwrap();
+    drop(reopened);
+
+    let mut expected = before.clone();
+    let log_path = "byte-exact.append-0/00000000000000000000.log";
+    let index_path = "byte-exact.append-0/00000000000000000000.index";
+    let time_index_path = "byte-exact.append-0/00000000000000000000.timeindex";
+    let mut expected_log = before.get(log_path).unwrap().bytes.clone();
+    let appended_payload = StoredBatch::from_records(&[appended])
+        .encode_binary()
+        .unwrap();
+    let append_position = expected_log.len() as u64;
+    expected_log.extend_from_slice(&appended_payload);
+    replace_manifest_file_bytes(&mut expected, log_path, expected_log);
+
+    let mut expected_index = before.get(index_path).unwrap().bytes.clone();
+    append_expected_index_entry(
+        &mut expected_index,
+        16,
+        append_position,
+        appended_payload.len(),
+        16,
+    );
+    replace_manifest_file_bytes(&mut expected, index_path, expected_index);
+
+    let mut expected_time_index = before.get(time_index_path).unwrap().bytes.clone();
+    append_expected_time_index_entry(&mut expected_time_index, 100, 16, append_position);
+    replace_manifest_file_bytes(&mut expected, time_index_path, expected_time_index);
+
+    assert_eq!(filesystem_manifest(dir.path()), expected);
+    assert_eq!(root_directories(dir.path()), vec!["byte-exact.append-0"]);
+}
+
+fn non_idempotent_record(offset: i64, timestamp_ms: i64, value: &'static [u8]) -> BrokerRecord {
+    BrokerRecord {
+        offset,
+        timestamp_ms,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: offset as i32,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(value)),
+        headers_json: b"[]".to_vec(),
+    }
+}
+
+fn append_expected_index_entry(
+    bytes: &mut Vec<u8>,
+    base_offset: i64,
+    position: u64,
+    length: usize,
+    last_offset: i64,
+) {
+    bytes.extend_from_slice(&base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
+    bytes.extend_from_slice(&(length as u32).to_le_bytes());
+    bytes.extend_from_slice(&last_offset.to_le_bytes());
+}
+
+fn append_expected_time_index_entry(
+    bytes: &mut Vec<u8>,
+    max_timestamp_ms: i64,
+    base_offset: i64,
+    position: u64,
+) {
+    bytes.extend_from_slice(&max_timestamp_ms.to_le_bytes());
+    bytes.extend_from_slice(&base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
 }
