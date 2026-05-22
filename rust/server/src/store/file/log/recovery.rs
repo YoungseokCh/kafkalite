@@ -63,7 +63,7 @@ impl RecordLog {
         &self,
         previous: &BTreeMap<String, TopicState>,
     ) -> Result<BTreeMap<String, TopicState>> {
-        let mut topics = BTreeMap::new();
+        let mut topics = previous.clone();
         for (topic_name, partition) in self.discover_user_partitions()? {
             let topic = topics.entry(topic_name.clone()).or_insert_with(|| {
                 previous.get(&topic_name).cloned().unwrap_or(TopicState {

@@ -1,3 +1,4 @@
+mod cluster_metadata;
 mod consumer_offsets;
 mod control_plane;
 mod data_plane;
@@ -64,6 +65,7 @@ impl FileStore {
         let replayed_control = consumer_offsets::replay(&logs)?;
         snapshots.offsets = replayed_control.offsets;
         snapshots.groups = replayed_control.groups;
+        snapshots.topics = cluster_metadata::recover_topic_states(&logs)?;
         snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
         let recovered = snapshots
             .topics
