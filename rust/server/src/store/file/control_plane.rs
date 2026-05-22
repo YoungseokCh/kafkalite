@@ -25,7 +25,7 @@ pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
     offsets: BTreeMap<OffsetKey, i64>,
     logs: Arc<RecordLog>,
-    next_consumer_offsets_record: i64,
+    next_consumer_offsets_records: BTreeMap<i32, i64>,
     journal: StateJournal,
 }
 
@@ -44,7 +44,7 @@ impl ControlPlaneState {
         groups: BTreeMap<String, GroupState>,
         offsets: BTreeMap<String, i64>,
         logs: Arc<RecordLog>,
-        next_consumer_offsets_record: i64,
+        next_consumer_offsets_records: BTreeMap<i32, i64>,
         journal: StateJournal,
     ) -> Self {
         Self {
@@ -54,7 +54,7 @@ impl ControlPlaneState {
                 .map(|(key, value)| (OffsetKey::from_serialized(&key), value))
                 .collect(),
             logs,
-            next_consumer_offsets_record,
+            next_consumer_offsets_records,
             journal,
         }
     }
@@ -248,18 +248,26 @@ impl ControlPlaneState {
             member.updated_at_unix_ms = request.now_ms;
         }
         let offset_key = OffsetKey::new(request.group_id, request.topic, request.partition);
+        let offset_topic_partition = consumer_offsets::partition_for_group_id(request.group_id);
+        let record_offset = self
+            .next_consumer_offsets_records
+            .get(&offset_topic_partition)
+            .copied()
+            .unwrap_or(0);
         consumer_offsets::append_commit(
             &self.logs,
-            self.next_consumer_offsets_record,
+            record_offset,
             OffsetCommitRecord {
                 group_id: request.group_id,
+                offset_topic_partition,
                 topic: request.topic,
                 partition: request.partition,
                 next_offset: request.next_offset,
                 now_ms: request.now_ms,
             },
         )?;
-        self.next_consumer_offsets_record += 1;
+        self.next_consumer_offsets_records
+            .insert(offset_topic_partition, record_offset + 1);
         self.offsets.insert(offset_key, request.next_offset);
         self.persist_offsets()
     }

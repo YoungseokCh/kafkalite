@@ -16,11 +16,7 @@ impl RecordLog {
         Ok(())
     }
 
-    pub(in crate::store::file) fn recover_partition(
-        &self,
-        topic: &str,
-        partition: i32,
-    ) -> Result<()> {
+    pub(super) fn recover_partition(&self, topic: &str, partition: i32) -> Result<()> {
         let segment_path = self.segment_path(topic, partition);
         if !segment_path.exists() {
             return Ok(());

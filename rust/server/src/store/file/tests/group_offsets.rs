@@ -63,6 +63,58 @@ fn offsets_are_committed_and_fetched_per_partition() {
 }
 
 #[test]
+fn committed_offsets_replay_from_multiple_consumer_offsets_partitions() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let groups = (0..20)
+        .map(|index| format!("group-multi-{index}"))
+        .collect::<Vec<_>>();
+
+    for (index, group_id) in groups.iter().enumerate() {
+        let member_id = format!("member-{index}");
+        let joined = store
+            .join_group(GroupJoinRequest {
+                group_id,
+                member_id: Some(&member_id),
+                protocol_type: "consumer",
+                protocol_name: "range",
+                metadata: &subscription,
+                session_timeout_ms: 5_000,
+                rebalance_timeout_ms: 5_000,
+                now_ms: 100 + index as i64,
+            })
+            .unwrap();
+        store
+            .commit_offset(commit_request(
+                group_id,
+                &member_id,
+                joined.generation_id,
+                "topic-a",
+                0,
+                index as i64 + 1,
+                200 + index as i64,
+            ))
+            .unwrap();
+    }
+
+    let offset_partition_count = root_directories(dir.path())
+        .into_iter()
+        .filter(|name| name.starts_with("__consumer_offsets-"))
+        .count();
+    assert!(offset_partition_count > 1);
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    for (index, group_id) in groups.iter().enumerate() {
+        assert_eq!(
+            reopened.fetch_offset(group_id, "topic-a", 0).unwrap(),
+            Some(index as i64 + 1)
+        );
+    }
+}
+
+#[test]
 fn assignments_split_topic_partitions_across_members() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();

@@ -114,8 +114,12 @@ fn heartbeat_and_offset_commit_do_not_create_non_topic_directories() {
         ))
         .unwrap();
 
-    assert_eq!(
-        root_directories(dir.path()),
-        vec!["__consumer_offsets-0", "topic-a-0"]
-    );
+    let directories = root_directories(dir.path());
+    let offset_directories = directories
+        .iter()
+        .filter(|name| name.starts_with("__consumer_offsets-"))
+        .collect::<Vec<_>>();
+    assert_eq!(directories.len(), 2);
+    assert_eq!(offset_directories.len(), 1);
+    assert!(directories.contains(&"topic-a-0".to_string()));
 }

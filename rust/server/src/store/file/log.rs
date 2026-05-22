@@ -174,6 +174,10 @@ impl RecordLog {
             .map(|record| (record.offset, record.timestamp_ms)))
     }
 
+    pub(super) fn recover_internal_partition(&self, topic: &str, partition: i32) -> Result<()> {
+        self.recover_partition(topic, partition)
+    }
+
     pub(super) fn read_all_batches(&self, topic: &str, partition: i32) -> Result<Vec<StoredBatch>> {
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
@@ -216,6 +220,28 @@ impl RecordLog {
             .collect::<Vec<_>>();
         ids.sort_unstable();
         Ok(ids)
+    }
+
+    pub(super) fn internal_topic_partitions(&self, topic: &str) -> Result<Vec<i32>> {
+        let mut partitions = Vec::new();
+        if !self.root.exists() {
+            return Ok(partitions);
+        }
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some((candidate, partition)) = parse_partition_dir(&name) else {
+                continue;
+            };
+            if candidate == topic {
+                partitions.push(partition);
+            }
+        }
+        partitions.sort_unstable();
+        Ok(partitions)
     }
 
     pub(super) fn partition_dir(&self, topic: &str, partition: i32) -> PathBuf {

@@ -7,28 +7,39 @@ use crate::store::{BrokerRecord, Result, StoreError};
 use super::log::{RecordLog, StoredBatch};
 
 const CONSUMER_OFFSETS_TOPIC: &str = "__consumer_offsets";
-const CONSUMER_OFFSETS_PARTITION: i32 = 0;
+const DEFAULT_CONSUMER_OFFSETS_PARTITIONS: i32 = 50;
 const OFFSET_COMMIT_KEY_VERSION: i16 = 1;
 const OFFSET_COMMIT_VALUE_VERSION: i16 = 1;
 const NO_EXPIRATION_TIMESTAMP: i64 = -1;
+const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
+const FNV_PRIME: u32 = 16_777_619;
 
 pub(super) struct OffsetCommitRecord<'a> {
     pub group_id: &'a str,
+    pub offset_topic_partition: i32,
     pub topic: &'a str,
     pub partition: i32,
     pub next_offset: i64,
     pub now_ms: i64,
 }
 
-pub(super) fn replay(logs: &RecordLog) -> Result<(BTreeMap<String, i64>, i64)> {
-    logs.recover_partition(CONSUMER_OFFSETS_TOPIC, CONSUMER_OFFSETS_PARTITION)?;
-    let records = logs.read_all_records(CONSUMER_OFFSETS_TOPIC, CONSUMER_OFFSETS_PARTITION)?;
-    let next_record_offset = records.last().map(|record| record.offset + 1).unwrap_or(0);
-    let mut offsets = BTreeMap::new();
-    for record in records {
-        apply_record(&mut offsets, record)?;
+pub(super) fn replay(logs: &RecordLog) -> Result<(BTreeMap<String, i64>, BTreeMap<i32, i64>)> {
+    let mut partitions = logs.internal_topic_partitions(CONSUMER_OFFSETS_TOPIC)?;
+    if partitions.is_empty() {
+        partitions.push(0);
     }
-    Ok((offsets, next_record_offset))
+    let mut offsets = BTreeMap::new();
+    let mut next_record_offsets = BTreeMap::new();
+    for partition in partitions {
+        logs.recover_internal_partition(CONSUMER_OFFSETS_TOPIC, partition)?;
+        let records = logs.read_all_records(CONSUMER_OFFSETS_TOPIC, partition)?;
+        let next_record_offset = records.last().map(|record| record.offset + 1).unwrap_or(0);
+        for record in records {
+            apply_record(&mut offsets, record)?;
+        }
+        next_record_offsets.insert(partition, next_record_offset);
+    }
+    Ok((offsets, next_record_offsets))
 }
 
 pub(super) fn append_commit(
@@ -55,9 +66,18 @@ pub(super) fn append_commit(
     };
     logs.append_batch(
         CONSUMER_OFFSETS_TOPIC,
-        CONSUMER_OFFSETS_PARTITION,
+        commit.offset_topic_partition,
         &StoredBatch::from_records(&[record]),
     )
+}
+
+pub(super) fn partition_for_group_id(group_id: &str) -> i32 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in group_id.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash % DEFAULT_CONSUMER_OFFSETS_PARTITIONS as u32) as i32
 }
 
 fn apply_record(offsets: &mut BTreeMap<String, i64>, record: BrokerRecord) -> Result<()> {
