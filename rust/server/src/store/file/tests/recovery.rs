@@ -199,6 +199,42 @@ fn appending_to_valid_kafka_layout_changes_only_expected_log_and_indexes() {
     assert_eq!(root_directories(dir.path()), vec!["byte-exact.append-0"]);
 }
 
+#[test]
+fn handoff_native_kafka_layout_appends_and_fetches_contiguous_offsets() {
+    let dir = tempdir().unwrap();
+    let partition_dir = dir.path().join("handoff.native-0");
+    std::fs::create_dir_all(&partition_dir).unwrap();
+    let existing_records = [
+        non_idempotent_record(0, 10, b"zero"),
+        non_idempotent_record(1, 20, b"one"),
+    ];
+    std::fs::File::create(partition_dir.join("00000000000000000000.log"))
+        .unwrap()
+        .write_all(
+            &StoredBatch::from_records(&existing_records)
+                .encode_binary()
+                .unwrap(),
+        )
+        .unwrap();
+
+    let store = FileStore::open(dir.path()).unwrap();
+    let appended = non_idempotent_record(0, 30, b"two");
+    let append_result = store
+        .append_records("handoff.native", 0, &[appended], 30)
+        .unwrap();
+    let fetched = store.fetch_records("handoff.native", 0, 0, 10).unwrap();
+
+    assert_eq!(append_result, (2, 2));
+    assert_eq!(
+        fetched
+            .records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+}
+
 fn non_idempotent_record(offset: i64, timestamp_ms: i64, value: &'static [u8]) -> BrokerRecord {
     BrokerRecord {
         offset,
