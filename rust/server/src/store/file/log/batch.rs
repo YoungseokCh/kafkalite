@@ -1,10 +1,12 @@
-use std::io::Read;
-
+use bytes::{Bytes, BytesMut};
+use kafka_protocol::indexmap::IndexMap;
+use kafka_protocol::protocol::StrBytes;
+use kafka_protocol::records::{
+    Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::store::{BrokerRecord, Result, StoreError};
-
-const BATCH_MAGIC: &[u8; 4] = b"KFLG";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::store::file) struct StoredBatch {
@@ -35,104 +37,95 @@ impl StoredBatch {
     }
 
     pub fn encode_binary(&self) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        out.extend_from_slice(BATCH_MAGIC);
-        out.extend_from_slice(&self.base_offset.to_le_bytes());
-        out.extend_from_slice(&self.last_offset.to_le_bytes());
-        out.extend_from_slice(&self.max_timestamp_ms.to_le_bytes());
-        out.extend_from_slice(&(self.records.len() as u32).to_le_bytes());
-        for record in &self.records {
-            out.extend_from_slice(&record.offset.to_le_bytes());
-            out.extend_from_slice(&record.timestamp_ms.to_le_bytes());
-            out.extend_from_slice(&record.producer_id.to_le_bytes());
-            out.extend_from_slice(&record.producer_epoch.to_le_bytes());
-            out.extend_from_slice(&record.sequence.to_le_bytes());
-            write_bytes(&mut out, record.key.as_ref().map(|value| value.as_ref()));
-            write_bytes(&mut out, record.value.as_ref().map(|value| value.as_ref()));
-            write_bytes(&mut out, Some(record.headers_json.as_slice()));
-        }
-        Ok(out)
+        let kafka_records = self.records.iter().map(to_kafka_record).collect::<Vec<_>>();
+        let mut encoded = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut encoded,
+            &kafka_records,
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .map_err(|err| StoreError::Protocol(err.to_string()))?;
+        Ok(encoded.to_vec())
     }
 
     pub fn decode_binary(payload: &[u8]) -> Result<Self> {
-        let mut cursor = std::io::Cursor::new(payload);
-        let mut magic = [0_u8; 4];
-        cursor.read_exact(&mut magic)?;
-        if &magic != BATCH_MAGIC {
-            return Err(StoreError::Protocol("invalid batch magic".to_string()));
-        }
-        let base_offset = read_i64(&mut cursor)?;
-        let last_offset = read_i64(&mut cursor)?;
-        let max_timestamp_ms = read_i64(&mut cursor)?;
-        let mut count_bytes = [0_u8; 4];
-        cursor.read_exact(&mut count_bytes)?;
-        let count = u32::from_le_bytes(count_bytes);
-        let mut records = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let offset = read_i64(&mut cursor)?;
-            let timestamp_ms = read_i64(&mut cursor)?;
-            let producer_id = read_i64(&mut cursor)?;
-            let producer_epoch = read_i16(&mut cursor)?;
-            let sequence = read_i32(&mut cursor)?;
-            let key = read_bytes(&mut cursor)?.map(bytes::Bytes::from);
-            let value = read_bytes(&mut cursor)?.map(bytes::Bytes::from);
-            let headers_json = read_bytes(&mut cursor)?.unwrap_or_default();
-            records.push(BrokerRecord {
-                offset,
-                timestamp_ms,
-                producer_id,
-                producer_epoch,
-                sequence,
-                key,
-                value,
-                headers_json,
-            });
-        }
-        Ok(Self {
-            base_offset,
-            last_offset,
-            max_timestamp_ms,
-            records,
-        })
+        let records = Self::decode_batches(payload)?
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .collect::<Vec<_>>();
+        Ok(Self::from_records(&records))
+    }
+
+    pub fn decode_batches(payload: &[u8]) -> Result<Vec<Self>> {
+        let mut bytes = Bytes::copy_from_slice(payload);
+        let batches = RecordBatchDecoder::decode_all(&mut bytes)
+            .map_err(|err| StoreError::Protocol(err.to_string()))?;
+        Ok(batches
+            .into_iter()
+            .map(|batch| {
+                let records = batch
+                    .records
+                    .into_iter()
+                    .map(to_broker_record)
+                    .collect::<Vec<_>>();
+                Self::from_records(&records)
+            })
+            .collect())
     }
 }
 
-pub(super) fn write_bytes(out: &mut Vec<u8>, bytes: Option<&[u8]>) {
-    match bytes {
-        Some(bytes) => {
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(bytes);
-        }
-        None => out.extend_from_slice(&u32::MAX.to_le_bytes()),
+fn to_kafka_record(record: &BrokerRecord) -> Record {
+    Record {
+        transactional: false,
+        control: false,
+        partition_leader_epoch: 0,
+        producer_id: record.producer_id,
+        producer_epoch: record.producer_epoch,
+        timestamp_type: TimestampType::Creation,
+        offset: record.offset,
+        sequence: kafka_sequence(record),
+        timestamp: record.timestamp_ms,
+        key: record.key.clone(),
+        value: record.value.clone(),
+        headers: decode_headers(&record.headers_json),
     }
 }
 
-pub(super) fn read_bytes(reader: &mut std::io::Cursor<&[u8]>) -> Result<Option<Vec<u8>>> {
-    let mut len = [0_u8; 4];
-    reader.read_exact(&mut len)?;
-    let len = u32::from_le_bytes(len);
-    if len == u32::MAX {
-        return Ok(None);
+fn kafka_sequence(record: &BrokerRecord) -> i32 {
+    if record.producer_id < 0 {
+        record.offset as i32
+    } else {
+        record.sequence
     }
-    let mut bytes = vec![0_u8; len as usize];
-    reader.read_exact(&mut bytes)?;
-    Ok(Some(bytes))
 }
 
-fn read_i64(reader: &mut std::io::Cursor<&[u8]>) -> Result<i64> {
-    let mut bytes = [0_u8; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(i64::from_le_bytes(bytes))
+fn to_broker_record(record: Record) -> BrokerRecord {
+    BrokerRecord {
+        offset: record.offset,
+        timestamp_ms: record.timestamp,
+        producer_id: record.producer_id,
+        producer_epoch: record.producer_epoch,
+        sequence: record.sequence,
+        key: record.key,
+        value: record.value,
+        headers_json: serde_json::to_vec(
+            &record
+                .headers
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone().map(|bytes| bytes.to_vec())))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| b"[]".to_vec()),
+    }
 }
 
-fn read_i32(reader: &mut std::io::Cursor<&[u8]>) -> Result<i32> {
-    let mut bytes = [0_u8; 4];
-    reader.read_exact(&mut bytes)?;
-    Ok(i32::from_le_bytes(bytes))
-}
-
-fn read_i16(reader: &mut std::io::Cursor<&[u8]>) -> Result<i16> {
-    let mut bytes = [0_u8; 2];
-    reader.read_exact(&mut bytes)?;
-    Ok(i16::from_le_bytes(bytes))
+fn decode_headers(headers_json: &[u8]) -> IndexMap<StrBytes, Option<Bytes>> {
+    serde_json::from_slice::<Vec<(String, Option<Vec<u8>>)>>(headers_json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| (StrBytes::from(key), value.map(Bytes::from)))
+        .collect()
 }

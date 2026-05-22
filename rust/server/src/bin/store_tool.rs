@@ -146,7 +146,7 @@ mod tests {
             )
             .unwrap();
 
-        let partition_dir = dir.path().join("topics/repair.events/partitions/0");
+        let partition_dir = dir.path().join("repair.events-0");
         let index_path = partition_dir.join("00000000000000000000.index");
         let timeindex_path = partition_dir.join("00000000000000000000.timeindex");
         std::fs::remove_file(&index_path).unwrap();

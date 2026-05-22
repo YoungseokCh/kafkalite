@@ -103,10 +103,7 @@ fn store_contract_recovers_torn_tail_on_reopen() {
 
     std::fs::OpenOptions::new()
         .append(true)
-        .open(
-            dir.path()
-                .join("topics/recover.events/partitions/0/00000000000000000000.log"),
-        )
+        .open(dir.path().join("recover.events-0/00000000000000000000.log"))
         .unwrap()
         .write_all(b"partial-tail")
         .unwrap();

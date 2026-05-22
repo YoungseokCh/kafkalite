@@ -1,15 +1,7 @@
-use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use crate::store::{Result, StoreError};
-
-use super::policy::DEFAULT_POLICY;
-
-const JOURNAL_MAGIC: &[u8; 4] = b"KFSJ";
+use crate::store::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicState {
@@ -103,108 +95,38 @@ pub struct SnapshotSet {
 }
 
 impl SnapshotSet {
-    pub fn load(root: &Path) -> Result<Self> {
-        Ok(Self {
-            topics: read_json(root.join("state/topics.snapshot"))?.unwrap_or_default(),
-            producers: read_json(root.join("state/producers.snapshot"))?.unwrap_or(ProducerState {
+    pub fn load() -> Self {
+        Self {
+            topics: BTreeMap::new(),
+            producers: ProducerState {
                 next_producer_id: 1,
                 sequences: BTreeMap::new(),
-            }),
+            },
             groups: BTreeMap::new(),
-            offsets: read_json(root.join("state/offsets.snapshot"))?.unwrap_or_default(),
-        })
+            offsets: BTreeMap::new(),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct StateJournal {
-    path: PathBuf,
-}
+pub struct StateJournal;
 
 impl StateJournal {
-    pub fn open(root: &Path) -> Result<Self> {
-        fs::create_dir_all(root.join("state"))?;
-        let path = root.join("state/state.journal");
-        if !path.exists() {
-            File::create(&path)?;
-        }
-        Ok(Self { path })
+    pub fn new() -> Self {
+        Self
     }
 
-    pub fn replay(&self, snapshots: &mut SnapshotSet) -> Result<()> {
-        let mut reader = BufReader::new(File::open(&self.path)?);
-        while let Some(entry) = read_journal_entry(&mut reader)? {
-            match entry {
-                JournalEntry::Topics(topics) => snapshots.topics = topics,
-                JournalEntry::Producers(producers) => snapshots.producers = producers,
-                JournalEntry::Groups(_) => {}
-                JournalEntry::Offsets(offsets) => snapshots.offsets = offsets,
-            }
-        }
+    pub fn replay(&self, _snapshots: &mut SnapshotSet) -> Result<()> {
         Ok(())
     }
 
-    pub fn append_producer_state(&self, producers: &ProducerState, _now_ms: i64) -> Result<()> {
-        self.append(
-            JournalEntry::Producers(producers.clone()),
-            DEFAULT_POLICY.sync_producer_journal,
-        )
-    }
-
-    pub fn append_offsets(&self, offsets: &BTreeMap<String, i64>) -> Result<()> {
-        self.append(
-            JournalEntry::Offsets(offsets.clone()),
-            DEFAULT_POLICY.sync_offset_journal,
-        )
-    }
-
-    fn append(&self, entry: JournalEntry, sync: bool) -> Result<()> {
-        let mut file = OpenOptions::new().append(true).open(&self.path)?;
-        write_journal_entry(&mut file, &entry)?;
-        if sync {
-            file.sync_all()?;
-        }
+    pub fn append_producer_state(&self, _producers: &ProducerState, _now_ms: i64) -> Result<()> {
         Ok(())
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum JournalEntry {
-    Topics(BTreeMap<String, TopicState>),
-    Producers(ProducerState),
-    Groups(BTreeMap<String, GroupState>),
-    Offsets(BTreeMap<String, i64>),
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<Option<T>> {
-    if !path.exists() {
-        return Ok(None);
+    pub fn append_offsets(&self, _offsets: &BTreeMap<String, i64>) -> Result<()> {
+        Ok(())
     }
-    Ok(Some(serde_json::from_reader(File::open(path)?)?))
-}
-
-fn write_journal_entry(writer: &mut File, entry: &JournalEntry) -> Result<()> {
-    let payload = serde_json::to_vec(entry)?;
-    writer.write_all(JOURNAL_MAGIC)?;
-    writer.write_all(&(payload.len() as u32).to_le_bytes())?;
-    writer.write_all(&payload)?;
-    Ok(())
-}
-
-fn read_journal_entry(reader: &mut BufReader<File>) -> Result<Option<JournalEntry>> {
-    let mut magic = [0_u8; 4];
-    if reader.read_exact(&mut magic).is_err() {
-        return Ok(None);
-    }
-    if &magic != JOURNAL_MAGIC {
-        return Err(StoreError::Protocol("invalid journal magic".to_string()));
-    }
-    let mut len = [0_u8; 4];
-    reader.read_exact(&mut len)?;
-    let len = u32::from_le_bytes(len) as usize;
-    let mut payload = vec![0_u8; len];
-    reader.read_exact(&mut payload)?;
-    Ok(Some(serde_json::from_slice(&payload)?))
 }
 
 #[cfg(test)]

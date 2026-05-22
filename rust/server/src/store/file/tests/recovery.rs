@@ -20,10 +20,7 @@ fn truncated_tail_is_recovered_on_restart() {
         .unwrap();
     std::fs::OpenOptions::new()
         .append(true)
-        .open(
-            dir.path()
-                .join("topics/recover.events/partitions/0/00000000000000000000.log"),
-        )
+        .open(dir.path().join("recover.events-0/00000000000000000000.log"))
         .unwrap()
         .write_all(b"partial-tail")
         .unwrap();
@@ -59,7 +56,7 @@ fn truncated_index_tail_is_rebuilt_on_restart() {
         .append(true)
         .open(
             dir.path()
-                .join("topics/recover.index/partitions/0/00000000000000000000.index"),
+                .join("recover.index-0/00000000000000000000.index"),
         )
         .unwrap()
         .write_all(&[1, 2, 3])

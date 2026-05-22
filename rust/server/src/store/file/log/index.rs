@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 
 use crate::store::Result;
 
@@ -31,25 +31,6 @@ pub(super) fn write_index_entry(writer: &mut File, entry: &IndexEntry) -> Result
 
 pub(super) fn should_index_batch(batch: &StoredBatch) -> bool {
     batch.base_offset == 0 || batch.base_offset % DEFAULT_POLICY.index_stride == 0
-}
-
-pub(super) fn read_index_entry(reader: &mut File) -> Result<Option<IndexEntry>> {
-    let mut base_offset = [0_u8; 8];
-    if reader.read_exact(&mut base_offset).is_err() {
-        return Ok(None);
-    }
-    let mut position = [0_u8; 8];
-    let mut length = [0_u8; 4];
-    let mut last_offset = [0_u8; 8];
-    reader.read_exact(&mut position)?;
-    reader.read_exact(&mut length)?;
-    reader.read_exact(&mut last_offset)?;
-    Ok(Some(IndexEntry {
-        base_offset: i64::from_le_bytes(base_offset),
-        position: u64::from_le_bytes(position),
-        length: u32::from_le_bytes(length),
-        last_offset: i64::from_le_bytes(last_offset),
-    }))
 }
 
 pub(super) fn write_time_index_entry(writer: &mut File, entry: &TimeIndexEntry) -> Result<()> {

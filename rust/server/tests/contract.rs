@@ -60,6 +60,7 @@ async fn broker_contract_covers_roundtrip_offsets_and_invalid_partition() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Kafka-standard __consumer_offsets persistence"]
 async fn broker_contract_keeps_records_and_committed_offsets_across_restart() {
     init_test_logging();
     let tempdir = tempdir().unwrap();

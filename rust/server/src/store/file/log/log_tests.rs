@@ -3,7 +3,6 @@ use std::io::Write;
 
 use tempfile::tempdir;
 
-use super::batch::{read_bytes, write_bytes};
 use super::*;
 
 fn sample_batch(offset: i64) -> StoredBatch {
@@ -50,15 +49,9 @@ fn missing_partition_paths_are_noop_for_recovery_and_truncate() {
 }
 
 #[test]
-fn decode_binary_rejects_invalid_magic_and_null_bytes_round_trip() {
+fn decode_binary_rejects_invalid_kafka_batch() {
     let err = StoredBatch::decode_binary(b"BAD!").unwrap_err().to_string();
-    assert!(err.contains("invalid batch magic"));
-
-    let mut encoded = Vec::new();
-    write_bytes(&mut encoded, None);
-    let mut cursor = std::io::Cursor::new(encoded.as_slice());
-    let decoded = read_bytes(&mut cursor).unwrap();
-    assert!(decoded.is_none());
+    assert!(!err.is_empty());
 }
 
 #[test]
@@ -73,7 +66,6 @@ fn recover_partition_truncates_invalid_batch_payload() {
         .truncate(true)
         .open(&segment)
         .unwrap();
-    file.write_all(&4_u32.to_le_bytes()).unwrap();
     file.write_all(b"BAD!").unwrap();
     drop(file);
 
@@ -98,12 +90,13 @@ fn append_batch_hits_sync_interval_branch() {
 }
 
 #[test]
-fn read_index_entries_returns_empty_when_index_file_missing() {
+fn read_records_scans_log_when_index_file_missing() {
     let dir = tempdir().unwrap();
     let log = RecordLog::open(dir.path()).unwrap();
-    log.ensure_partition("index-missing", 0).unwrap();
+    log.append_batch("index-missing", 0, &sample_batch(0))
+        .unwrap();
     std::fs::remove_file(log.index_path("index-missing", 0)).unwrap();
 
-    let entries = log.read_index_entries("index-missing", 0).unwrap();
-    assert!(entries.is_empty());
+    let records = log.read_records("index-missing", 0, 0, 10).unwrap();
+    assert_eq!(records.len(), 1);
 }

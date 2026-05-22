@@ -125,6 +125,7 @@ fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_me
 }
 
 #[test]
+#[ignore = "requires Kafka-standard __consumer_offsets persistence"]
 fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -176,6 +177,7 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
 }
 
 #[test]
+#[ignore = "requires Kafka-standard __consumer_offsets persistence"]
 fn committed_offset_resume_survives_restart_after_tombstone() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();

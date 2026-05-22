@@ -5,7 +5,7 @@ use super::*;
 use crate::store::{BrokerRecord, Storage};
 
 #[test]
-fn append_only_adds_one_state_journal_entry_per_write() {
+fn append_creates_only_kafka_user_partition_directory() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     let producer = store.init_producer(10).unwrap();
@@ -20,22 +20,9 @@ fn append_only_adds_one_state_journal_entry_per_write() {
         headers_json: b"[]".to_vec(),
     }];
 
-    let journal_path = dir.path().join("state/state.journal");
-    assert_eq!(count_journal_entries(&journal_path), 1);
-
     store.append_records("d1.events", 0, &records, 20).unwrap();
-    assert_eq!(count_journal_entries(&journal_path), 2);
 
-    store.append_records("d1.events", 0, &records, 30).unwrap();
-    assert_eq!(count_journal_entries(&journal_path), 2);
-
-    let next = vec![BrokerRecord {
-        sequence: 1,
-        timestamp_ms: 30,
-        ..records[0].clone()
-    }];
-    store.append_records("d1.events", 0, &next, 30).unwrap();
-    assert_eq!(count_journal_entries(&journal_path), 3);
+    assert_eq!(root_directories(dir.path()), vec!["d1.events-0"]);
 }
 
 #[test]
@@ -98,29 +85,13 @@ fn non_idempotent_producer_records_do_not_persist_sequence_state() {
         .unwrap();
 
     let reopened = FileStore::open(dir.path()).unwrap();
-    let journal = std::fs::read_to_string(dir.path().join("state/producers.snapshot"));
-
-    assert!(journal.is_err());
     assert!(
         reopened
             .describe_topic("non-idempotent-state.events")
             .is_some()
     );
-    let state_journal = std::fs::read(dir.path().join("state/state.journal")).unwrap();
-    let text = String::from_utf8_lossy(&state_journal);
-    assert!(!text.contains("non-idempotent-state.events:0:-1"));
-}
-
-fn count_journal_entries(path: &std::path::Path) -> usize {
-    let bytes = std::fs::read(path).unwrap();
-    let mut cursor = 0;
-    let mut count = 0;
-    while cursor + 8 <= bytes.len() {
-        assert_eq!(&bytes[cursor..cursor + 4], b"KFSJ");
-        let len = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-        cursor += 8 + len;
-        count += 1;
-    }
-    assert_eq!(cursor, bytes.len());
-    count
+    assert_eq!(
+        root_directories(dir.path()),
+        vec!["non-idempotent-state.events-0"]
+    );
 }

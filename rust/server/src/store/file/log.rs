@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::store::{BrokerRecord, Result};
@@ -10,8 +10,25 @@ mod recovery;
 
 use super::policy::DEFAULT_POLICY;
 pub(super) use batch::StoredBatch;
-use index::{IndexEntry, TimeIndexEntry, read_index_entry, should_index_batch};
+use index::{IndexEntry, TimeIndexEntry, should_index_batch};
 use index::{write_index_entry, write_time_index_entry};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct StorageBytes {
+    pub log_bytes: u64,
+    pub index_bytes: u64,
+    pub timeindex_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl StorageBytes {
+    fn add(&mut self, other: StorageBytes) {
+        self.log_bytes += other.log_bytes;
+        self.index_bytes += other.index_bytes;
+        self.timeindex_bytes += other.timeindex_bytes;
+        self.total_bytes += other.total_bytes;
+    }
+}
 
 #[derive(Debug)]
 pub struct RecordLog {
@@ -21,8 +38,6 @@ pub struct RecordLog {
 
 impl RecordLog {
     pub fn open(root: &Path) -> Result<Self> {
-        fs::create_dir_all(root.join("topics"))?;
-        fs::create_dir_all(root.join("broker"))?;
         let log = Self {
             root: root.to_path_buf(),
             append_count: std::sync::atomic::AtomicU64::new(0),
@@ -60,7 +75,6 @@ impl RecordLog {
             .open(self.segment_path(topic, partition))?;
         let position = segment.seek(SeekFrom::End(0))?;
         let payload = batch.encode_binary()?;
-        segment.write_all(&(payload.len() as u32).to_le_bytes())?;
         segment.write_all(&payload)?;
         let append_number = self
             .append_count
@@ -112,29 +126,12 @@ impl RecordLog {
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
-        let start_position = self.lookup_position(topic, partition, start_offset)?;
-        let mut file = File::open(self.segment_path(topic, partition))?;
-        file.seek(SeekFrom::Start(start_position))?;
-        let mut reader = BufReader::new(file);
-        let mut records = Vec::new();
-        loop {
-            let mut len = [0_u8; 4];
-            if reader.read_exact(&mut len).is_err() {
-                break;
-            }
-            let mut payload = vec![0_u8; u32::from_le_bytes(len) as usize];
-            reader.read_exact(&mut payload)?;
-            let batch = StoredBatch::decode_binary(&payload)?;
-            for record in batch.records {
-                if record.offset >= start_offset {
-                    records.push(record);
-                }
-                if records.len() >= limit {
-                    return Ok(records);
-                }
-            }
-        }
-        Ok(records)
+        Ok(self
+            .read_all_records(topic, partition)?
+            .into_iter()
+            .filter(|record| record.offset >= start_offset)
+            .take(limit)
+            .collect())
     }
 
     pub fn read_records_for_client(
@@ -150,20 +147,9 @@ impl RecordLog {
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
-        let start_position = self.lookup_position(topic, partition, start_offset)?;
-        let mut file = File::open(self.segment_path(topic, partition))?;
-        file.seek(SeekFrom::Start(start_position))?;
-        let mut reader = BufReader::new(file);
         let mut records = Vec::new();
         let mut visible_count = 0_usize;
-        loop {
-            let mut len = [0_u8; 4];
-            if reader.read_exact(&mut len).is_err() {
-                break;
-            }
-            let mut payload = vec![0_u8; u32::from_le_bytes(len) as usize];
-            reader.read_exact(&mut payload)?;
-            let batch = StoredBatch::decode_binary(&payload)?;
+        for batch in self.read_all_batches(topic, partition)? {
             if batch.last_offset < start_offset {
                 continue;
             }
@@ -188,58 +174,52 @@ impl RecordLog {
             .map(|record| (record.offset, record.timestamp_ms)))
     }
 
-    fn lookup_position(&self, topic: &str, partition: i32, start_offset: i64) -> Result<u64> {
-        let mut candidate = 0_u64;
-        for entry in self.read_index_entries(topic, partition)? {
-            if entry.base_offset <= start_offset {
-                candidate = entry.position;
-            } else {
-                break;
-            }
-        }
-        Ok(candidate)
-    }
-
-    fn read_index_entries(&self, topic: &str, partition: i32) -> Result<Vec<IndexEntry>> {
-        if !self.index_path(topic, partition).exists() {
+    pub(super) fn read_all_batches(&self, topic: &str, partition: i32) -> Result<Vec<StoredBatch>> {
+        if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
-        let mut reader = File::open(self.index_path(topic, partition))?;
-        let mut entries = Vec::new();
-        while let Some(entry) = read_index_entry(&mut reader)? {
-            entries.push(entry);
+        let mut payload = Vec::new();
+        File::open(self.segment_path(topic, partition))?.read_to_end(&mut payload)?;
+        if payload.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(entries)
+        StoredBatch::decode_batches(&payload)
     }
 
-    fn topic_dir(&self, topic: &str) -> PathBuf {
-        self.root.join("topics").join(topic)
+    pub(super) fn read_all_records(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<Vec<BrokerRecord>> {
+        Ok(self
+            .read_all_batches(topic, partition)?
+            .into_iter()
+            .flat_map(|batch| batch.records)
+            .collect())
+    }
+
+    pub(super) fn storage_bytes(&self) -> Result<StorageBytes> {
+        let mut bytes = StorageBytes::default();
+        for (topic, partition) in self.discover_user_partitions()? {
+            bytes.add(walk_partition_storage(
+                &self.partition_dir(&topic, partition),
+            )?);
+        }
+        Ok(bytes)
     }
 
     pub(super) fn partition_ids(&self, topic: &str) -> Result<Vec<i32>> {
-        let partitions_dir = self.topic_dir(topic).join("partitions");
-        if !partitions_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut ids = fs::read_dir(partitions_dir)?
-            .filter_map(|entry| {
-                entry.ok().and_then(|entry| {
-                    entry
-                        .file_type()
-                        .ok()
-                        .filter(|kind| kind.is_dir())
-                        .and_then(|_| entry.file_name().to_string_lossy().parse::<i32>().ok())
-                })
-            })
+        let mut ids = self
+            .discover_user_partitions()?
+            .into_iter()
+            .filter_map(|(candidate, partition)| (candidate == topic).then_some(partition))
             .collect::<Vec<_>>();
         ids.sort_unstable();
         Ok(ids)
     }
 
-    fn partition_dir(&self, topic: &str, partition: i32) -> PathBuf {
-        self.topic_dir(topic)
-            .join("partitions")
-            .join(partition.to_string())
+    pub(super) fn partition_dir(&self, topic: &str, partition: i32) -> PathBuf {
+        self.root.join(format!("{topic}-{partition}"))
     }
 
     fn segment_path(&self, topic: &str, partition: i32) -> PathBuf {
@@ -256,6 +236,66 @@ impl RecordLog {
         self.partition_dir(topic, partition)
             .join("00000000000000000000.timeindex")
     }
+
+    pub(super) fn discover_user_partitions(&self) -> Result<Vec<(String, i32)>> {
+        let mut partitions = Vec::new();
+        if !self.root.exists() {
+            return Ok(partitions);
+        }
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_internal_dir(&name) {
+                continue;
+            }
+            let Some((topic, partition)) = parse_partition_dir(&name) else {
+                continue;
+            };
+            partitions.push((topic.to_string(), partition));
+        }
+        partitions.sort();
+        Ok(partitions)
+    }
+}
+
+fn is_internal_dir(name: &str) -> bool {
+    name.starts_with("__")
+}
+
+fn parse_partition_dir(name: &str) -> Option<(&str, i32)> {
+    let (topic, partition) = name.rsplit_once('-')?;
+    if topic.is_empty() {
+        return None;
+    }
+    let partition = partition.parse::<i32>().ok()?;
+    (partition >= 0).then_some((topic, partition))
+}
+
+fn walk_partition_storage(root: &Path) -> Result<StorageBytes> {
+    let mut bytes = StorageBytes::default();
+    if !root.exists() {
+        return Ok(bytes);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            bytes.add(walk_partition_storage(&path)?);
+        } else {
+            let size = entry.metadata()?.len();
+            bytes.total_bytes += size;
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("log") => bytes.log_bytes += size,
+                Some("index") => bytes.index_bytes += size,
+                Some("timeindex") => bytes.timeindex_bytes += size,
+                _ => {}
+            }
+        }
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

@@ -8,9 +8,8 @@ mod storage_impl;
 mod storage_offsets;
 mod topic_catalog;
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::Result;
 use control_plane::ControlPlaneState;
@@ -49,7 +48,7 @@ pub struct StorageSummary {
 
 pub struct FileStore {
     root: PathBuf,
-    logs: RecordLog,
+    logs: Arc<RecordLog>,
     data: Mutex<DataPlaneState>,
     control: Mutex<ControlPlaneState>,
 }
@@ -57,9 +56,9 @@ pub struct FileStore {
 impl FileStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let logs = RecordLog::open(&root)?;
-        let journal = StateJournal::open(&root)?;
-        let mut snapshots = SnapshotSet::load(&root)?;
+        let logs = Arc::new(RecordLog::open(&root)?);
+        let journal = StateJournal::new();
+        let mut snapshots = SnapshotSet::load();
         journal.replay(&mut snapshots)?;
         snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
         let recovered = snapshots
@@ -98,20 +97,18 @@ impl FileStore {
     }
 
     pub fn describe_storage(&self) -> Result<StorageSummary> {
-        let (log_bytes, index_bytes, timeindex_bytes, total_bytes) =
-            walk_storage(&self.root.join("topics"))?;
-        let (_, _, _, state_bytes) = walk_storage(&self.root.join("state"))?;
+        let data_bytes = self.logs.storage_bytes()?;
         let data = self.data.lock().expect("file store mutex poisoned");
         let control = self.control.lock().expect("file store mutex poisoned");
         Ok(StorageSummary {
             topic_count: data.topic_count(),
             group_count: control.group_count(),
             committed_offset_count: control.committed_offset_count(),
-            total_bytes: total_bytes + state_bytes,
-            log_bytes,
-            index_bytes,
-            timeindex_bytes,
-            state_bytes,
+            total_bytes: data_bytes.total_bytes,
+            log_bytes: data_bytes.log_bytes,
+            index_bytes: data_bytes.index_bytes,
+            timeindex_bytes: data_bytes.timeindex_bytes,
+            state_bytes: 0,
         })
     }
 
@@ -120,35 +117,21 @@ impl FileStore {
     }
 }
 
-fn walk_storage(root: &Path) -> Result<(u64, u64, u64, u64)> {
-    let mut log_bytes = 0;
-    let mut index_bytes = 0;
-    let mut timeindex_bytes = 0;
-    let mut total = 0;
-    if !root.exists() {
-        return Ok((0, 0, 0, 0));
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            let (l, i, t, tt) = walk_storage(&path)?;
-            log_bytes += l;
-            index_bytes += i;
-            timeindex_bytes += t;
-            total += tt;
-        } else {
-            let size = entry.metadata()?.len();
-            total += size;
-            match path.extension().and_then(|ext| ext.to_str()) {
-                Some("log") => log_bytes += size,
-                Some("index") => index_bytes += size,
-                Some("timeindex") => timeindex_bytes += size,
-                _ => {}
-            }
-        }
-    }
-    Ok((log_bytes, index_bytes, timeindex_bytes, total))
+#[cfg(test)]
+fn root_directories(root: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_type()
+                .unwrap()
+                .is_dir()
+                .then(|| entry.file_name().to_string_lossy().to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 #[cfg(test)]

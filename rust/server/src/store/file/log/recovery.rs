@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::store::Result;
 
@@ -10,18 +10,8 @@ use crate::store::file::state::{PartitionState, TopicState};
 
 impl RecordLog {
     pub(super) fn recover(&self) -> Result<()> {
-        for entry in fs::read_dir(self.root.join("topics"))? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                self.recover_topic(&entry.file_name().to_string_lossy())?;
-            }
-        }
-        Ok(())
-    }
-
-    fn recover_topic(&self, topic: &str) -> Result<()> {
-        for partition in self.partition_ids(topic)? {
-            self.recover_partition(topic, partition)?;
+        for (topic, partition) in self.discover_user_partitions()? {
+            self.recover_partition(&topic, partition)?;
         }
         Ok(())
     }
@@ -37,20 +27,28 @@ impl RecordLog {
             .open(&segment_path)?;
         let file_len = file.metadata()?.len();
         let mut safe_len = 0_u64;
-        while safe_len < file_len {
+        while safe_len + 12 <= file_len {
             file.seek(SeekFrom::Start(safe_len))?;
-            let mut len = [0_u8; 4];
-            if file.read_exact(&mut len).is_err() {
+            let mut header = [0_u8; 12];
+            if file.read_exact(&mut header).is_err() {
                 break;
             }
-            let payload_len = u32::from_le_bytes(len) as u64;
+            let batch_len = i32::from_be_bytes(header[8..12].try_into().expect("slice size"));
+            if batch_len < 0 {
+                break;
+            }
+            let payload_len = 12 + batch_len as u64;
+            if safe_len + payload_len > file_len {
+                break;
+            }
+            file.seek(SeekFrom::Start(safe_len))?;
             let mut payload = vec![0_u8; payload_len as usize];
             if file.read_exact(&mut payload).is_err()
                 || StoredBatch::decode_binary(&payload).is_err()
             {
                 break;
             }
-            safe_len += 4 + payload_len;
+            safe_len += payload_len;
         }
         if safe_len < file_len {
             file.set_len(safe_len)?;
@@ -66,27 +64,20 @@ impl RecordLog {
         previous: &BTreeMap<String, TopicState>,
     ) -> Result<BTreeMap<String, TopicState>> {
         let mut topics = BTreeMap::new();
-        for entry in fs::read_dir(self.root.join("topics"))? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let topic_name = entry.file_name().to_string_lossy().to_string();
-            let mut topic = previous.get(&topic_name).cloned().unwrap_or(TopicState {
-                name: topic_name.clone(),
-                partitions: BTreeMap::new(),
-                created_at_unix_ms: 0,
-                updated_at_unix_ms: 0,
+        for (topic_name, partition) in self.discover_user_partitions()? {
+            let topic = topics.entry(topic_name.clone()).or_insert_with(|| {
+                previous.get(&topic_name).cloned().unwrap_or(TopicState {
+                    name: topic_name.clone(),
+                    partitions: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
             });
             topic.name = topic_name.clone();
-            let partition_ids = self.partition_ids(&topic_name)?;
-            for partition in partition_ids {
-                topic.partitions.insert(
-                    partition,
-                    self.recover_partition_state(&topic_name, partition)?,
-                );
-            }
-            topics.insert(topic_name, topic);
+            topic.partitions.insert(
+                partition,
+                self.recover_partition_state(&topic_name, partition)?,
+            );
         }
         Ok(topics)
     }
@@ -102,17 +93,8 @@ impl RecordLog {
         if !self.segment_path(topic, partition).exists() {
             return Ok(());
         }
-        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
         let mut rewritten = Vec::new();
-        loop {
-            let mut len = [0_u8; 4];
-            if reader.read_exact(&mut len).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len) as usize;
-            let mut payload = vec![0_u8; payload_len];
-            reader.read_exact(&mut payload)?;
-            let mut batch = StoredBatch::decode_binary(&payload)?;
+        for mut batch in self.read_all_batches(topic, partition)? {
             if batch.base_offset >= next_offset {
                 break;
             }
@@ -139,7 +121,6 @@ impl RecordLog {
                     .unwrap_or(0);
             }
             let encoded = batch.encode_binary()?;
-            rewritten.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
             rewritten.extend_from_slice(&encoded);
             if batch.last_offset + 1 >= next_offset {
                 break;
@@ -160,17 +141,9 @@ impl RecordLog {
         }
         let mut index = File::create(self.index_path(topic, partition))?;
         let mut time_index = File::create(self.time_index_path(topic, partition))?;
-        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
         let mut position = 0_u64;
-        loop {
-            let mut len = [0_u8; 4];
-            if reader.read_exact(&mut len).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len) as usize;
-            let mut payload = vec![0_u8; payload_len];
-            reader.read_exact(&mut payload)?;
-            let batch = StoredBatch::decode_binary(&payload)?;
+        for batch in self.read_all_batches(topic, partition)? {
+            let payload_len = batch.encode_binary()?.len();
             write_index_entry(
                 &mut index,
                 &IndexEntry {
@@ -188,7 +161,7 @@ impl RecordLog {
                     position,
                 },
             )?;
-            position += 4 + payload_len as u64;
+            position += payload_len as u64;
         }
         index.sync_all()?;
         time_index.sync_all()?;
@@ -203,17 +176,8 @@ impl RecordLog {
         if !self.segment_path(topic, partition).exists() {
             return Ok(PartitionState::new(0));
         }
-        let mut reader = BufReader::new(File::open(self.segment_path(topic, partition))?);
         let mut next_offset = 0;
-        loop {
-            let mut len = [0_u8; 4];
-            if reader.read_exact(&mut len).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len) as usize;
-            let mut payload = vec![0_u8; payload_len];
-            reader.read_exact(&mut payload)?;
-            let batch = StoredBatch::decode_binary(&payload)?;
+        for batch in self.read_all_batches(topic, partition)? {
             next_offset = batch.last_offset + 1;
         }
         Ok(PartitionState {
