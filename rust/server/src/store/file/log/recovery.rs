@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::store::Result;
 
-use super::index::{IndexEntry, TimeIndexEntry, write_index_entry, write_time_index_entry};
+use super::index::{
+    IndexEntry, TimeIndexEntry, should_index_batch, write_index_entry, write_time_index_entry,
+};
 use super::{RecordLog, StoredBatch};
 use crate::store::file::state::{PartitionState, TopicState};
 
@@ -50,12 +52,15 @@ impl RecordLog {
             }
             safe_len += payload_len;
         }
-        if safe_len < file_len {
+        let truncated = safe_len < file_len;
+        if truncated {
             file.set_len(safe_len)?;
             file.sync_all()?;
         }
         drop(file);
-        self.rebuild_indexes_for_partition(topic, partition)?;
+        if truncated || !self.indexes_match_partition(topic, partition)? {
+            self.rebuild_indexes_for_partition(topic, partition)?;
+        }
         Ok(())
     }
 
@@ -144,28 +149,56 @@ impl RecordLog {
         let mut position = 0_u64;
         for batch in self.read_all_batches(topic, partition)? {
             let payload_len = batch.encode_binary()?.len();
-            write_index_entry(
-                &mut index,
-                &IndexEntry {
-                    base_offset: batch.base_offset,
-                    position,
-                    length: payload_len as u32,
-                    last_offset: batch.last_offset,
-                },
-            )?;
-            write_time_index_entry(
-                &mut time_index,
-                &TimeIndexEntry {
-                    max_timestamp_ms: batch.max_timestamp_ms,
-                    base_offset: batch.base_offset,
-                    position,
-                },
-            )?;
+            if should_index_batch(&batch) {
+                write_index_entry(
+                    &mut index,
+                    &IndexEntry {
+                        base_offset: batch.base_offset,
+                        position,
+                        length: payload_len as u32,
+                        last_offset: batch.last_offset,
+                    },
+                )?;
+                write_time_index_entry(
+                    &mut time_index,
+                    &TimeIndexEntry {
+                        max_timestamp_ms: batch.max_timestamp_ms,
+                        base_offset: batch.base_offset,
+                        position,
+                    },
+                )?;
+            }
             position += payload_len as u64;
         }
         index.sync_all()?;
         time_index.sync_all()?;
         Ok(())
+    }
+
+    fn indexes_match_partition(&self, topic: &str, partition: i32) -> Result<bool> {
+        let index_path = self.index_path(topic, partition);
+        let time_index_path = self.time_index_path(topic, partition);
+        if !index_path.exists() || !time_index_path.exists() {
+            return Ok(false);
+        }
+        let (expected_index, expected_time_index) = self.expected_index_bytes(topic, partition)?;
+        Ok(fs::read(index_path)? == expected_index
+            && fs::read(time_index_path)? == expected_time_index)
+    }
+
+    fn expected_index_bytes(&self, topic: &str, partition: i32) -> Result<(Vec<u8>, Vec<u8>)> {
+        let mut index = Vec::new();
+        let mut time_index = Vec::new();
+        let mut position = 0_u64;
+        for batch in self.read_all_batches(topic, partition)? {
+            let payload_len = batch.encode_binary()?.len();
+            if should_index_batch(&batch) {
+                append_index_entry(&mut index, &batch, position, payload_len);
+                append_time_index_entry(&mut time_index, &batch, position);
+            }
+            position += payload_len as u64;
+        }
+        Ok((index, time_index))
     }
 
     pub(super) fn recover_partition_state(
@@ -186,4 +219,17 @@ impl RecordLog {
             active_segment_base_offset: 0,
         })
     }
+}
+
+fn append_index_entry(bytes: &mut Vec<u8>, batch: &StoredBatch, position: u64, length: usize) {
+    bytes.extend_from_slice(&batch.base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
+    bytes.extend_from_slice(&(length as u32).to_le_bytes());
+    bytes.extend_from_slice(&batch.last_offset.to_le_bytes());
+}
+
+fn append_time_index_entry(bytes: &mut Vec<u8>, batch: &StoredBatch, position: u64) {
+    bytes.extend_from_slice(&batch.max_timestamp_ms.to_le_bytes());
+    bytes.extend_from_slice(&batch.base_offset.to_le_bytes());
+    bytes.extend_from_slice(&position.to_le_bytes());
 }

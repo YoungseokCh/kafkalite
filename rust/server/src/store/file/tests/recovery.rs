@@ -99,3 +99,51 @@ fn truncate_partition_discards_tail_and_rebuilds_indexes() {
     assert_eq!(fetched.records[1].offset, 1);
     assert_eq!(store.list_offsets("truncate.topic", 0).unwrap().1.offset, 2);
 }
+
+#[test]
+fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer(10).unwrap();
+    let records = vec![
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"one")),
+            headers_json: b"[]".to_vec(),
+        },
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 20,
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"two")),
+            headers_json: b"[]".to_vec(),
+        },
+    ];
+    store
+        .append_records("byte-exact.open", 0, &records, 20)
+        .unwrap();
+    drop(store);
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened
+            .fetch_records("byte-exact.open", 0, 0, 10)
+            .unwrap()
+            .records
+            .len(),
+        2
+    );
+    drop(reopened);
+
+    assert_eq!(filesystem_manifest(dir.path()), before);
+    assert_eq!(root_directories(dir.path()), vec!["byte-exact.open-0"]);
+}
