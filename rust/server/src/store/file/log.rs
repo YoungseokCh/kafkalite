@@ -8,6 +8,7 @@ mod batch;
 mod index;
 mod recovery;
 
+use super::internal_topics::is_internal_topic_name;
 use super::policy::DEFAULT_POLICY;
 pub(super) use batch::StoredBatch;
 use index::{IndexEntry, TimeIndexEntry, should_index_batch};
@@ -277,7 +278,7 @@ impl RecordLog {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if is_internal_dir(&name) {
+            if is_internal_topic_name(&name) {
                 continue;
             }
             let Some((topic, partition)) = parse_partition_dir(&name) else {
@@ -288,10 +289,6 @@ impl RecordLog {
         partitions.sort();
         Ok(partitions)
     }
-}
-
-fn is_internal_dir(name: &str) -> bool {
-    name.starts_with("__")
 }
 
 fn parse_partition_dir(name: &str) -> Option<(&str, i32)> {

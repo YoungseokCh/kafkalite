@@ -2,6 +2,7 @@ mod cluster_metadata;
 mod consumer_offsets;
 mod control_plane;
 mod data_plane;
+mod internal_topics;
 mod log;
 mod policy;
 mod replica_prepare;

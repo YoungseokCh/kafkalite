@@ -11,6 +11,7 @@ use super::*;
 use crate::store::{BrokerRecord, GroupJoinRequest, OffsetCommitRequest, Storage, StoreError};
 
 mod group;
+mod kafka_filesystem;
 mod producer;
 mod replica;
 mod storage;

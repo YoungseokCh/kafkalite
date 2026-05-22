@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::store::Result;
@@ -58,7 +58,7 @@ impl RecordLog {
             file.sync_all()?;
         }
         drop(file);
-        if truncated || !self.indexes_match_partition(topic, partition)? {
+        if truncated || self.indexes_missing_partition(topic, partition) {
             self.rebuild_indexes_for_partition(topic, partition)?;
         }
         Ok(())
@@ -175,30 +175,9 @@ impl RecordLog {
         Ok(())
     }
 
-    fn indexes_match_partition(&self, topic: &str, partition: i32) -> Result<bool> {
-        let index_path = self.index_path(topic, partition);
-        let time_index_path = self.time_index_path(topic, partition);
-        if !index_path.exists() || !time_index_path.exists() {
-            return Ok(false);
-        }
-        let (expected_index, expected_time_index) = self.expected_index_bytes(topic, partition)?;
-        Ok(fs::read(index_path)? == expected_index
-            && fs::read(time_index_path)? == expected_time_index)
-    }
-
-    fn expected_index_bytes(&self, topic: &str, partition: i32) -> Result<(Vec<u8>, Vec<u8>)> {
-        let mut index = Vec::new();
-        let mut time_index = Vec::new();
-        let mut position = 0_u64;
-        for batch in self.read_all_batches(topic, partition)? {
-            let payload_len = batch.encode_binary()?.len();
-            if should_index_batch(&batch) {
-                append_index_entry(&mut index, &batch, position, payload_len);
-                append_time_index_entry(&mut time_index, &batch, position);
-            }
-            position += payload_len as u64;
-        }
-        Ok((index, time_index))
+    fn indexes_missing_partition(&self, topic: &str, partition: i32) -> bool {
+        !self.index_path(topic, partition).exists()
+            || !self.time_index_path(topic, partition).exists()
     }
 
     pub(super) fn recover_partition_state(
@@ -219,17 +198,4 @@ impl RecordLog {
             active_segment_base_offset: 0,
         })
     }
-}
-
-fn append_index_entry(bytes: &mut Vec<u8>, batch: &StoredBatch, position: u64, length: usize) {
-    bytes.extend_from_slice(&batch.base_offset.to_le_bytes());
-    bytes.extend_from_slice(&position.to_le_bytes());
-    bytes.extend_from_slice(&(length as u32).to_le_bytes());
-    bytes.extend_from_slice(&batch.last_offset.to_le_bytes());
-}
-
-fn append_time_index_entry(bytes: &mut Vec<u8>, batch: &StoredBatch, position: u64) {
-    bytes.extend_from_slice(&batch.max_timestamp_ms.to_le_bytes());
-    bytes.extend_from_slice(&batch.base_offset.to_le_bytes());
-    bytes.extend_from_slice(&position.to_le_bytes());
 }

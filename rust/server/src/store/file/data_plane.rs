@@ -7,6 +7,7 @@ use crate::store::{
 };
 
 use super::TopicSummary;
+use super::internal_topics::is_internal_topic_name;
 use super::state::{ProducerState, StateJournal, TopicState};
 use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
 
@@ -46,17 +47,22 @@ impl DataPlaneState {
         if let Some(requested) = topics {
             return requested
                 .iter()
+                .filter(|topic| !is_internal_topic_name(topic))
                 .filter(|topic| self.catalog.contains(topic))
                 .map(|topic| self.topic_metadata_for(topic))
                 .collect();
         }
         self.catalog
             .topic_names()
+            .filter(|name| !is_internal_topic_name(name))
             .map(|name| self.topic_metadata_for(&name))
             .collect()
     }
 
     pub fn ensure_topic(&mut self, topic: &str, partition_count: i32, now_ms: i64) -> Result<()> {
+        if is_internal_topic_name(topic) {
+            return Ok(());
+        }
         self.ensure_topic_runtime(topic, partition_count, now_ms);
         Ok(())
     }
@@ -126,6 +132,9 @@ impl DataPlaneState {
     }
 
     pub fn describe_topic(&self, topic: &str) -> Option<TopicSummary> {
+        if is_internal_topic_name(topic) {
+            return None;
+        }
         self.catalog.describe_topic(topic)
     }
 

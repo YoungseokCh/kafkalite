@@ -1,6 +1,6 @@
 SERVER_DIR := rust/server
 
-.PHONY: test test-server test-python test-differential fmt clippy verify publish-dry-run publish-dry-run-dirty bench bench-runtime bench-compare
+.PHONY: test test-server test-python test-differential test-differential-fs fmt clippy verify publish-dry-run publish-dry-run-dirty bench bench-runtime bench-compare
 
 test: test-server
 
@@ -26,6 +26,9 @@ test-python:
 
 test-differential:
 	bash scripts/run-differential.sh
+
+test-differential-fs:
+	DIFFERENTIAL_FS_CHECK=1 bash scripts/run-differential.sh
 
 bench:
 	bash scripts/run-bench.sh full "$(LABEL)"
