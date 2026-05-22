@@ -133,7 +133,6 @@ async fn records_survive_broker_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Kafka-standard __consumer_offsets persistence"]
 async fn committed_offsets_survive_broker_restart() {
     init_test_logging();
     let tempdir = tempdir().unwrap();
@@ -176,7 +175,6 @@ async fn committed_offsets_survive_broker_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Kafka-standard __consumer_offsets persistence"]
 async fn committed_offsets_are_partition_scoped() {
     init_test_logging();
     let tempdir = tempdir().unwrap();

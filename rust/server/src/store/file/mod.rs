@@ -1,3 +1,4 @@
+mod consumer_offsets;
 mod control_plane;
 mod data_plane;
 mod log;
@@ -60,6 +61,8 @@ impl FileStore {
         let journal = StateJournal::new();
         let mut snapshots = SnapshotSet::load();
         journal.replay(&mut snapshots)?;
+        let (offsets, next_consumer_offsets_record) = consumer_offsets::replay(&logs)?;
+        snapshots.offsets = offsets;
         snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
         let recovered = snapshots
             .topics
@@ -77,11 +80,13 @@ impl FileStore {
         }
         Ok(Self {
             root,
-            logs,
+            logs: logs.clone(),
             data: Mutex::new(data),
             control: Mutex::new(ControlPlaneState::new(
                 snapshots.groups,
                 snapshots.offsets,
+                logs.clone(),
+                next_consumer_offsets_record,
                 journal,
             )),
         })

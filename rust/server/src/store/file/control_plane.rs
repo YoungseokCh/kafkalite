@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::store::{
     GroupJoinRequest, GroupJoinResult, GroupMember, OffsetCommitRequest, Result, StoreError,
@@ -12,6 +13,8 @@ use self::membership::{
     MemberRegistration, ensure_generation, prune_expired_members, upsert_group_member,
 };
 use self::offset_key::OffsetKey;
+use super::consumer_offsets::{self, OffsetCommitRecord};
+use super::log::RecordLog;
 use super::state::{GroupMemberState, GroupState, StateJournal};
 
 mod assignment;
@@ -21,6 +24,8 @@ mod offset_key;
 pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
     offsets: BTreeMap<OffsetKey, i64>,
+    logs: Arc<RecordLog>,
+    next_consumer_offsets_record: i64,
     journal: StateJournal,
 }
 
@@ -38,6 +43,8 @@ impl ControlPlaneState {
     pub fn new(
         groups: BTreeMap<String, GroupState>,
         offsets: BTreeMap<String, i64>,
+        logs: Arc<RecordLog>,
+        next_consumer_offsets_record: i64,
         journal: StateJournal,
     ) -> Self {
         Self {
@@ -46,6 +53,8 @@ impl ControlPlaneState {
                 .into_iter()
                 .map(|(key, value)| (OffsetKey::from_serialized(&key), value))
                 .collect(),
+            logs,
+            next_consumer_offsets_record,
             journal,
         }
     }
@@ -238,10 +247,20 @@ impl ControlPlaneState {
         if let Some(member) = group.members.get_mut(request.member_id) {
             member.updated_at_unix_ms = request.now_ms;
         }
-        self.offsets.insert(
-            OffsetKey::new(request.group_id, request.topic, request.partition),
-            request.next_offset,
-        );
+        let offset_key = OffsetKey::new(request.group_id, request.topic, request.partition);
+        consumer_offsets::append_commit(
+            &self.logs,
+            self.next_consumer_offsets_record,
+            OffsetCommitRecord {
+                group_id: request.group_id,
+                topic: request.topic,
+                partition: request.partition,
+                next_offset: request.next_offset,
+                now_ms: request.now_ms,
+            },
+        )?;
+        self.next_consumer_offsets_record += 1;
+        self.offsets.insert(offset_key, request.next_offset);
         self.persist_offsets()
     }
 
