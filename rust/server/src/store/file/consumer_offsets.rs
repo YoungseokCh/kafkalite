@@ -5,6 +5,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::store::{BrokerRecord, Result, StoreError};
 
 use super::log::{RecordLog, StoredBatch};
+use super::state::GroupState;
+
+mod group_metadata;
 
 const CONSUMER_OFFSETS_TOPIC: &str = "__consumer_offsets";
 const DEFAULT_CONSUMER_OFFSETS_PARTITIONS: i32 = 50;
@@ -13,6 +16,12 @@ const OFFSET_COMMIT_VALUE_VERSION: i16 = 1;
 const NO_EXPIRATION_TIMESTAMP: i64 = -1;
 const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
 const FNV_PRIME: u32 = 16_777_619;
+
+pub(super) struct ReplayState {
+    pub offsets: BTreeMap<String, i64>,
+    pub groups: BTreeMap<String, GroupState>,
+    pub next_record_offsets: BTreeMap<i32, i64>,
+}
 
 pub(super) struct OffsetCommitRecord<'a> {
     pub group_id: &'a str,
@@ -23,23 +32,40 @@ pub(super) struct OffsetCommitRecord<'a> {
     pub now_ms: i64,
 }
 
-pub(super) fn replay(logs: &RecordLog) -> Result<(BTreeMap<String, i64>, BTreeMap<i32, i64>)> {
+pub(super) struct GroupStateRecord<'a> {
+    pub group_id: &'a str,
+    pub offset_topic_partition: i32,
+    pub group: &'a GroupState,
+    pub now_ms: i64,
+}
+
+enum ConsumerOffsetsKey {
+    OffsetCommit(String),
+    GroupMetadata(String),
+}
+
+pub(super) fn replay(logs: &RecordLog) -> Result<ReplayState> {
     let mut partitions = logs.internal_topic_partitions(CONSUMER_OFFSETS_TOPIC)?;
     if partitions.is_empty() {
         partitions.push(0);
     }
     let mut offsets = BTreeMap::new();
+    let mut groups = BTreeMap::new();
     let mut next_record_offsets = BTreeMap::new();
     for partition in partitions {
         logs.recover_internal_partition(CONSUMER_OFFSETS_TOPIC, partition)?;
         let records = logs.read_all_records(CONSUMER_OFFSETS_TOPIC, partition)?;
         let next_record_offset = records.last().map(|record| record.offset + 1).unwrap_or(0);
         for record in records {
-            apply_record(&mut offsets, record)?;
+            apply_record(&mut offsets, &mut groups, record)?;
         }
         next_record_offsets.insert(partition, next_record_offset);
     }
-    Ok((offsets, next_record_offsets))
+    Ok(ReplayState {
+        offsets,
+        groups,
+        next_record_offsets,
+    })
 }
 
 pub(super) fn append_commit(
@@ -71,6 +97,30 @@ pub(super) fn append_commit(
     )
 }
 
+pub(super) fn append_group_state(
+    logs: &RecordLog,
+    record_offset: i64,
+    group_state: GroupStateRecord<'_>,
+) -> Result<()> {
+    let record = BrokerRecord {
+        offset: record_offset,
+        timestamp_ms: group_state.now_ms,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: record_offset as i32,
+        key: Some(Bytes::from(group_metadata::encode_key(
+            group_state.group_id,
+        ))),
+        value: Some(Bytes::from(group_metadata::encode_value(group_state.group))),
+        headers_json: b"[]".to_vec(),
+    };
+    logs.append_batch(
+        CONSUMER_OFFSETS_TOPIC,
+        group_state.offset_topic_partition,
+        &StoredBatch::from_records(&[record]),
+    )
+}
+
 pub(super) fn partition_for_group_id(group_id: &str) -> i32 {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in group_id.as_bytes() {
@@ -80,21 +130,51 @@ pub(super) fn partition_for_group_id(group_id: &str) -> i32 {
     (hash % DEFAULT_CONSUMER_OFFSETS_PARTITIONS as u32) as i32
 }
 
-fn apply_record(offsets: &mut BTreeMap<String, i64>, record: BrokerRecord) -> Result<()> {
+fn apply_record(
+    offsets: &mut BTreeMap<String, i64>,
+    groups: &mut BTreeMap<String, GroupState>,
+    record: BrokerRecord,
+) -> Result<()> {
     let Some(key) = record.key else {
         return Ok(());
     };
-    let Some(offset_key) = decode_offset_key(&key)? else {
+    let Some(key) = decode_record_key(&key)? else {
         return Ok(());
     };
-    if let Some(value) = record.value {
-        if let Some(next_offset) = decode_offset_value(&value)? {
-            offsets.insert(offset_key, next_offset);
+    match key {
+        ConsumerOffsetsKey::OffsetCommit(offset_key) => {
+            if let Some(value) = record.value {
+                if let Some(next_offset) = decode_offset_value(&value)? {
+                    offsets.insert(offset_key, next_offset);
+                }
+            } else {
+                offsets.remove(&offset_key);
+            }
         }
-    } else {
-        offsets.remove(&offset_key);
+        ConsumerOffsetsKey::GroupMetadata(group_id) => {
+            if let Some(value) = record.value {
+                if let Some(group) = group_metadata::decode_value(&value)? {
+                    groups.insert(group_id, group);
+                }
+            } else {
+                groups.remove(&group_id);
+            }
+        }
     }
     Ok(())
+}
+
+fn decode_record_key(bytes: &[u8]) -> Result<Option<ConsumerOffsetsKey>> {
+    let mut bytes = bytes;
+    if bytes.remaining() < 2 {
+        return Ok(None);
+    }
+    match bytes.get_i16() {
+        OFFSET_COMMIT_KEY_VERSION => decode_offset_key_payload(&mut bytes),
+        group_metadata::KEY_VERSION => group_metadata::decode_key_payload(&mut bytes)
+            .map(|key| key.map(ConsumerOffsetsKey::GroupMetadata)),
+        _ => Ok(None),
+    }
 }
 
 fn encode_offset_key(group_id: &str, topic: &str, partition: i32) -> Vec<u8> {
@@ -106,27 +186,18 @@ fn encode_offset_key(group_id: &str, topic: &str, partition: i32) -> Vec<u8> {
     bytes.to_vec()
 }
 
-fn decode_offset_key(bytes: &[u8]) -> Result<Option<String>> {
-    let mut bytes = bytes;
-    if bytes.remaining() < 2 {
-        return Ok(None);
-    }
-    if bytes.get_i16() != OFFSET_COMMIT_KEY_VERSION {
-        return Ok(None);
-    }
-    let Some(group_id) = get_string(&mut bytes)? else {
+fn decode_offset_key_payload(bytes: &mut &[u8]) -> Result<Option<ConsumerOffsetsKey>> {
+    let Some(group_id) = get_string(bytes)? else {
         return Ok(None);
     };
-    let Some(topic) = get_string(&mut bytes)? else {
+    let Some(topic) = get_string(bytes)? else {
         return Ok(None);
     };
     if bytes.remaining() < 4 {
         return Ok(None);
     }
-    Ok(Some(serialize_offset_key(
-        &group_id,
-        &topic,
-        bytes.get_i32(),
+    Ok(Some(ConsumerOffsetsKey::OffsetCommit(
+        serialize_offset_key(&group_id, &topic, bytes.get_i32()),
     )))
 }
 
@@ -155,12 +226,12 @@ fn decode_offset_value(bytes: &[u8]) -> Result<Option<i64>> {
     Ok(Some(bytes.get_i64()))
 }
 
-fn put_string(bytes: &mut BytesMut, value: &str) {
+pub(super) fn put_string(bytes: &mut BytesMut, value: &str) {
     bytes.put_i16(value.len() as i16);
     bytes.put_slice(value.as_bytes());
 }
 
-fn get_string(bytes: &mut &[u8]) -> Result<Option<String>> {
+pub(super) fn get_string(bytes: &mut &[u8]) -> Result<Option<String>> {
     if bytes.remaining() < 2 {
         return Ok(None);
     }
@@ -169,6 +240,47 @@ fn get_string(bytes: &mut &[u8]) -> Result<Option<String>> {
         return Ok(None);
     }
     read_utf8(bytes, len as usize)
+}
+
+pub(super) fn put_nullable_string(bytes: &mut BytesMut, value: Option<&str>) {
+    if let Some(value) = value {
+        put_string(bytes, value);
+    } else {
+        bytes.put_i16(-1);
+    }
+}
+
+pub(super) fn get_nullable_string(bytes: &mut &[u8]) -> Result<Option<String>> {
+    if bytes.remaining() < 2 {
+        return Ok(None);
+    }
+    let len = bytes.get_i16();
+    if len < 0 {
+        return Ok(None);
+    }
+    read_utf8(bytes, len as usize)
+}
+
+pub(super) fn put_bytes(bytes: &mut BytesMut, value: &[u8]) {
+    bytes.put_i32(value.len() as i32);
+    bytes.put_slice(value);
+}
+
+pub(super) fn get_bytes(bytes: &mut &[u8]) -> Result<Option<Vec<u8>>> {
+    if bytes.remaining() < 4 {
+        return Ok(None);
+    }
+    let len = bytes.get_i32();
+    if len < 0 {
+        return Ok(None);
+    }
+    let len = len as usize;
+    if bytes.remaining() < len {
+        return Ok(None);
+    }
+    let value = bytes[..len].to_vec();
+    bytes.advance(len);
+    Ok(Some(value))
 }
 
 fn read_utf8(bytes: &mut &[u8], len: usize) -> Result<Option<String>> {

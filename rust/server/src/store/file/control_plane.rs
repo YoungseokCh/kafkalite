@@ -13,13 +13,13 @@ use self::membership::{
     MemberRegistration, ensure_generation, prune_expired_members, upsert_group_member,
 };
 use self::offset_key::OffsetKey;
-use super::consumer_offsets::{self, OffsetCommitRecord};
 use super::log::RecordLog;
 use super::state::{GroupMemberState, GroupState, StateJournal};
 
 mod assignment;
 mod membership;
 mod offset_key;
+mod persistence;
 
 pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
@@ -65,7 +65,7 @@ impl ControlPlaneState {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{}-member-{}", request.group_id, request.now_ms));
-        let (generation_id, protocol_name_result, leader, members) = {
+        let (generation_id, protocol_name_result, leader, members, group_snapshot) = {
             let group = self
                 .groups
                 .entry(request.group_id.to_string())
@@ -86,6 +86,7 @@ impl ControlPlaneState {
                 group.assignments_ready = false;
                 group.assignments_failed = false;
             }
+            group.updated_at_unix_ms = request.now_ms;
             group.leader_member_id = group.members.keys().next().cloned();
             (
                 group.generation_id,
@@ -102,8 +103,10 @@ impl ControlPlaneState {
                         metadata: member.subscription_metadata.clone(),
                     })
                     .collect::<Vec<_>>(),
+                group.clone(),
             )
         };
+        self.persist_group_state_snapshot(request.group_id, group_snapshot, request.now_ms)?;
         Ok(GroupJoinResult {
             generation_id,
             protocol_name: protocol_name_result,
@@ -114,69 +117,74 @@ impl ControlPlaneState {
     }
 
     pub fn sync_group(&mut self, request: SyncGroupStateRequest<'_>) -> Result<SyncGroupResult> {
-        let group = self
-            .groups
-            .get_mut(request.group_id)
-            .ok_or(StoreError::StaleGeneration {
-                expected: 0,
-                actual: request.generation_id,
-            })?;
-        let _ = prune_expired_members(group, request.now_ms);
-        if !group.members.contains_key(request.member_id) {
-            return Err(StoreError::UnknownMember {
-                group_id: request.group_id.to_string(),
-                member_id: request.member_id.to_string(),
-            });
-        }
-        if request.generation_id < group.generation_id {
-            return Err(StoreError::UnknownMember {
-                group_id: request.group_id.to_string(),
-                member_id: request.member_id.to_string(),
-            });
-        }
-        ensure_generation(group, request.generation_id)?;
-        if !request.assignments.is_empty() {
-            if let Err(err) =
-                ensure_complete_assignments(group, request.group_id, request.assignments)
-            {
-                group.assignments_ready = false;
-                group.assignments_failed = true;
-                return Err(err);
-            }
-            for (assigned_member, assignment) in request.assignments {
-                if let Some(member) = group.members.get_mut(assigned_member) {
-                    member.assignment = assignment.clone();
-                    member.updated_at_unix_ms = request.now_ms;
-                }
-            }
-            group.assignments_ready = true;
-            group.assignments_failed = false;
-        } else if group.leader_member_id.as_deref() == Some(request.member_id) {
-            maybe_build_assignments(group, request.topics)?;
-            group.assignments_ready = true;
-            group.assignments_failed = false;
-        } else {
-            if group.assignments_failed {
+        let (assignment, group_snapshot) = {
+            let group =
+                self.groups
+                    .get_mut(request.group_id)
+                    .ok_or(StoreError::StaleGeneration {
+                        expected: 0,
+                        actual: request.generation_id,
+                    })?;
+            let _ = prune_expired_members(group, request.now_ms);
+            if !group.members.contains_key(request.member_id) {
                 return Err(StoreError::UnknownMember {
                     group_id: request.group_id.to_string(),
                     member_id: request.member_id.to_string(),
                 });
             }
-            if !group.assignments_ready {
+            if request.generation_id < group.generation_id {
+                return Err(StoreError::UnknownMember {
+                    group_id: request.group_id.to_string(),
+                    member_id: request.member_id.to_string(),
+                });
+            }
+            ensure_generation(group, request.generation_id)?;
+            if !request.assignments.is_empty() {
+                if let Err(err) =
+                    ensure_complete_assignments(group, request.group_id, request.assignments)
+                {
+                    group.assignments_ready = false;
+                    group.assignments_failed = true;
+                    return Err(err);
+                }
+                for (assigned_member, assignment) in request.assignments {
+                    if let Some(member) = group.members.get_mut(assigned_member) {
+                        member.assignment = assignment.clone();
+                        member.updated_at_unix_ms = request.now_ms;
+                    }
+                }
+                group.assignments_ready = true;
+                group.assignments_failed = false;
+            } else if group.leader_member_id.as_deref() == Some(request.member_id) {
                 maybe_build_assignments(group, request.topics)?;
                 group.assignments_ready = true;
                 group.assignments_failed = false;
+            } else {
+                if group.assignments_failed {
+                    return Err(StoreError::UnknownMember {
+                        group_id: request.group_id.to_string(),
+                        member_id: request.member_id.to_string(),
+                    });
+                }
+                if !group.assignments_ready {
+                    maybe_build_assignments(group, request.topics)?;
+                    group.assignments_ready = true;
+                    group.assignments_failed = false;
+                }
+                ensure_assignment_ready(group, request.group_id, request.member_id)?;
             }
-            ensure_assignment_ready(group, request.group_id, request.member_id)?;
-        }
-        let assignment = group
-            .members
-            .get(request.member_id)
-            .map(|member| member.assignment.clone())
-            .ok_or_else(|| StoreError::UnknownMember {
-                group_id: request.group_id.to_string(),
-                member_id: request.member_id.to_string(),
-            })?;
+            let assignment = group
+                .members
+                .get(request.member_id)
+                .map(|member| member.assignment.clone())
+                .ok_or_else(|| StoreError::UnknownMember {
+                    group_id: request.group_id.to_string(),
+                    member_id: request.member_id.to_string(),
+                })?;
+            group.updated_at_unix_ms = request.now_ms;
+            (assignment, group.clone())
+        };
+        self.persist_group_state_snapshot(request.group_id, group_snapshot, request.now_ms)?;
         Ok(SyncGroupResult {
             protocol_name: request.protocol_name.to_string(),
             assignment,
@@ -214,12 +222,17 @@ impl ControlPlaneState {
     }
 
     pub fn leave_group(&mut self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()> {
+        let mut group_snapshot = None;
         if let Some(group) = self.groups.get_mut(group_id) {
             if group.members.remove(member_id).is_some() {
                 group.generation_id += 1;
                 group.leader_member_id = group.members.keys().next().cloned();
                 group.updated_at_unix_ms = now_ms;
+                group_snapshot = Some(group.clone());
             }
+        }
+        if let Some(group) = group_snapshot {
+            self.persist_group_state_snapshot(group_id, group, now_ms)?;
         }
         Ok(())
     }
@@ -248,28 +261,7 @@ impl ControlPlaneState {
             member.updated_at_unix_ms = request.now_ms;
         }
         let offset_key = OffsetKey::new(request.group_id, request.topic, request.partition);
-        let offset_topic_partition = consumer_offsets::partition_for_group_id(request.group_id);
-        let record_offset = self
-            .next_consumer_offsets_records
-            .get(&offset_topic_partition)
-            .copied()
-            .unwrap_or(0);
-        consumer_offsets::append_commit(
-            &self.logs,
-            record_offset,
-            OffsetCommitRecord {
-                group_id: request.group_id,
-                offset_topic_partition,
-                topic: request.topic,
-                partition: request.partition,
-                next_offset: request.next_offset,
-                now_ms: request.now_ms,
-            },
-        )?;
-        self.next_consumer_offsets_records
-            .insert(offset_topic_partition, record_offset + 1);
-        self.offsets.insert(offset_key, request.next_offset);
-        self.persist_offsets()
+        self.persist_offset_commit(request, offset_key)
     }
 
     pub fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Option<i64> {
@@ -284,14 +276,5 @@ impl ControlPlaneState {
 
     pub fn committed_offset_count(&self) -> usize {
         self.offsets.len()
-    }
-
-    fn persist_offsets(&self) -> Result<()> {
-        let serialized = self
-            .offsets
-            .iter()
-            .map(|(key, value)| (key.serialize(), *value))
-            .collect();
-        self.journal.append_offsets(&serialized)
     }
 }

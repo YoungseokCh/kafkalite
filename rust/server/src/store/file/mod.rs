@@ -61,8 +61,9 @@ impl FileStore {
         let journal = StateJournal::new();
         let mut snapshots = SnapshotSet::load();
         journal.replay(&mut snapshots)?;
-        let (offsets, next_consumer_offsets_records) = consumer_offsets::replay(&logs)?;
-        snapshots.offsets = offsets;
+        let replayed_control = consumer_offsets::replay(&logs)?;
+        snapshots.offsets = replayed_control.offsets;
+        snapshots.groups = replayed_control.groups;
         snapshots.topics = logs.recover_topic_states(&snapshots.topics)?;
         let recovered = snapshots
             .topics
@@ -86,7 +87,7 @@ impl FileStore {
                 snapshots.groups,
                 snapshots.offsets,
                 logs.clone(),
-                next_consumer_offsets_records,
+                replayed_control.next_record_offsets,
                 journal,
             )),
         })

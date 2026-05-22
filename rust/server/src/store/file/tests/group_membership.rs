@@ -81,6 +81,32 @@ fn expired_member_is_pruned_on_next_join() {
 }
 
 #[test]
+fn leave_group_remains_durable_across_restart() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 1, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-left",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    store.leave_group("group-left", "member-a", 200).unwrap();
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let heartbeat = reopened.heartbeat("group-left", "member-a", joined.generation_id, 300);
+
+    assert!(matches!(heartbeat, Err(StoreError::UnknownMember { .. })));
+}
+
+#[test]
 fn heartbeat_and_offset_commit_do_not_create_non_topic_directories() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();

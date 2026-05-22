@@ -64,6 +64,54 @@ fn assignment_respects_member_subscriptions() {
 }
 
 #[test]
+fn synced_group_assignment_survives_restart() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("topic-a", 2, 10).unwrap();
+    let subscription = encode_subscription(&["topic-a"]);
+    let joined = store
+        .join_group(GroupJoinRequest {
+            group_id: "group-durable-assignment",
+            member_id: Some("member-a"),
+            protocol_type: "consumer",
+            protocol_name: "range",
+            metadata: &subscription,
+            session_timeout_ms: 5_000,
+            rebalance_timeout_ms: 5_000,
+            now_ms: 100,
+        })
+        .unwrap();
+    let first_sync = store
+        .sync_group(
+            "group-durable-assignment",
+            "member-a",
+            joined.generation_id,
+            "range",
+            &[],
+            200,
+        )
+        .unwrap();
+    assert_eq!(
+        decode_assignment_partitions(&first_sync.assignment, "topic-a"),
+        vec![0, 1]
+    );
+
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let restored_sync = reopened
+        .sync_group(
+            "group-durable-assignment",
+            "member-a",
+            joined.generation_id,
+            "range",
+            &[],
+            300,
+        )
+        .unwrap();
+
+    assert_eq!(restored_sync.assignment, first_sync.assignment);
+}
+
+#[test]
 fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_member() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -125,7 +173,7 @@ fn offset_commit_requires_current_member_but_allows_stale_generation_for_same_me
 }
 
 #[test]
-fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
+fn group_membership_and_offsets_remain_durable_across_restart() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     store.ensure_topic("topic-a", 1, 10).unwrap();
@@ -160,17 +208,33 @@ fn group_membership_is_soft_across_restart_but_offsets_remain_durable() {
         Some(1)
     );
 
-    let stale_runtime_member = reopened.commit_offset(commit_request(
+    reopened
+        .commit_offset(commit_request(
+            "group-soft",
+            "member-a",
+            joined.generation_id,
+            "topic-a",
+            0,
+            2,
+            300,
+        ))
+        .unwrap();
+    assert_eq!(
+        reopened.fetch_offset("group-soft", "topic-a", 0).unwrap(),
+        Some(2)
+    );
+
+    let unknown_runtime_member = reopened.commit_offset(commit_request(
         "group-soft",
-        "member-a",
+        "member-b",
         joined.generation_id,
         "topic-a",
         0,
-        2,
+        3,
         300,
     ));
     assert!(matches!(
-        stale_runtime_member,
+        unknown_runtime_member,
         Err(StoreError::UnknownMember { .. })
     ));
 }
