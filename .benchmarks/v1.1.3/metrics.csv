@@ -1,0 +1,10 @@
+name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes
+bench.produce.small,1000,100,1,50230.64,19.91,1990.82,49.99,53.32,53.36,6692,6232,179020,175000,1764,1512,0,0
+bench.produce.multi_partition,1000,100,3,50814.27,19.68,1967.95,50.00,53.33,53.37,6364,6164,179932,175000,1764,1512,0,0
+bench.roundtrip,200,512,1,10597.64,18.87,9662.53,46.68,50.04,53.32,6252,6352,118813,117400,364,312,0,0
+bench.fetch.multi_partition,500,512,3,25687.77,19.46,9965.83,50.00,53.32,53.37,6276,6100,296869,293500,924,792,0,0
+bench.fetch.tail,500,512,1,88.74,5634.49,2884856.51,0.00,88.72,88.72,6928,6928,295902,293500,896,768,0,0
+bench.commit.resume,4,256,1,1496.00,2.67,684.49,49.95,585.69,585.69,6024,6032,3508,2669,56,48,0,0
+bench.mixed.handoff,200,256,1,11516.12,17.37,4445.94,46.69,50.05,53.32,6552,6552,72754,71233,420,360,0,0
+bench.cluster.replication.metadata,200,1,1,1.92,104415.03,104415.03,0.01,0.01,0.01,0,0,515,0,0,0,0,0
+bench.cluster.reassignment.metadata,100,1,1,1.36,73745.55,73745.55,0.01,0.01,0.02,0,0,1032,0,0,0,0,0
