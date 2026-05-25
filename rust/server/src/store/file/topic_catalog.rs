@@ -4,7 +4,7 @@ use crate::store::PartitionMetadata;
 
 use super::{TopicPartitionSummary, TopicSummary};
 
-use super::state::{PartitionState, ProducerSequenceState, ProducerState, TopicState};
+use super::state::{PartitionState, ProducerSequenceState, TopicState};
 
 pub struct TopicCatalog {
     topics: BTreeMap<String, TopicRuntime>,
@@ -146,24 +146,6 @@ impl TopicCatalog {
                 .partitions
                 .entry(*partition)
                 .or_insert_with(|| PartitionRuntime::new(now_ms));
-        }
-    }
-
-    pub fn to_producer_state(&self, next_producer_id: i64) -> ProducerState {
-        let mut sequences = BTreeMap::new();
-        for (topic_name, topic) in &self.topics {
-            for (partition_id, runtime) in &topic.partitions {
-                for (producer_id, state) in &runtime.producer_sequences {
-                    sequences.insert(
-                        format!("{topic_name}:{partition_id}:{producer_id}"),
-                        state.clone(),
-                    );
-                }
-            }
-        }
-        ProducerState {
-            next_producer_id,
-            sequences,
         }
     }
 }

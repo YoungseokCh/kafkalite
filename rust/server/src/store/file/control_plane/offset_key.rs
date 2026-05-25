@@ -30,8 +30,4 @@ impl OffsetKey {
             partition,
         }
     }
-
-    pub(super) fn serialize(&self) -> String {
-        format!("{}:{}:{}", self.group_id, self.topic, self.partition)
-    }
 }

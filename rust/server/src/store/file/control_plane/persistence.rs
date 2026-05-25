@@ -27,7 +27,7 @@ impl ControlPlaneState {
         )?;
         self.advance_record_offset(offset_topic_partition, record_offset);
         self.offsets.insert(offset_key, request.next_offset);
-        self.persist_offsets()
+        Ok(())
     }
 
     pub(super) fn persist_group_state_snapshot(
@@ -50,15 +50,6 @@ impl ControlPlaneState {
         )?;
         self.advance_record_offset(offset_topic_partition, record_offset);
         Ok(())
-    }
-
-    fn persist_offsets(&self) -> Result<()> {
-        let serialized = self
-            .offsets
-            .iter()
-            .map(|(key, value)| (key.serialize(), *value))
-            .collect();
-        self.journal.append_offsets(&serialized)
     }
 
     fn next_record_offset(&self, offset_topic_partition: i32) -> i64 {

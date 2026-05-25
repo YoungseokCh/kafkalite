@@ -124,9 +124,7 @@ pub async fn handle_metadata(
 }
 
 pub async fn handle_init_producer_id(broker: &KafkaBroker) -> Result<InitProducerIdResponse> {
-    let session = broker
-        .store()
-        .init_producer(chrono::Utc::now().timestamp_millis())?;
+    let session = broker.store().init_producer()?;
     Ok(InitProducerIdResponse::default()
         .with_throttle_time_ms(0)
         .with_error_code(0)

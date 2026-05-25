@@ -8,13 +8,12 @@ use crate::store::{
 
 use super::TopicSummary;
 use super::internal_topics::is_internal_topic_name;
-use super::state::{ProducerState, StateJournal, TopicState};
+use super::state::{ProducerState, TopicState};
 use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
 
 pub struct DataPlaneState {
     catalog: TopicCatalog,
     next_producer_id: i64,
-    journal: StateJournal,
 }
 
 pub enum AppendDecision {
@@ -31,15 +30,10 @@ pub struct PreparedAppend {
 }
 
 impl DataPlaneState {
-    pub fn new(
-        topics: BTreeMap<String, TopicState>,
-        producers: ProducerState,
-        journal: StateJournal,
-    ) -> Self {
+    pub fn new(topics: BTreeMap<String, TopicState>, producers: ProducerState) -> Self {
         Self {
             catalog: TopicCatalog::from_persisted(topics, &producers.sequences),
             next_producer_id: producers.next_producer_id,
-            journal,
         }
     }
 
@@ -67,20 +61,19 @@ impl DataPlaneState {
         Ok(())
     }
 
-    pub fn init_producer(&mut self, now_ms: i64) -> Result<ProducerSession> {
+    pub fn init_producer(&mut self) -> Result<ProducerSession> {
         let session = ProducerSession {
             producer_id: self.next_producer_id,
             producer_epoch: 0,
         };
         self.next_producer_id += 1;
-        self.persist_producers(now_ms)?;
         Ok(session)
     }
 
     pub fn finish_append(&mut self, prepared: &PreparedAppend, now_ms: i64) -> Result<()> {
         self.apply_prepared_append(prepared, now_ms)?;
         self.update_high_watermark(&prepared.topic, prepared.partition, i64::MAX)?;
-        self.persist_producers(now_ms)
+        Ok(())
     }
 
     pub fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
@@ -157,7 +150,6 @@ impl DataPlaneState {
     ) -> Result<ReplicaApplyResult> {
         if let Some(prepared) = prepared {
             self.apply_prepared_append(prepared, now_ms)?;
-            self.persist_producers(now_ms)?;
         }
         let high_watermark = self.update_high_watermark(topic, partition, leader_high_watermark)?;
         let log_end_offset = self.latest_offset(topic, partition)?;
@@ -194,13 +186,6 @@ impl DataPlaneState {
             name: topic.to_string(),
             partitions: self.catalog.topic_metadata(topic).unwrap_or_default(),
         }
-    }
-
-    fn persist_producers(&self, now_ms: i64) -> Result<()> {
-        self.journal.append_producer_state(
-            &self.catalog.to_producer_state(self.next_producer_id),
-            now_ms,
-        )
     }
 
     fn update_high_watermark(

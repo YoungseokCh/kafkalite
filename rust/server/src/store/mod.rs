@@ -37,7 +37,7 @@ pub struct OffsetCommitRequest<'a> {
 pub trait Storage: Send + Sync {
     fn topic_metadata(&self, topics: Option<&[String]>, now_ms: i64) -> Result<Vec<TopicMetadata>>;
     fn ensure_topic(&self, topic: &str, partition_count: i32, now_ms: i64) -> Result<()>;
-    fn init_producer(&self, now_ms: i64) -> Result<ProducerSession>;
+    fn init_producer(&self) -> Result<ProducerSession>;
     fn append_records(
         &self,
         topic: &str,

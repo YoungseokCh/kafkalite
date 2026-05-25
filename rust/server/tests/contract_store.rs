@@ -11,7 +11,7 @@ use tempfile::tempdir;
 fn store_contract_replays_duplicate_retry_without_double_append() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![record(&producer, 0, 10, b"value")];
 
     let first = store
@@ -31,7 +31,7 @@ fn store_contract_keeps_partition_offsets_independent() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     store.ensure_topic("multi.events", 3, 10).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
 
     store
         .append_records("multi.events", 1, &[record(&producer, 0, 10, b"p1")], 10)
@@ -57,7 +57,7 @@ fn store_contract_keeps_partition_offsets_independent() {
 fn store_contract_rejects_stale_producer_epoch() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
 
     store
         .append_records(
@@ -91,7 +91,7 @@ fn store_contract_rejects_stale_producer_epoch() {
 fn store_contract_recovers_torn_tail_on_reopen() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     store
         .append_records(
             "recover.events",

@@ -26,9 +26,9 @@ impl Storage for FileStore {
         data.ensure_topic(topic, partition_count, now_ms)
     }
 
-    fn init_producer(&self, now_ms: i64) -> Result<ProducerSession> {
+    fn init_producer(&self) -> Result<ProducerSession> {
         let mut data = self.data.lock().expect("file store mutex poisoned");
-        data.init_producer(now_ms)
+        data.init_producer()
     }
 
     fn append_records(

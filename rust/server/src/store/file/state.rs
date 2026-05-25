@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::store::Result;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicState {
     pub name: String,
@@ -105,27 +103,6 @@ impl SnapshotSet {
             groups: BTreeMap::new(),
             offsets: BTreeMap::new(),
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StateJournal;
-
-impl StateJournal {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn replay(&self, _snapshots: &mut SnapshotSet) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn append_producer_state(&self, _producers: &ProducerState, _now_ms: i64) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn append_offsets(&self, _offsets: &BTreeMap<String, i64>) -> Result<()> {
-        Ok(())
     }
 }
 

@@ -7,7 +7,7 @@ mod recovery;
 fn appends_and_fetches_records() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,
@@ -31,7 +31,7 @@ fn appends_and_fetches_records() {
 fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = (0..5)
         .map(|sequence| BrokerRecord {
             offset: 0,
@@ -58,7 +58,7 @@ fn fetch_from_later_offset_uses_index_and_returns_tail_records() {
 fn duplicate_producer_retry_returns_original_offsets_without_double_append() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,
@@ -148,7 +148,7 @@ fn non_idempotent_producer_records_append_after_restart() {
 fn stale_producer_epoch_is_rejected() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let first = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,
@@ -199,7 +199,7 @@ fn unknown_producer_id_is_rejected() {
 fn non_contiguous_idempotent_sequence_is_rejected() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let first = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,

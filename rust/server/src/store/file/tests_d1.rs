@@ -8,7 +8,7 @@ use crate::store::{BrokerRecord, Storage};
 fn append_creates_only_kafka_user_partition_directory() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,
@@ -29,7 +29,7 @@ fn append_creates_only_kafka_user_partition_directory() {
 fn topic_offsets_are_recovered_from_log_after_reopen() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![
         BrokerRecord {
             offset: 0,

@@ -5,7 +5,7 @@ use crate::store::file::log::StoredBatch;
 fn truncated_tail_is_recovered_on_restart() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,
@@ -36,7 +36,7 @@ fn truncated_tail_is_recovered_on_restart() {
 fn truncated_index_tail_is_rebuilt_on_restart() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = (0..4)
         .map(|sequence| BrokerRecord {
             offset: 0,
@@ -75,7 +75,7 @@ fn truncated_index_tail_is_rebuilt_on_restart() {
 fn truncate_partition_discards_tail_and_rebuilds_indexes() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = (0..3)
         .map(|sequence| BrokerRecord {
             offset: 0,
@@ -105,7 +105,7 @@ fn truncate_partition_discards_tail_and_rebuilds_indexes() {
 fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![
         BrokerRecord {
             offset: 0,

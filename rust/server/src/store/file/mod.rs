@@ -20,7 +20,7 @@ use data_plane::DataPlaneState;
 use log::RecordLog;
 #[allow(unused_imports)]
 pub use policy::FileStorePolicy;
-use state::{SnapshotSet, StateJournal};
+use state::SnapshotSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitionSummary {
@@ -60,9 +60,7 @@ impl FileStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let logs = Arc::new(RecordLog::open(&root)?);
-        let journal = StateJournal::new();
         let mut snapshots = SnapshotSet::load();
-        journal.replay(&mut snapshots)?;
         let replayed_control = consumer_offsets::replay(&logs)?;
         snapshots.offsets = replayed_control.offsets;
         snapshots.groups = replayed_control.groups;
@@ -78,7 +76,7 @@ impl FileStore {
                 )
             })
             .collect::<Vec<_>>();
-        let mut data = DataPlaneState::new(snapshots.topics, snapshots.producers, journal.clone());
+        let mut data = DataPlaneState::new(snapshots.topics, snapshots.producers);
         for (topic, partitions) in recovered {
             data.ensure_known_partitions(&topic, &partitions, 0);
         }
@@ -91,7 +89,6 @@ impl FileStore {
                 snapshots.offsets,
                 logs.clone(),
                 replayed_control.next_record_offsets,
-                journal,
             )),
         })
     }

@@ -14,7 +14,7 @@ use self::membership::{
 };
 use self::offset_key::OffsetKey;
 use super::log::RecordLog;
-use super::state::{GroupMemberState, GroupState, StateJournal};
+use super::state::{GroupMemberState, GroupState};
 
 mod assignment;
 mod membership;
@@ -26,7 +26,6 @@ pub struct ControlPlaneState {
     offsets: BTreeMap<OffsetKey, i64>,
     logs: Arc<RecordLog>,
     next_consumer_offsets_records: BTreeMap<i32, i64>,
-    journal: StateJournal,
 }
 
 pub struct SyncGroupStateRequest<'a> {
@@ -45,7 +44,6 @@ impl ControlPlaneState {
         offsets: BTreeMap<String, i64>,
         logs: Arc<RecordLog>,
         next_consumer_offsets_records: BTreeMap<i32, i64>,
-        journal: StateJournal,
     ) -> Self {
         Self {
             groups,
@@ -55,7 +53,6 @@ impl ControlPlaneState {
                 .collect(),
             logs,
             next_consumer_offsets_records,
-            journal,
         }
     }
 

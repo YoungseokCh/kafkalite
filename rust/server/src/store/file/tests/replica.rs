@@ -6,7 +6,7 @@ fn replica_fetch_and_apply_preserve_offsets_and_clamp_high_watermark() {
     let follower_dir = tempdir().unwrap();
     let leader = FileStore::open(leader_dir.path()).unwrap();
     let follower = FileStore::open(follower_dir.path()).unwrap();
-    let producer = leader.init_producer(10).unwrap();
+    let producer = leader.init_producer().unwrap();
     let records = vec![
         BrokerRecord {
             offset: 0,
@@ -97,7 +97,7 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     store.ensure_topic("replica.topic", 1, 0).unwrap();
-    let producer = store.init_producer(1).unwrap();
+    let producer = store.init_producer().unwrap();
     let seed = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 1,
@@ -163,7 +163,7 @@ fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     store.ensure_topic("replica-skip.topic", 1, 0).unwrap();
-    let producer = store.init_producer(1).unwrap();
+    let producer = store.init_producer().unwrap();
     let seed = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 1,
@@ -200,7 +200,7 @@ fn replica_append_with_empty_batch_is_a_noop() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
     store.ensure_topic("replica-empty.topic", 1, 0).unwrap();
-    let producer = store.init_producer(1).unwrap();
+    let producer = store.init_producer().unwrap();
     let seed = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 1,

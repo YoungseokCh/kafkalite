@@ -97,7 +97,7 @@ mod tests {
     fn storage_summary_reports_existing_bytes() {
         let dir = tempdir().unwrap();
         let store = FileStore::open(dir.path()).unwrap();
-        let producer = store.init_producer(10).unwrap();
+        let producer = store.init_producer().unwrap();
         store
             .append_records(
                 "inspect.events",
@@ -127,7 +127,7 @@ mod tests {
     fn rebuild_indexes_recreates_missing_index_files() {
         let dir = tempdir().unwrap();
         let store = FileStore::open(dir.path()).unwrap();
-        let producer = store.init_producer(10).unwrap();
+        let producer = store.init_producer().unwrap();
         store
             .append_records(
                 "repair.events",

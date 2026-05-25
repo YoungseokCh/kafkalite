@@ -34,7 +34,7 @@ fn describe_storage_counts_root_level_topic_files() {
 fn describe_storage_does_not_create_non_standard_state() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let producer = store.init_producer(10).unwrap();
+    let producer = store.init_producer().unwrap();
     let records = vec![BrokerRecord {
         offset: 0,
         timestamp_ms: 10,

@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn duplicate_retry_returns_same_base_offset() {
     let broker = test_broker();
-    let session = broker.store().init_producer(0).unwrap();
+    let session = broker.store().init_producer().unwrap();
     let first = handle_produce(
         &broker,
         produce_request(
@@ -42,7 +42,7 @@ async fn duplicate_retry_returns_same_base_offset() {
 #[tokio::test]
 async fn stale_epoch_maps_to_invalid_producer_epoch() {
     let broker = test_broker();
-    let session = broker.store().init_producer(0).unwrap();
+    let session = broker.store().init_producer().unwrap();
     let _ = handle_produce(
         &broker,
         produce_request(
