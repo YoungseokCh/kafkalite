@@ -18,6 +18,7 @@ pub(super) fn build_report(
     payload_bytes: u32,
 ) -> ScenarioReport {
     let runtime = runtime_metrics(elapsed, latencies, messages, payload_bytes);
+    let cpu = broker.cpu_metrics();
     let storage = storage_metrics(root.join("data"), messages, payload_bytes);
     let memory = MemoryMetrics {
         peak_rss_kb: broker.peak_rss_kb(),
@@ -31,39 +32,10 @@ pub(super) fn build_report(
         payload_bytes,
         default_partitions: spec.default_partitions,
         runtime,
+        cpu,
         memory,
         storage,
     }
-}
-
-pub(super) fn cluster_storage_metrics(
-    data_dirs: &[&Path],
-    messages: u32,
-    payload_bytes: u32,
-) -> StorageMetrics {
-    let mut total = StorageMetrics {
-        total_bytes: 0,
-        log_bytes: 0,
-        index_bytes: 0,
-        timeindex_bytes: 0,
-        state_snapshot_bytes: 0,
-        state_journal_bytes: 0,
-        bytes_per_record: 0.0,
-        bytes_per_payload_byte: 0.0,
-    };
-    for data_dir in data_dirs {
-        let metrics = storage_metrics(data_dir, messages, payload_bytes);
-        total.total_bytes += metrics.total_bytes;
-        total.log_bytes += metrics.log_bytes;
-        total.index_bytes += metrics.index_bytes;
-        total.timeindex_bytes += metrics.timeindex_bytes;
-        total.state_snapshot_bytes += metrics.state_snapshot_bytes;
-        total.state_journal_bytes += metrics.state_journal_bytes;
-    }
-    let payload_total = messages as f64 * payload_bytes as f64;
-    total.bytes_per_record = total.total_bytes as f64 / messages.max(1) as f64;
-    total.bytes_per_payload_byte = total.total_bytes as f64 / payload_total.max(1.0);
-    total
 }
 
 pub(super) fn runtime_metrics(
@@ -153,36 +125,4 @@ fn percentile(values: &[f64], pct: f64) -> f64 {
     }
     let index = ((values.len() - 1) as f64 * pct).round() as usize;
     values[index]
-}
-
-#[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-
-    #[test]
-    fn cluster_storage_metrics_sums_multiple_data_directories() {
-        let first = tempdir().unwrap();
-        let second = tempdir().unwrap();
-        std::fs::write(first.path().join("first.log"), vec![0_u8; 4]).unwrap();
-        std::fs::write(second.path().join("second.index"), vec![0_u8; 6]).unwrap();
-
-        let combined = cluster_storage_metrics(&[first.path(), second.path()], 2, 5);
-        let first_metrics = storage_metrics(first.path(), 2, 5);
-        let second_metrics = storage_metrics(second.path(), 2, 5);
-
-        assert_eq!(
-            combined.total_bytes,
-            first_metrics.total_bytes + second_metrics.total_bytes
-        );
-        assert_eq!(
-            combined.log_bytes,
-            first_metrics.log_bytes + second_metrics.log_bytes
-        );
-        assert_eq!(
-            combined.index_bytes,
-            first_metrics.index_bytes + second_metrics.index_bytes
-        );
-    }
 }

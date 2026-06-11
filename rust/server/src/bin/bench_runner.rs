@@ -7,12 +7,8 @@ mod bench_modes;
 mod bench_support;
 
 use bench_modes::{BenchMode, specs_for_mode};
-use bench_support::mixed::run_mixed_handoff;
 use bench_support::report::{BenchmarkReport, BuildMetrics, HostInfo, ScenarioReport};
-use bench_support::scenarios::{
-    ScenarioKind, run_cluster_reassignment_metadata, run_cluster_replication_metadata,
-    run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip,
-};
+use bench_support::scenarios::{ScenarioKind, run_busy, run_idle};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -72,27 +68,8 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
             .prefix(&format!("{}-", spec.name.replace('.', "-")))
             .tempdir()?;
         let report = match spec.kind {
-            ScenarioKind::ProduceOnly => {
-                run_produce_only(scenario_root.path(), &args.broker_bin, &spec).await?
-            }
-            ScenarioKind::Roundtrip => {
-                run_roundtrip(scenario_root.path(), &args.broker_bin, &spec).await?
-            }
-            ScenarioKind::FetchTail => {
-                run_fetch_tail(scenario_root.path(), &args.broker_bin, &spec).await?
-            }
-            ScenarioKind::CommitResume => {
-                run_commit_resume(scenario_root.path(), &args.broker_bin, &spec).await?
-            }
-            ScenarioKind::MixedHandoff => {
-                run_mixed_handoff(scenario_root.path(), &args.broker_bin, &spec).await?
-            }
-            ScenarioKind::ClusterReplicationMetadata => {
-                run_cluster_replication_metadata(scenario_root.path(), &spec).await?
-            }
-            ScenarioKind::ClusterReassignmentMetadata => {
-                run_cluster_reassignment_metadata(scenario_root.path(), &spec).await?
-            }
+            ScenarioKind::Busy => run_busy(scenario_root.path(), &args.broker_bin, &spec).await?,
+            ScenarioKind::Idle => run_idle(scenario_root.path(), &args.broker_bin, &spec).await?,
         };
         reports.push(report);
     }
@@ -100,10 +77,10 @@ async fn run_mode(args: &Args) -> anyhow::Result<Vec<ScenarioReport>> {
 }
 
 fn to_csv(report: &BenchmarkReport) -> String {
-    let mut lines = vec!["name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes".to_string()];
+    let mut lines = vec!["name,messages,payload_bytes,default_partitions,elapsed_ms,throughput_msgs_per_sec,throughput_bytes_per_sec,latency_p50_ms,latency_p95_ms,latency_p99_ms,cpu_process_ms,avg_cpu_percent,peak_cpu_percent,cpu_samples,peak_rss_kb,final_rss_kb,total_bytes,log_bytes,index_bytes,timeindex_bytes,state_snapshot_bytes,state_journal_bytes".to_string()];
     for scenario in &report.scenarios {
         lines.push(format!(
-            "{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{}",
             scenario.name,
             scenario.messages,
             scenario.payload_bytes,
@@ -114,6 +91,10 @@ fn to_csv(report: &BenchmarkReport) -> String {
             scenario.runtime.latency_p50_ms,
             scenario.runtime.latency_p95_ms,
             scenario.runtime.latency_p99_ms,
+            scenario.cpu.process_cpu_ms,
+            scenario.cpu.avg_cpu_percent,
+            scenario.cpu.peak_cpu_percent,
+            scenario.cpu.samples,
             scenario.memory.peak_rss_kb,
             scenario.memory.final_rss_kb,
             scenario.storage.total_bytes,
@@ -133,14 +114,16 @@ fn to_markdown(report: &BenchmarkReport) -> String {
         "- git_sha: `{}`\n- dirty: `{}`\n- binary_bytes: `{}`\n- package_bytes: `{}`\n\n",
         report.git_sha, report.dirty, report.build.binary_bytes, report.build.package_bytes
     ));
-    out.push_str("| scenario | partitions | elapsed_ms | msgs/sec | peak_rss_kb | total_bytes |\n|---|---:|---:|---:|---:|---:|\n");
+    out.push_str("| scenario | partitions | elapsed_ms | msgs/sec | avg_cpu% | peak_cpu% | peak_rss_kb | total_bytes |\n|---|---:|---:|---:|---:|---:|---:|---:|\n");
     for scenario in &report.scenarios {
         out.push_str(&format!(
-            "| {} | {} | {:.2} | {:.2} | {} | {} |\n",
+            "| {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} |\n",
             scenario.name,
             scenario.default_partitions,
             scenario.runtime.elapsed_ms,
             scenario.runtime.throughput_msgs_per_sec,
+            scenario.cpu.avg_cpu_percent,
+            scenario.cpu.peak_cpu_percent,
             scenario.memory.peak_rss_kb,
             scenario.storage.total_bytes
         ));

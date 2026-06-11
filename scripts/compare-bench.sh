@@ -64,6 +64,8 @@ for name in sorted(set(base_map) | set(new_map)):
     out.append(f"### {name}")
     out.append(f"- elapsed_ms: {b['runtime']['elapsed_ms']:.2f} -> {n['runtime']['elapsed_ms']:.2f}")
     out.append(f"- throughput_msgs_per_sec: {b['runtime']['throughput_msgs_per_sec']:.2f} -> {n['runtime']['throughput_msgs_per_sec']:.2f}")
+    out.append(f"- avg_cpu_percent: {b.get('cpu', {}).get('avg_cpu_percent', 0):.2f} -> {n.get('cpu', {}).get('avg_cpu_percent', 0):.2f}")
+    out.append(f"- peak_cpu_percent: {b.get('cpu', {}).get('peak_cpu_percent', 0):.2f} -> {n.get('cpu', {}).get('peak_cpu_percent', 0):.2f}")
     out.append(f"- peak_rss_kb: {b['memory']['peak_rss_kb']} -> {n['memory']['peak_rss_kb']}")
     out.append(f"- total_bytes: {b['storage']['total_bytes']} -> {n['storage']['total_bytes']}\n")
 text = "\n".join(out) + "\n"

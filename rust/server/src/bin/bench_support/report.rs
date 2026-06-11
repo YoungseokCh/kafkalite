@@ -34,6 +34,7 @@ pub struct ScenarioReport {
     pub payload_bytes: u32,
     pub default_partitions: i32,
     pub runtime: RuntimeMetrics,
+    pub cpu: CpuMetrics,
     pub memory: MemoryMetrics,
     pub storage: StorageMetrics,
 }
@@ -46,6 +47,15 @@ pub struct RuntimeMetrics {
     pub latency_p50_ms: f64,
     pub latency_p95_ms: f64,
     pub latency_p99_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuMetrics {
+    pub elapsed_wall_ms: f64,
+    pub process_cpu_ms: f64,
+    pub avg_cpu_percent: f64,
+    pub peak_cpu_percent: f64,
+    pub samples: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,3 +2,4 @@
 **/target/
 .benchmarks/*-dirty/
 .benchmarks/*-dirty.md
+.benchmarks/

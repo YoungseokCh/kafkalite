@@ -1,19 +1,12 @@
-mod cluster;
 mod metrics;
 mod single_broker;
 
-pub use cluster::{run_cluster_reassignment_metadata, run_cluster_replication_metadata};
-pub use single_broker::{run_commit_resume, run_fetch_tail, run_produce_only, run_roundtrip};
+pub use single_broker::{run_busy, run_idle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScenarioKind {
-    ProduceOnly,
-    Roundtrip,
-    FetchTail,
-    CommitResume,
-    MixedHandoff,
-    ClusterReplicationMetadata,
-    ClusterReassignmentMetadata,
+    Busy,
+    Idle,
 }
 
 pub struct ScenarioSpec {
