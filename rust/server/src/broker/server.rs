@@ -14,6 +14,7 @@ use crate::store::Storage;
 
 use self::connection_errors::is_expected_disconnect;
 use super::dispatcher;
+use super::fetch_signals::FetchSignals;
 
 mod connection_errors;
 
@@ -22,6 +23,7 @@ pub struct KafkaBroker {
     config: Config,
     cluster: ClusterRuntime,
     store: Arc<dyn Storage>,
+    pub(super) fetch_signals: Arc<FetchSignals>,
 }
 
 impl KafkaBroker {
@@ -31,6 +33,7 @@ impl KafkaBroker {
             config,
             cluster,
             store,
+            fetch_signals: Arc::new(FetchSignals::default()),
         };
         if broker.cluster.can_auto_create_topics_locally() {
             let metadata = broker
@@ -46,6 +49,7 @@ impl KafkaBroker {
             let controller_addr = controller_listener.socket_addr()?;
             let controller_runtime = self.cluster.clone();
             let controller_store = self.store.clone();
+            let fetch_signals = self.fetch_signals.clone();
             let listener = TcpListener::bind(controller_addr).await?;
             info!(
                 address = %controller_addr,
@@ -57,6 +61,7 @@ impl KafkaBroker {
                     listener,
                     controller_runtime,
                     controller_store,
+                    fetch_signals,
                 )
                 .await
                 {
@@ -133,6 +138,7 @@ impl KafkaBroker {
         partition: i32,
         now_ms: i64,
     ) -> Result<i64> {
+        let previous_high_watermark = self.partition_high_watermark(topic, partition);
         let (_, latest) = self.store.list_offsets(topic, partition)?;
         let response =
             self.cluster
@@ -149,6 +155,12 @@ impl KafkaBroker {
                     log_end_offset: latest.offset,
                     last_caught_up_ms: now_ms,
                 })?;
+        self.notify_fetch_waiters_on_high_watermark_advance(
+            topic,
+            partition,
+            previous_high_watermark,
+            response.high_watermark,
+        );
         Ok(response.high_watermark)
     }
 
@@ -186,6 +198,7 @@ impl KafkaBroker {
             anyhow::bail!("stale leader or epoch during follower progress sync")
         }
         let (_, latest) = self.store.list_offsets(topic, partition)?;
+        let previous_high_watermark = self.partition_high_watermark(topic, partition);
         let response =
             self.cluster
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
@@ -196,6 +209,12 @@ impl KafkaBroker {
                     log_end_offset: latest.offset.min(state.leader_log_end_offset),
                     last_caught_up_ms: now_ms,
                 })?;
+        self.notify_fetch_waiters_on_high_watermark_advance(
+            topic,
+            partition,
+            previous_high_watermark,
+            response.high_watermark,
+        );
         Ok(response.high_watermark)
     }
 
@@ -270,6 +289,7 @@ impl KafkaBroker {
                 self.store
                     .append_replica_records(topic, partition, &fetched.records, now_ms)?;
         }
+        let previous_high_watermark = self.partition_high_watermark(topic, partition);
         let response =
             self.cluster
                 .handle_update_replica_progress(UpdateReplicaProgressRequest {
@@ -282,7 +302,25 @@ impl KafkaBroker {
                         .min(self.store.list_offsets(topic, partition)?.1.offset),
                     last_caught_up_ms: now_ms,
                 })?;
+        self.notify_fetch_waiters_on_high_watermark_advance(
+            topic,
+            partition,
+            previous_high_watermark,
+            response.high_watermark,
+        );
         Ok(response.high_watermark)
+    }
+
+    fn notify_fetch_waiters_on_high_watermark_advance(
+        &self,
+        topic: &str,
+        partition: i32,
+        previous_high_watermark: Option<i64>,
+        high_watermark: i64,
+    ) {
+        if high_watermark > previous_high_watermark.unwrap_or(-1) {
+            self.notify_fetch_signal(topic, partition);
+        }
     }
 }
 

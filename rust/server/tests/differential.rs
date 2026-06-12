@@ -54,6 +54,21 @@ struct MultiPartitionOffsetFetchSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct FetchPartitionSnapshot {
+    partition: i32,
+    error_code: i16,
+    high_watermark: i64,
+    record_count: usize,
+    payload_len: usize,
+    values: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FetchSnapshot {
+    partitions: Vec<FetchPartitionSnapshot>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct PartitionScopedResumeSnapshot {
     resumed: Vec<(i32, Vec<u8>)>,
 }

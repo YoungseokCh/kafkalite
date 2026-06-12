@@ -100,3 +100,48 @@ fn read_records_scans_log_when_index_file_missing() {
     let records = log.read_records("index-missing", 0, 0, 10).unwrap();
     assert_eq!(records.len(), 1);
 }
+
+#[test]
+fn read_records_for_client_filters_records_before_start_offset_within_batch() {
+    let dir = tempdir().unwrap();
+    let log = RecordLog::open(dir.path()).unwrap();
+    log.append_batch(
+        "client-offset",
+        0,
+        &StoredBatch::from_records(&[
+            BrokerRecord {
+                offset: 0,
+                timestamp_ms: 100,
+                producer_id: -1,
+                producer_epoch: -1,
+                sequence: 0,
+                key: None,
+                value: Some(bytes::Bytes::from_static(b"value-0")),
+                headers_json: b"[]".to_vec(),
+            },
+            BrokerRecord {
+                offset: 1,
+                timestamp_ms: 101,
+                producer_id: -1,
+                producer_epoch: -1,
+                sequence: 1,
+                key: None,
+                value: Some(bytes::Bytes::from_static(b"value-1")),
+                headers_json: b"[]".to_vec(),
+            },
+        ]),
+    )
+    .unwrap();
+
+    let records = log
+        .read_records_for_client("client-offset", 0, 1, usize::MAX)
+        .unwrap();
+
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}

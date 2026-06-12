@@ -43,6 +43,7 @@ async fn tcp_broker_transport_serves_replica_fetch_apply_and_runtime_dispatch() 
         listener,
         runtime.clone(),
         store.clone(),
+        Arc::new(crate::broker::fetch_signals::FetchSignals::default()),
     ));
     let transport = TcpClusterRpcTransport;
     let target = ClusterRpcTarget {

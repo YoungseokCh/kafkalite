@@ -3,6 +3,7 @@ use crate::cluster::{
     InMemoryRemoteClusterRpcTransport,
     test_support::{ThreeNodeClusterHarness, TwoNodeClusterHarness},
 };
+use tokio::time::{Duration, timeout};
 
 use super::*;
 
@@ -131,6 +132,27 @@ async fn follower_syncs_progress_from_remote_state_in_three_node_isr() {
     assert_eq!(partition.replica_progress[0].log_end_offset, 3);
     assert_eq!(partition.replica_progress[1].log_end_offset, 2);
     assert_eq!(partition.replica_progress[2].log_end_offset, 3);
+}
+
+#[tokio::test]
+async fn update_local_replica_progress_notifies_fetch_waiters_when_high_watermark_advances() {
+    let broker = test_broker_with_voters(1, 19092, voter_pair());
+    prepare_topic(&broker, "long.poll.hw", vec![1, 2], vec![1, 2]);
+    broker
+        .store()
+        .append_replica_records("long.poll.hw", 0, &[replica_record(0, 100)], 101)
+        .unwrap();
+    let mut receiver = broker.subscribe_fetch_signal("long.poll.hw", 0);
+
+    let high_watermark = broker
+        .update_local_replica_progress("long.poll.hw", 0, 200)
+        .unwrap();
+
+    assert_eq!(high_watermark, 1);
+    timeout(Duration::from_millis(100), receiver.changed())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 fn prepare_topic(broker: &KafkaBroker, topic: &str, replicas: Vec<i32>, isr: Vec<i32>) {

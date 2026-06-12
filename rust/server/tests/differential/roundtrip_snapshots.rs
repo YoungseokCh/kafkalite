@@ -1,3 +1,9 @@
+use bytes::Bytes;
+use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
+use kafka_protocol::messages::{FetchRequest, TopicName};
+use kafka_protocol::protocol::StrBytes;
+use kafka_protocol::records::RecordBatchDecoder;
+use rdkafka::admin::{AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::Consumer;
 use rdkafka::message::Message;
 use rdkafka::producer::FutureRecord;
@@ -5,8 +11,8 @@ use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 
 use super::super::protocol;
 use super::super::{
-    DIFFERENTIAL_DEFAULT_PARTITIONS, consumer, find_topic, group_consumer, poll_for_message,
-    producer, wait_for_topic,
+    DIFFERENTIAL_DEFAULT_PARTITIONS, FetchPartitionSnapshot, FetchSnapshot, admin_client, consumer,
+    find_topic, group_consumer, poll_for_message, producer, wait_for_topic,
 };
 use super::super::{
     MetadataSnapshot, MultiPartitionOffsetFetchSnapshot, MultiPartitionRoundtripSnapshot,
@@ -28,6 +34,94 @@ pub(super) async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataS
             .map(|partition| partition.id())
             .collect(),
     }
+}
+
+pub(super) async fn fetch_first_batch_exceeds_partition_budget_snapshot(
+    bootstrap: &str,
+    topic: &str,
+) -> FetchSnapshot {
+    create_topic(bootstrap, topic, 1).await;
+
+    let producer = producer(bootstrap);
+    let payload = vec![b'x'; 4096];
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload(&payload)
+                .key("oversized")
+                .partition(0),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let fetch = protocol::fetch(
+        bootstrap,
+        FetchRequest::default()
+            .with_max_bytes(512)
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(512),
+                    ]),
+            ]),
+    );
+    snapshot_fetch_response(fetch)
+}
+
+pub(super) async fn fetch_request_max_bytes_across_partitions_snapshot(
+    bootstrap: &str,
+    topic: &str,
+) -> FetchSnapshot {
+    create_topic(bootstrap, topic, 2).await;
+
+    let producer = producer(bootstrap);
+    let payload = vec![b'y'; 1024];
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload(&payload)
+                .key("p0")
+                .partition(0),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    producer
+        .send(
+            FutureRecord::to(topic)
+                .payload(&payload)
+                .key("p1")
+                .partition(1),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    let fetch = protocol::fetch(
+        bootstrap,
+        FetchRequest::default()
+            .with_max_bytes(1600)
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1600),
+                        FetchPartition::default()
+                            .with_partition(1)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1600),
+                    ]),
+            ]),
+    );
+    snapshot_fetch_response(fetch)
 }
 
 pub(super) async fn produce_consume_snapshot(
@@ -62,6 +156,57 @@ pub(super) async fn produce_consume_snapshot(
         payload: message.payload().unwrap().to_vec(),
         key: message.key().unwrap().to_vec(),
     }
+}
+
+async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
+    let admin = admin_client(bootstrap);
+    let result = admin
+        .create_topics(
+            &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
+            &AdminOptions::new(),
+        )
+        .await
+        .expect("CreateTopics should return a result");
+    assert!(
+        result.iter().all(Result::is_ok),
+        "topic creation should succeed: {result:?}"
+    );
+    wait_for_topic(bootstrap, topic, partitions as usize);
+}
+
+fn snapshot_fetch_response(fetch: kafka_protocol::messages::FetchResponse) -> FetchSnapshot {
+    let mut partitions = fetch
+        .responses
+        .into_iter()
+        .flat_map(|topic| topic.partitions)
+        .map(|partition| {
+            let payload_len = partition.records.as_ref().map_or(0, bytes::Bytes::len);
+            let values = partition
+                .records
+                .as_ref()
+                .map_or_else(Vec::new, decode_fetch_values);
+            FetchPartitionSnapshot {
+                partition: partition.partition_index,
+                error_code: partition.error_code,
+                high_watermark: partition.high_watermark,
+                record_count: values.len(),
+                payload_len,
+                values,
+            }
+        })
+        .collect::<Vec<_>>();
+    partitions.sort_by_key(|partition| partition.partition);
+    FetchSnapshot { partitions }
+}
+
+fn decode_fetch_values(payload: &Bytes) -> Vec<Vec<u8>> {
+    let mut bytes = payload.clone();
+    RecordBatchDecoder::decode_all(&mut bytes)
+        .unwrap()
+        .into_iter()
+        .flat_map(|batch| batch.records)
+        .map(|record| record.value.unwrap_or_default().to_vec())
+        .collect()
 }
 
 pub(super) async fn commit_resume_snapshot(

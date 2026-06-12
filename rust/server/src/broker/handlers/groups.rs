@@ -17,9 +17,8 @@ use kafka_protocol::messages::{
 use kafka_protocol::protocol::StrBytes;
 
 use super::super::KafkaBroker;
+use super::error_codes::UNKNOWN_TOPIC_OR_PARTITION;
 use crate::store::{GroupJoinRequest, OffsetCommitRequest as StoreOffsetCommitRequest, StoreError};
-
-const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 
 pub fn handle_find_coordinator(
     broker: &KafkaBroker,

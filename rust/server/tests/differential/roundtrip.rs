@@ -14,8 +14,10 @@ use super::{bootstrap_available, consumer, free_port};
 mod snapshots;
 
 use snapshots::{
-    commit_resume_snapshot, metadata_snapshot, multi_partition_offset_fetch_snapshot,
-    multi_partition_roundtrip_snapshot, partition_scoped_resume_snapshot, produce_consume_snapshot,
+    commit_resume_snapshot, fetch_first_batch_exceeds_partition_budget_snapshot,
+    fetch_request_max_bytes_across_partitions_snapshot, metadata_snapshot,
+    multi_partition_offset_fetch_snapshot, multi_partition_roundtrip_snapshot,
+    partition_scoped_resume_snapshot, produce_consume_snapshot,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -111,6 +113,28 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     let local_offset_fetch =
         multi_partition_offset_fetch_snapshot(&local_bootstrap, &offset_fetch_topic).await;
     assert_eq!(local_offset_fetch, real_offset_fetch);
+
+    let oversized_fetch_topic = format!("diff.fetch-oversized.{suffix}");
+    let real_oversized_fetch = fetch_first_batch_exceeds_partition_budget_snapshot(
+        &real_bootstrap,
+        &oversized_fetch_topic,
+    )
+    .await;
+    let local_oversized_fetch = fetch_first_batch_exceeds_partition_budget_snapshot(
+        &local_bootstrap,
+        &oversized_fetch_topic,
+    )
+    .await;
+    assert_eq!(local_oversized_fetch, real_oversized_fetch);
+
+    let budgeted_fetch_topic = format!("diff.fetch-budget.{suffix}");
+    let real_budgeted_fetch =
+        fetch_request_max_bytes_across_partitions_snapshot(&real_bootstrap, &budgeted_fetch_topic)
+            .await;
+    let local_budgeted_fetch =
+        fetch_request_max_bytes_across_partitions_snapshot(&local_bootstrap, &budgeted_fetch_topic)
+            .await;
+    assert_eq!(local_budgeted_fetch, real_budgeted_fetch);
 
     let partition_scoped_topic = format!("diff.partition-scoped-resume.{suffix}");
     let real_partition_scoped_resume =

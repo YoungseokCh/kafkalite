@@ -2,7 +2,7 @@ use super::*;
 use kafka_protocol::records::RecordBatchDecoder;
 
 #[tokio::test]
-async fn fetch_from_nonzero_offset_keeps_overlapping_batch() {
+async fn fetch_from_nonzero_offset_filters_earlier_records_from_overlapping_batch() {
     let broker = test_broker();
     let records = vec![
         Record {
@@ -82,7 +82,7 @@ async fn fetch_from_nonzero_offset_keeps_overlapping_batch() {
         .map(|record| record.offset)
         .collect::<Vec<_>>();
 
-    assert_eq!(offsets, vec![0, 1]);
+    assert_eq!(offsets, vec![1]);
 }
 
 #[tokio::test]

@@ -143,27 +143,38 @@ impl RecordLog {
         topic: &str,
         partition: i32,
         start_offset: i64,
-        limit: usize,
+        max_bytes: usize,
     ) -> Result<Vec<BrokerRecord>> {
-        if limit == 0 {
+        if max_bytes == 0 {
             return Ok(Vec::new());
         }
         if !self.segment_path(topic, partition).exists() {
             return Ok(Vec::new());
         }
         let mut records = Vec::new();
-        let mut visible_count = 0_usize;
+        let mut fetched_bytes = 0_usize;
         for batch in self.read_all_batches(topic, partition)? {
             if batch.last_offset < start_offset {
                 continue;
             }
-            visible_count += batch
+            let batch_bytes = batch.encode_binary()?.len();
+            let visible_batch_records = batch
                 .records
-                .iter()
+                .into_iter()
                 .filter(|record| record.offset >= start_offset)
-                .count();
-            records.extend(batch.records);
-            if visible_count >= limit {
+                .collect::<Vec<_>>();
+            if visible_batch_records.is_empty() {
+                continue;
+            }
+            let is_first_batch = records.is_empty();
+            if !is_first_batch && fetched_bytes + batch_bytes > max_bytes {
+                return Ok(records);
+            }
+            fetched_bytes += batch_bytes;
+            records.extend(visible_batch_records);
+            // Kafka allows the first non-empty batch to exceed the byte limit so a consumer can
+            // make progress with a batch larger than its configured fetch budget.
+            if fetched_bytes >= max_bytes {
                 return Ok(records);
             }
         }

@@ -64,7 +64,7 @@ pub trait Storage: Send + Sync {
         topic: &str,
         partition: i32,
         start_offset: i64,
-        limit: usize,
+        max_bytes: usize,
     ) -> Result<FetchResult>;
     fn append_replica_records(
         &self,

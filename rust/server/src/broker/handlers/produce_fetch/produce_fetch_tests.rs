@@ -43,6 +43,9 @@ mod fetch_timestamp_tests;
 #[path = "produce_fetch_tests/fetch_offset_tests.rs"]
 mod fetch_offset_tests;
 
+#[path = "produce_fetch_tests/fetch_long_poll_tests.rs"]
+mod fetch_long_poll_tests;
+
 fn test_broker() -> KafkaBroker {
     let dir = tempdir().unwrap().keep();
     let config = Config::single_node(dir.join("data"), 9092, 1);

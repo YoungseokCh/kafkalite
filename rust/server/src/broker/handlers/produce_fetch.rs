@@ -1,30 +1,30 @@
 use anyhow::Result;
-use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsTopicResponse,
 };
 use kafka_protocol::messages::produce_response::{PartitionProduceResponse, TopicProduceResponse};
 use kafka_protocol::messages::{
-    BrokerId, FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, ProduceRequest,
+    FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, ProduceRequest,
     ProduceResponse, TopicName,
 };
 use kafka_protocol::protocol::StrBytes;
 use kafka_protocol::records::RecordBatchDecoder;
 
 use self::auto_create::maybe_auto_create_topic;
-use self::records::{encode_records, to_broker_record};
+#[cfg(test)]
+use self::records::encode_records;
+use self::records::to_broker_record;
+use super::error_codes::{
+    INVALID_PRODUCER_EPOCH, NOT_LEADER_OR_FOLLOWER, OUT_OF_ORDER_SEQUENCE_NUMBER,
+    UNKNOWN_PRODUCER_ID, UNKNOWN_TOPIC_OR_PARTITION,
+};
 use crate::store::StoreError;
 
 use super::super::KafkaBroker;
 
 mod auto_create;
+mod fetch_long_poll;
 mod records;
-
-const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
-const NOT_LEADER_OR_FOLLOWER: i16 = 6;
-const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
-const INVALID_PRODUCER_EPOCH: i16 = 47;
-const UNKNOWN_PRODUCER_ID: i16 = 59;
 
 pub async fn handle_produce(
     broker: &KafkaBroker,
@@ -35,6 +35,7 @@ pub async fn handle_produce(
         let topic_name = topic_data.name.to_string();
         let mut partitions = Vec::new();
         for partition_data in topic_data.partition_data {
+            // Decode the Kafka wire batches into the broker's internal record shape.
             let raw_records = partition_data.records.unwrap_or_default();
             let mut record_bytes = raw_records.clone();
             let decoded = RecordBatchDecoder::decode_all(&mut record_bytes)?;
@@ -44,7 +45,11 @@ pub async fn handle_produce(
                 .map(to_broker_record)
                 .collect::<Vec<_>>();
             let now = chrono::Utc::now().timestamp_millis();
+
+            // Auto-create can materialize metadata before we validate leadership or storage state.
             maybe_auto_create_topic(broker, &topic_name, partition_data.index, now)?;
+
+            // Produce requests are only accepted by the current leader for the partition.
             if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
                 partitions.push(
                     PartitionProduceResponse::default()
@@ -58,6 +63,8 @@ pub async fn handle_produce(
                 );
                 continue;
             }
+
+            // Reject requests for partitions that are not backed by the local store.
             let known_local = broker
                 .store()
                 .topic_metadata(Some(std::slice::from_ref(&topic_name)), now)
@@ -83,12 +90,21 @@ pub async fn handle_produce(
                 );
                 continue;
             }
+
+            // Capture the current tail so we can tell whether append made new data visible.
+            let previous_log_end = broker
+                .store()
+                .list_offsets(&topic_name, partition_data.index)
+                .map(|(_, latest)| latest.offset)
+                .ok();
+
+            // Append to the local log, then translate storage/leadership outcomes to Kafka errors.
             let produce_result =
                 broker
                     .store()
                     .append_records(&topic_name, partition_data.index, &flattened, now);
             let (error_code, base_offset) = match produce_result {
-                Ok((base_offset, _)) => {
+                Ok((base_offset, last_offset)) => {
                     if !broker.is_local_partition_leader(&topic_name, partition_data.index) {
                         let _ = broker.store().truncate_partition(
                             &topic_name,
@@ -102,6 +118,10 @@ pub async fn handle_produce(
                             partition_data.index,
                             now,
                         );
+                        // Wake long-poll fetch waiters only when this append advanced visible data.
+                        if should_notify_fetch_waiters(&flattened, previous_log_end, last_offset) {
+                            broker.notify_fetch_signal(&topic_name, partition_data.index);
+                        }
                         (0, base_offset)
                     }
                 }
@@ -136,89 +156,16 @@ pub async fn handle_produce(
         .with_throttle_time_ms(0))
 }
 
+fn should_notify_fetch_waiters(
+    records: &[crate::store::BrokerRecord],
+    previous_log_end: Option<i64>,
+    last_offset: i64,
+) -> bool {
+    !records.is_empty() && previous_log_end.is_some_and(|log_end| last_offset >= log_end)
+}
+
 pub async fn handle_fetch(broker: &KafkaBroker, request: FetchRequest) -> Result<FetchResponse> {
-    let mut responses = Vec::new();
-    for topic in request.topics {
-        let mut partitions = Vec::new();
-        let topic_name = topic.topic.to_string();
-        for partition in topic.partitions {
-            if !broker.is_local_partition_leader(&topic_name, partition.partition) {
-                partitions.push(
-                    PartitionData::default()
-                        .with_partition_index(partition.partition)
-                        .with_error_code(NOT_LEADER_OR_FOLLOWER)
-                        .with_high_watermark(-1)
-                        .with_last_stable_offset(-1)
-                        .with_log_start_offset(-1)
-                        .with_aborted_transactions(None)
-                        .with_preferred_read_replica(BrokerId(-1))
-                        .with_records(None),
-                );
-                continue;
-            }
-            match broker.store().fetch_records_for_client(
-                &topic_name,
-                partition.partition,
-                partition.fetch_offset,
-                1_000,
-            ) {
-                Ok(fetched) => {
-                    let high_watermark = broker
-                        .partition_high_watermark(&topic_name, partition.partition)
-                        .filter(|_| !fetched.records.is_empty())
-                        .unwrap_or(fetched.high_watermark);
-                    let visible_records = if high_watermark == 0
-                        && !fetched.records.is_empty()
-                        && !broker.partition_has_replica_progress(&topic_name, partition.partition)
-                    {
-                        fetched.records.clone()
-                    } else {
-                        fetched
-                            .records
-                            .into_iter()
-                            .filter(|record| record.offset < high_watermark)
-                            .collect::<Vec<_>>()
-                    };
-                    let records = encode_records(&visible_records)?;
-                    partitions.push(
-                        PartitionData::default()
-                            .with_partition_index(partition.partition)
-                            .with_error_code(0)
-                            .with_high_watermark(high_watermark)
-                            .with_last_stable_offset(high_watermark)
-                            .with_log_start_offset(0)
-                            .with_aborted_transactions(None)
-                            .with_preferred_read_replica(BrokerId(-1))
-                            .with_records(Some(records)),
-                    );
-                }
-                Err(StoreError::UnknownTopicOrPartition { .. }) => {
-                    partitions.push(
-                        PartitionData::default()
-                            .with_partition_index(partition.partition)
-                            .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
-                            .with_high_watermark(-1)
-                            .with_last_stable_offset(-1)
-                            .with_log_start_offset(-1)
-                            .with_aborted_transactions(None)
-                            .with_preferred_read_replica(BrokerId(-1))
-                            .with_records(None),
-                    );
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-        responses.push(
-            FetchableTopicResponse::default()
-                .with_topic(TopicName(StrBytes::from(topic_name.clone())))
-                .with_partitions(partitions),
-        );
-    }
-    Ok(FetchResponse::default()
-        .with_throttle_time_ms(0)
-        .with_error_code(0)
-        .with_session_id(0)
-        .with_responses(responses))
+    fetch_long_poll::handle_fetch(broker, request).await
 }
 
 pub async fn handle_list_offsets(

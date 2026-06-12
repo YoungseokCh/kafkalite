@@ -8,10 +8,11 @@ use kafka_protocol::messages::offset_commit_request::{
 use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
-    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId, HeartbeatRequest,
-    HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, LeaveGroupRequest, LeaveGroupResponse,
-    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
-    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName,
+    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, FetchRequest, FetchResponse,
+    GroupId, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
+    LeaveGroupRequest, LeaveGroupResponse, OffsetCommitRequest, OffsetCommitResponse,
+    OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader, SyncGroupRequest,
+    SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use std::time::Duration;
@@ -187,6 +188,15 @@ pub(super) fn offset_fetch(
                     .with_name(TopicName(StrBytes::from(topic.to_string())))
                     .with_partition_indexes(partitions.to_vec()),
             ])),
+    )
+}
+
+pub(super) fn fetch(bootstrap: &str, request: FetchRequest) -> FetchResponse {
+    send_request::<FetchRequest, FetchResponse>(
+        bootstrap,
+        ApiKey::Fetch,
+        protocol::FETCH_VERSION,
+        request,
     )
 }
 

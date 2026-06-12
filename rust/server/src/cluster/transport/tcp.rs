@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::broker::fetch_signals::FetchSignals;
 use crate::cluster::ClusterRuntime;
 use crate::cluster::codec::{decode_request, decode_response, encode_request, encode_response};
 use crate::cluster::rpc::{
@@ -79,14 +80,16 @@ impl TcpClusterRpcTransport {
         }
     }
 
-    pub async fn serve_broker_forever(
+    pub(crate) async fn serve_broker_forever(
         listener: TcpListener,
         runtime: ClusterRuntime,
         store: Arc<dyn Storage>,
+        fetch_signals: Arc<FetchSignals>,
     ) -> Result<()> {
         loop {
             let runtime = runtime.clone();
             let store = store.clone();
+            let fetch_signals = fetch_signals.clone();
             Self::serve_once(&listener, move |request| match request {
                 ClusterRpcRequest::ReplicaFetch(request) => match store.fetch_records(
                     &request.topic_name,
@@ -141,6 +144,18 @@ impl TcpClusterRpcTransport {
                             next_offset,
                         },
                     ))
+                }
+                ClusterRpcRequest::UpdateReplicaProgress(request) => {
+                    let previous_high_watermark = runtime
+                        .metadata_image()
+                        .partition_high_watermark(&request.topic_name, request.partition_index);
+                    let response = runtime.handle_update_replica_progress(request.clone())?;
+                    if response.accepted
+                        && response.high_watermark > previous_high_watermark.unwrap_or(-1)
+                    {
+                        fetch_signals.notify(&request.topic_name, request.partition_index);
+                    }
+                    Ok(ClusterRpcResponse::UpdateReplicaProgress(response))
                 }
                 other => runtime.dispatch(other),
             })

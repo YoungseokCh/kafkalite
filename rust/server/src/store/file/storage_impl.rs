@@ -94,16 +94,16 @@ impl Storage for FileStore {
         topic: &str,
         partition: i32,
         start_offset: i64,
-        limit: usize,
+        max_bytes: usize,
     ) -> Result<FetchResult> {
         let high_watermark = self
             .data
             .lock()
             .expect("file store mutex poisoned")
             .high_watermark(topic, partition)?;
-        let records = self
-            .logs
-            .read_records_for_client(topic, partition, start_offset, limit)?;
+        let records =
+            self.logs
+                .read_records_for_client(topic, partition, start_offset, max_bytes)?;
         Ok(FetchResult {
             high_watermark,
             records,
