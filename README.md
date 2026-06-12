@@ -13,6 +13,12 @@ cargo run --manifest-path rust/server/Cargo.toml -- --config rust/server/example
 
 ## Changelog
 
+### v1.1.4
+
+- Support fetch long polling
+- Reduce fetch response copy overhead
+- Reground benchmark scenarios and simplify validation commands
+
 ### v1.1.3
 
 - Use Kafka-compatible on-disk log layout

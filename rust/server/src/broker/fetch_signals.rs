@@ -28,6 +28,14 @@ impl FetchSignals {
         let next_generation = sender.borrow().wrapping_add(1);
         let _ = sender.send(next_generation);
     }
+
+    #[cfg(test)]
+    pub(crate) fn signal_count(&self) -> usize {
+        self.signals
+            .lock()
+            .expect("fetch signals mutex poisoned")
+            .len()
+    }
 }
 
 impl KafkaBroker {
@@ -37,5 +45,10 @@ impl KafkaBroker {
 
     pub fn notify_fetch_signal(&self, topic: &str, partition: i32) {
         self.fetch_signals.notify(topic, partition);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fetch_signal_count(&self) -> usize {
+        self.fetch_signals.signal_count()
     }
 }

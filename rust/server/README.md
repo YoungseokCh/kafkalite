@@ -126,6 +126,8 @@ make bench LABEL=v1.1.0
 ```
 
 - benchmark outputs are written under `.benchmarks/`
+- runs always use the default timestamp/git-sha naming convention
+- when `LABEL` is set, an extra symlink such as `.benchmarks/v1.1.0` points to the canonical run directory
 - each run stores only `result.json`, `metrics.csv`, and `summary.md`, so history stays reviewable and portable
 - benchmark runs require a clean git tree
 

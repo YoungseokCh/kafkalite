@@ -213,7 +213,12 @@ fn subscribe_requested_partitions(
     for topic in &request.topics {
         let topic_name = topic.topic.to_string();
         for partition in &topic.partitions {
-            if broker.is_local_partition_leader(&topic_name, partition.partition) {
+            if broker.is_local_partition_leader(&topic_name, partition.partition)
+                && broker
+                    .store()
+                    .list_offsets(&topic_name, partition.partition)
+                    .is_ok()
+            {
                 receivers.push(broker.subscribe_fetch_signal(&topic_name, partition.partition));
             }
         }

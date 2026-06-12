@@ -179,6 +179,23 @@ async fn unknown_topic_fetch_returns_immediately() {
 }
 
 #[tokio::test]
+async fn unknown_topic_fetch_does_not_create_fetch_signal_entries() {
+    let broker = test_broker();
+
+    assert_eq!(broker.fetch_signal_count(), 0);
+
+    let fetch = handle_fetch(&broker, tail_fetch_request("long.poll.missing", 0, 0, 500))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fetch.responses[0].partitions[0].error_code,
+        UNKNOWN_TOPIC_OR_PARTITION
+    );
+    assert_eq!(broker.fetch_signal_count(), 0);
+}
+
+#[tokio::test]
 async fn zero_fetch_max_bytes_returns_immediately_without_long_polling() {
     let broker = test_broker();
     handle_produce(

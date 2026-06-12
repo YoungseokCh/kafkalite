@@ -7,15 +7,20 @@ SERVER_DIR="$ROOT_DIR/rust/server"
 BENCH_ROOT="$ROOT_DIR/.benchmarks"
 
 GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf unknown)"
-RUN_LABEL="${2:-$(date -u +%Y%m%dT%H%M%SZ)-$GIT_SHA-$$}"
+CANONICAL_LABEL="$(date -u +%Y%m%dT%H%M%SZ)-$GIT_SHA-$$"
+ALIAS_LABEL="${2:-}"
 STAGING_DIR=""
 
-if [[ ! "$RUN_LABEL" =~ ^[A-Za-z0-9._-]+$ || "$RUN_LABEL" == "." || "$RUN_LABEL" == ".." ]]; then
+if [[ -n "$ALIAS_LABEL" ]] && [[ ! "$ALIAS_LABEL" =~ ^[A-Za-z0-9._-]+$ || "$ALIAS_LABEL" == "." || "$ALIAS_LABEL" == ".." ]]; then
   echo "invalid label: must match [A-Za-z0-9._-]+ and must not be '.' or '..'" >&2
   exit 1
 fi
 
-RUN_DIR="$BENCH_ROOT/$RUN_LABEL"
+RUN_DIR="$BENCH_ROOT/$CANONICAL_LABEL"
+ALIAS_PATH=""
+if [[ -n "$ALIAS_LABEL" ]]; then
+  ALIAS_PATH="$BENCH_ROOT/$ALIAS_LABEL"
+fi
 DIRTY_STATUS="$(git -C "$ROOT_DIR" status --short)"
 
 if [[ -n "$DIRTY_STATUS" ]]; then
@@ -28,8 +33,13 @@ if [[ -e "$RUN_DIR" ]]; then
   exit 1
 fi
 
+if [[ -n "$ALIAS_PATH" && -e "$ALIAS_PATH" ]]; then
+  echo "benchmark alias already exists: $ALIAS_PATH" >&2
+  exit 1
+fi
+
 mkdir -p "$BENCH_ROOT"
-STAGING_DIR="$(mktemp -d "$BENCH_ROOT/.tmp-${RUN_LABEL}-XXXXXX")"
+STAGING_DIR="$(mktemp -d "$BENCH_ROOT/.tmp-${CANONICAL_LABEL}-XXXXXX")"
 
 cleanup() {
   if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
@@ -65,4 +75,9 @@ fi
 
 mv "$STAGING_DIR" "$RUN_DIR"
 STAGING_DIR=""
+
+if [[ -n "$ALIAS_PATH" ]]; then
+  ln -s "$CANONICAL_LABEL" "$ALIAS_PATH"
+fi
+
 trap - EXIT INT TERM
