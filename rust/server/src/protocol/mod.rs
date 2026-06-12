@@ -20,25 +20,26 @@ pub const OFFSET_COMMIT_VERSION: i16 = 7;
 pub const OFFSET_FETCH_VERSION: i16 = 7;
 pub const INIT_PRODUCER_ID_VERSION: i16 = 4;
 
-pub async fn read_frame(stream: &mut TcpStream) -> Result<BytesMut> {
+pub async fn read_frame(stream: &mut TcpStream) -> Result<Bytes> {
     let size = stream.read_i32().await.context("read frame size")?;
     let size = usize::try_from(size).context("negative frame size")?;
-    let mut payload = vec![0_u8; size];
+    let mut payload = BytesMut::with_capacity(size);
+    payload.resize(size, 0);
     stream
-        .read_exact(&mut payload)
+        .read_exact(&mut payload[..])
         .await
         .context("read frame body")?;
-    Ok(BytesMut::from(payload.as_slice()))
+    Ok(payload.freeze())
 }
 
-pub fn decode_header(frame: &BytesMut) -> Result<RequestHeader> {
-    let mut buf = Bytes::copy_from_slice(frame.as_ref());
+pub fn decode_header(frame: &Bytes) -> Result<RequestHeader> {
+    let mut buf = frame.clone();
     protocol::decode_request_header_from_buffer(&mut buf).context("decode request header")
 }
 
-pub fn decode_body<T: Decodable>(frame: &BytesMut, api_key: ApiKey, api_version: i16) -> Result<T> {
+pub fn decode_body<T: Decodable>(frame: &Bytes, api_key: ApiKey, api_version: i16) -> Result<T> {
     let header_version = api_key.request_header_version(api_version);
-    let mut buf = Bytes::copy_from_slice(frame.as_ref());
+    let mut buf = frame.clone();
     let _ = RequestHeader::decode(&mut buf, header_version)?;
     T::decode(&mut buf, api_version).context("decode request body")
 }
