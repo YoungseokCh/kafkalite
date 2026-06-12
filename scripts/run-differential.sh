@@ -43,10 +43,7 @@ wait_for_kafka() {
   echo "Kafka is ready at ${BOOTSTRAP}."
 }
 
-run_optional_filesystem_diff() {
-  if [[ "${DIFFERENTIAL_FS_CHECK:-0}" != "1" ]]; then
-    return
-  fi
+run_filesystem_diff() {
   local fs_topic="${REAL_KAFKA_TOPIC:-diff.fs.$(date +%s).$$}"
   echo "Creating real Kafka filesystem fixture topic ${fs_topic}..."
   REAL_KAFKA_BOOTSTRAP="$BOOTSTRAP" \
@@ -103,5 +100,5 @@ if ! REAL_KAFKA_BOOTSTRAP="$BOOTSTRAP" cargo test --test differential; then
   dump_logs
   exit 1
 fi
-run_optional_filesystem_diff
+run_filesystem_diff
 echo "Differential checks completed successfully."

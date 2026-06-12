@@ -45,7 +45,7 @@ BROKER_BIN="$SERVER_DIR/target/release/kafkalite"
 BENCH_BIN="$SERVER_DIR/target/release/bench_runner"
 BINARY_BYTES="$(stat -c %s "$BROKER_BIN")"
 PACKAGE_BYTES=0
-if [[ "$MODE" == "full" || "$MODE" == "runtime" ]]; then
+if [[ "$MODE" == "full" ]]; then
   cargo package >/dev/null
   PACKAGE_BYTES="$(stat -c %s "$SERVER_DIR/target/package/kafkalite-server-"*.crate | tail -n 1)"
 fi

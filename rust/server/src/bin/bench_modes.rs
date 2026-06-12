@@ -7,7 +7,6 @@ pub(super) enum BenchMode {
     Quick,
     Full,
     Size,
-    Runtime,
     Memory,
     Storage,
 }
@@ -16,7 +15,7 @@ pub(super) fn specs_for_mode(mode: &BenchMode) -> Vec<ScenarioSpec> {
     match mode {
         BenchMode::Quick => vec![busy()],
         BenchMode::Size => Vec::new(),
-        BenchMode::Runtime | BenchMode::Memory | BenchMode::Storage | BenchMode::Full => specs(),
+        BenchMode::Memory | BenchMode::Storage | BenchMode::Full => specs(),
     }
 }
 
@@ -53,8 +52,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_mode_includes_busy_and_idle_benchmarks() {
-        let specs = specs_for_mode(&BenchMode::Runtime);
+    fn full_mode_includes_busy_and_idle_benchmarks() {
+        let specs = specs_for_mode(&BenchMode::Full);
 
         assert!(
             specs

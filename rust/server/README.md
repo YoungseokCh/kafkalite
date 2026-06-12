@@ -122,15 +122,12 @@ From the repository root:
 
 ```bash
 make bench
-make bench-runtime
-make bench-runtime LABEL=v1.1.0
-make bench-compare BASE=.benchmarks/<old>/result.json NEW=.benchmarks/<new>/result.json
+make bench LABEL=v1.1.0
 ```
 
 - benchmark outputs are written under `.benchmarks/`
 - each run stores only `result.json`, `metrics.csv`, and `summary.md`, so history stays reviewable and portable
 - benchmark runs require a clean git tree
-- `make bench-runtime` and `make bench` include the multi-partition scenarios `bench.produce.multi_partition` and `bench.fetch.multi_partition` alongside `bench.mixed.handoff`
 
 ## Store inspection and repair
 
