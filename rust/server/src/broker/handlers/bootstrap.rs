@@ -4,8 +4,8 @@ use kafka_protocol::messages::metadata_response::{
     MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
 };
 use kafka_protocol::messages::{
-    ApiKey, ApiVersionsResponse, BrokerId, InitProducerIdResponse, MetadataRequest,
-    MetadataResponse, ProducerId, TopicName,
+    ApiKey, ApiVersionsResponse, BrokerId, InitProducerIdRequest, InitProducerIdResponse,
+    MetadataRequest, MetadataResponse, ProducerId, TopicName,
 };
 use kafka_protocol::protocol::StrBytes;
 
@@ -13,6 +13,7 @@ use crate::cluster::{ClusterMetadataImage, TopicMetadataImage};
 use crate::protocol;
 
 use super::super::KafkaBroker;
+use super::error_codes::{CONCURRENT_TRANSACTIONS, INVALID_TRANSACTION_TIMEOUT};
 
 pub fn handle_api_versions() -> ApiVersionsResponse {
     let apis = vec![
@@ -23,6 +24,22 @@ pub fn handle_api_versions() -> ApiVersionsResponse {
             ApiKey::InitProducerId,
             0,
             protocol::INIT_PRODUCER_ID_VERSION,
+        ),
+        api(
+            ApiKey::WriteTxnMarkers,
+            1,
+            protocol::WRITE_TXN_MARKERS_VERSION,
+        ),
+        api(
+            ApiKey::AddPartitionsToTxn,
+            0,
+            protocol::ADD_PARTITIONS_TO_TXN_VERSION,
+        ),
+        api(ApiKey::EndTxn, 0, protocol::END_TXN_VERSION),
+        api(
+            ApiKey::TxnOffsetCommit,
+            0,
+            protocol::TXN_OFFSET_COMMIT_VERSION,
         ),
         api(ApiKey::Produce, 3, protocol::PRODUCE_VERSION),
         api(ApiKey::Fetch, 4, protocol::FETCH_VERSION),
@@ -123,13 +140,59 @@ pub async fn handle_metadata(
         .with_topics(topics))
 }
 
-pub async fn handle_init_producer_id(broker: &KafkaBroker) -> Result<InitProducerIdResponse> {
-    let session = broker.store().init_producer()?;
+pub async fn handle_init_producer_id(
+    broker: &KafkaBroker,
+    request: InitProducerIdRequest,
+) -> Result<InitProducerIdResponse> {
+    const DEFAULT_TRANSACTION_TIMEOUT_MS: i32 = 60_000;
+    const MAX_TRANSACTION_TIMEOUT_MS: i32 = 900_000;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    broker.expire_timed_out_transactions(now_ms)?;
+    let (producer_id, producer_epoch) = if let Some(transactional_id) =
+        request.transactional_id.as_ref()
+    {
+        if request.transaction_timeout_ms < 0 {
+            return Ok(InitProducerIdResponse::default()
+                .with_throttle_time_ms(0)
+                .with_error_code(INVALID_TRANSACTION_TIMEOUT)
+                .with_producer_id(ProducerId(-1))
+                .with_producer_epoch(-1));
+        }
+        let transaction_timeout_ms = if request.transaction_timeout_ms == 0 {
+            DEFAULT_TRANSACTION_TIMEOUT_MS
+        } else {
+            request.transaction_timeout_ms
+        };
+        if transaction_timeout_ms > MAX_TRANSACTION_TIMEOUT_MS {
+            return Ok(InitProducerIdResponse::default()
+                .with_throttle_time_ms(0)
+                .with_error_code(INVALID_TRANSACTION_TIMEOUT)
+                .with_producer_id(ProducerId(-1))
+                .with_producer_epoch(-1));
+        }
+        match broker.init_transactional_producer(
+            transactional_id.as_ref(),
+            transaction_timeout_ms,
+            now_ms,
+        )? {
+            Ok(session) => session,
+            Err(crate::broker::server::InitTransactionalProducerError::ConcurrentTransactions) => {
+                return Ok(InitProducerIdResponse::default()
+                    .with_throttle_time_ms(0)
+                    .with_error_code(CONCURRENT_TRANSACTIONS)
+                    .with_producer_id(ProducerId(-1))
+                    .with_producer_epoch(-1));
+            }
+        }
+    } else {
+        let session = broker.store().init_producer()?;
+        (session.producer_id, session.producer_epoch)
+    };
     Ok(InitProducerIdResponse::default()
         .with_throttle_time_ms(0)
         .with_error_code(0)
-        .with_producer_id(ProducerId(session.producer_id))
-        .with_producer_epoch(session.producer_epoch))
+        .with_producer_id(ProducerId(producer_id))
+        .with_producer_epoch(producer_epoch))
 }
 
 fn api(api_key: ApiKey, min_version: i16, max_version: i16) -> ApiVersion {

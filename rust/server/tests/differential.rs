@@ -8,6 +8,8 @@ mod protocol;
 mod recovery;
 #[path = "differential/roundtrip.rs"]
 mod roundtrip;
+#[path = "differential/transactions.rs"]
+mod transactions;
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -134,6 +136,30 @@ struct LeaveGroupSnapshot {
     post_leave_heartbeat_error: i16,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TransactionCoordinatorSnapshot {
+    find_coordinator_error: i16,
+    init_negative_timeout_error: i16,
+    init_excessive_timeout_error: i16,
+    init_success_error: i16,
+    add_valid_top_level_error: i16,
+    add_valid_partition_error: i16,
+    add_missing_txn_top_level_error: i16,
+    add_missing_txn_partition_error: i16,
+    reinit_error: i16,
+    reused_producer_id: bool,
+    epoch_bumped: bool,
+    end_stale_epoch_error: i16,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TransactionVisibilitySnapshot {
+    committed_read_uncommitted_count: usize,
+    committed_read_committed_count: usize,
+    aborted_read_uncommitted_count: usize,
+    aborted_read_committed_count: usize,
+}
+
 async fn start_local_broker() -> (
     String,
     tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -236,20 +262,24 @@ fn wait_for_topic(bootstrap: &str, topic: &str, expected_partition_count: usize)
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
         if let Ok(metadata) = consumer.fetch_metadata(Some(topic), Duration::from_secs(1)) {
-            let topic_visible = metadata
+            let topic_ready = metadata
                 .topics()
                 .iter()
                 .find(|metadata_topic| metadata_topic.name() == topic)
                 .is_some_and(|metadata_topic| {
                     metadata_topic.partitions().len() >= expected_partition_count
+                        && metadata_topic
+                            .partitions()
+                            .iter()
+                            .all(|partition| partition.leader() >= 0)
                 });
-            if topic_visible {
+            if topic_ready {
                 return;
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("topic {topic} did not become visible with {expected_partition_count} partitions");
+    panic!("topic {topic} did not become ready with {expected_partition_count} partitions");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

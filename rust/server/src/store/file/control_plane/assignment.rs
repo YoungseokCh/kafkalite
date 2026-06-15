@@ -122,11 +122,7 @@ pub(super) fn ensure_assignment_ready(
 }
 
 fn parse_topics(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
-    use kafka_protocol::messages::ConsumerProtocolSubscription;
-    use kafka_protocol::protocol::Decodable;
-
-    let mut payload = Bytes::copy_from_slice(bytes);
-    let subscription = ConsumerProtocolSubscription::decode(&mut payload, 3)?;
+    let subscription = decode_subscription(bytes)?;
     Ok(subscription
         .topics
         .into_iter()
@@ -140,6 +136,7 @@ fn encode_assignment(assignments: &[(String, i32)]) -> Result<Vec<u8>> {
     use kafka_protocol::messages::{ConsumerProtocolAssignment, TopicName};
     use kafka_protocol::protocol::{Encodable, StrBytes};
 
+    const VERSION: i16 = 3;
     let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
     for (topic, partition) in assignments {
         by_topic.entry(topic.clone()).or_default().push(*partition);
@@ -155,8 +152,30 @@ fn encode_assignment(assignments: &[(String, i32)]) -> Result<Vec<u8>> {
         .collect();
     let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(partitions);
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&VERSION.to_be_bytes());
     assignment
-        .encode(&mut bytes, 3)
+        .encode(&mut bytes, VERSION)
         .map_err(|err| StoreError::Protocol(err.to_string()))?;
     Ok(bytes.to_vec())
+}
+
+fn decode_subscription(
+    bytes: &[u8],
+) -> anyhow::Result<kafka_protocol::messages::ConsumerProtocolSubscription> {
+    use bytes::Buf;
+    use kafka_protocol::messages::ConsumerProtocolSubscription;
+    use kafka_protocol::protocol::Decodable;
+
+    let mut prefixed = Bytes::copy_from_slice(bytes);
+    if prefixed.remaining() >= 2 {
+        let version = prefixed.get_i16();
+        if (0..=3).contains(&version) {
+            if let Ok(subscription) = ConsumerProtocolSubscription::decode(&mut prefixed, version) {
+                return Ok(subscription);
+            }
+        }
+    }
+
+    let mut legacy = Bytes::copy_from_slice(bytes);
+    ConsumerProtocolSubscription::decode(&mut legacy, 3)
 }

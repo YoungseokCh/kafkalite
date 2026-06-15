@@ -14,6 +14,8 @@ pub struct PartitionState {
     pub next_offset: i64,
     pub log_start_offset: i64,
     pub active_segment_base_offset: i64,
+    #[serde(default)]
+    pub current_leader_epoch: i32,
 }
 
 impl PartitionState {
@@ -22,6 +24,7 @@ impl PartitionState {
             next_offset: 0,
             log_start_offset: 0,
             active_segment_base_offset: 0,
+            current_leader_epoch: 0,
         }
     }
 }
@@ -39,6 +42,13 @@ pub struct ProducerSequenceState {
     pub last_sequence: i32,
     pub base_offset: i64,
     pub last_offset: i64,
+    pub last_transaction_marker: Option<TransactionMarkerState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionMarkerState {
+    pub committed: bool,
+    pub coordinator_epoch: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

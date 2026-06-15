@@ -15,6 +15,9 @@ fn truncated_tail_is_recovered_on_restart() {
         key: Some(Bytes::from_static(b"key")),
         value: Some(Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     store
         .append_records("recover.events", 0, &records, 10)
@@ -47,6 +50,9 @@ fn truncated_index_tail_is_rebuilt_on_restart() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"value")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         })
         .collect::<Vec<_>>();
     store
@@ -86,6 +92,9 @@ fn truncate_partition_discards_tail_and_rebuilds_indexes() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"value")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         })
         .collect::<Vec<_>>();
     store
@@ -116,6 +125,9 @@ fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"one")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 0,
@@ -126,6 +138,9 @@ fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"two")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
     ];
     store
@@ -192,11 +207,217 @@ fn appending_to_valid_kafka_layout_changes_only_expected_log_and_indexes() {
     replace_manifest_file_bytes(&mut expected, index_path, expected_index);
 
     let mut expected_time_index = before.get(time_index_path).unwrap().bytes.clone();
-    append_expected_time_index_entry(&mut expected_time_index, 100, 16, append_position);
+    append_expected_time_index_entry(&mut expected_time_index, 100, 16);
     replace_manifest_file_bytes(&mut expected, time_index_path, expected_time_index);
 
     assert_eq!(filesystem_manifest(dir.path()), expected);
     assert_eq!(root_directories(dir.path()), vec!["byte-exact.append-0"]);
+}
+
+#[test]
+fn opening_foreign_kafka_indexes_keeps_bytes_unchanged() {
+    let dir = tempdir().unwrap();
+    seed_foreign_kafka_layout(dir.path(), "foreign.open");
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let fetched = reopened.fetch_records("foreign.open", 0, 0, 10).unwrap();
+    drop(reopened);
+
+    assert_eq!(fetched.records.len(), 2);
+    assert_eq!(filesystem_manifest(dir.path()), before);
+}
+
+#[test]
+fn appending_to_foreign_kafka_indexes_changes_only_log_bytes() {
+    let dir = tempdir().unwrap();
+    seed_foreign_kafka_layout(dir.path(), "foreign.append");
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let appended = non_idempotent_record(0, 30, b"two");
+    reopened
+        .append_records("foreign.append", 0, std::slice::from_ref(&appended), 30)
+        .unwrap();
+    let fetched = reopened.fetch_records("foreign.append", 0, 0, 10).unwrap();
+    drop(reopened);
+
+    let mut expected = before.clone();
+    let log_path = "foreign.append-0/00000000000000000000.log";
+    let mut expected_log = before.get(log_path).unwrap().bytes.clone();
+    let expected_appended = BrokerRecord {
+        offset: 2,
+        ..appended.clone()
+    };
+    expected_log.extend_from_slice(
+        &StoredBatch::from_records(&[expected_appended])
+            .encode_binary()
+            .unwrap(),
+    );
+    replace_manifest_file_bytes(&mut expected, log_path, expected_log);
+
+    assert_eq!(
+        fetched
+            .records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(filesystem_manifest(dir.path()), expected);
+}
+
+#[test]
+fn appending_to_kafka_indexes_writes_kafka_format_entries_after_sparse_interval() {
+    let dir = tempdir().unwrap();
+    let existing_log_len = seed_kafka_indexed_layout(dir.path(), "kafka.index.append");
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let appended = BrokerRecord {
+        offset: 0,
+        timestamp_ms: 30,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"tail")),
+        headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
+    };
+    reopened
+        .append_records("kafka.index.append", 0, std::slice::from_ref(&appended), 30)
+        .unwrap();
+    drop(reopened);
+
+    let log_path = "kafka.index.append-0/00000000000000000000.log";
+    let index_path = "kafka.index.append-0/00000000000000000000.index";
+    let time_index_path = "kafka.index.append-0/00000000000000000000.timeindex";
+
+    let expected_appended = BrokerRecord {
+        offset: 2,
+        ..appended.clone()
+    };
+    let mut expected_log = before.get(log_path).unwrap().bytes.clone();
+    expected_log.extend_from_slice(
+        &StoredBatch::from_records(&[expected_appended])
+            .encode_binary()
+            .unwrap(),
+    );
+    let mut expected_index = before.get(index_path).unwrap().bytes.clone();
+    expected_index.extend_from_slice(&2_i32.to_be_bytes());
+    expected_index.extend_from_slice(&(existing_log_len as i32).to_be_bytes());
+
+    let mut expected_time_index = before.get(time_index_path).unwrap().bytes.clone();
+    expected_time_index.extend_from_slice(&30_i64.to_be_bytes());
+    expected_time_index.extend_from_slice(&2_i32.to_be_bytes());
+
+    let manifest = filesystem_manifest(dir.path());
+    assert_eq!(manifest.get(log_path).unwrap().bytes, expected_log);
+    assert_eq!(manifest.get(index_path).unwrap().bytes, expected_index);
+    assert_eq!(
+        manifest.get(time_index_path).unwrap().bytes,
+        expected_time_index
+    );
+}
+
+#[test]
+fn appending_below_kafka_sparse_interval_preserves_index_bytes() {
+    let dir = tempdir().unwrap();
+    seed_small_kafka_indexed_layout(dir.path(), "kafka.index.small");
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let appended = BrokerRecord {
+        offset: 0,
+        timestamp_ms: 30,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"tail")),
+        headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
+    };
+    reopened
+        .append_records("kafka.index.small", 0, std::slice::from_ref(&appended), 30)
+        .unwrap();
+    drop(reopened);
+
+    let mut expected = before.clone();
+    let log_path = "kafka.index.small-0/00000000000000000000.log";
+    let time_index_path = "kafka.index.small-0/00000000000000000000.timeindex";
+    let mut expected_log = before.get(log_path).unwrap().bytes.clone();
+    let expected_appended = BrokerRecord {
+        offset: 2,
+        ..appended.clone()
+    };
+    expected_log.extend_from_slice(
+        &StoredBatch::from_records(&[expected_appended])
+            .encode_binary()
+            .unwrap(),
+    );
+    replace_manifest_file_bytes(&mut expected, log_path, expected_log);
+
+    let mut expected_time_index = before.get(time_index_path).unwrap().bytes.clone();
+    expected_time_index.clear();
+    expected_time_index.extend_from_slice(&30_i64.to_be_bytes());
+    expected_time_index.extend_from_slice(&2_i32.to_be_bytes());
+    replace_manifest_file_bytes(&mut expected, time_index_path, expected_time_index);
+
+    assert_eq!(filesystem_manifest(dir.path()), expected);
+}
+
+#[test]
+fn appending_with_non_increasing_timestamp_does_not_extend_kafka_timeindex() {
+    let dir = tempdir().unwrap();
+    let existing_log_len = seed_kafka_indexed_layout(dir.path(), "kafka.time.same-ts");
+
+    let before = filesystem_manifest(dir.path());
+    let reopened = FileStore::open(dir.path()).unwrap();
+    let appended = BrokerRecord {
+        offset: 0,
+        timestamp_ms: 20,
+        producer_id: -1,
+        producer_epoch: -1,
+        sequence: 0,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"tail")),
+        headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
+    };
+    reopened
+        .append_records("kafka.time.same-ts", 0, std::slice::from_ref(&appended), 20)
+        .unwrap();
+    drop(reopened);
+
+    let mut expected = before.clone();
+    let log_path = "kafka.time.same-ts-0/00000000000000000000.log";
+    let index_path = "kafka.time.same-ts-0/00000000000000000000.index";
+    let mut expected_log = before.get(log_path).unwrap().bytes.clone();
+    let expected_appended = BrokerRecord {
+        offset: 2,
+        ..appended.clone()
+    };
+    expected_log.extend_from_slice(
+        &StoredBatch::from_records(&[expected_appended])
+            .encode_binary()
+            .unwrap(),
+    );
+    replace_manifest_file_bytes(&mut expected, log_path, expected_log);
+
+    let mut expected_index = before.get(index_path).unwrap().bytes.clone();
+    expected_index.extend_from_slice(&2_i32.to_be_bytes());
+    expected_index.extend_from_slice(&(existing_log_len as i32).to_be_bytes());
+    replace_manifest_file_bytes(&mut expected, index_path, expected_index);
+
+    assert_eq!(filesystem_manifest(dir.path()), expected);
 }
 
 #[test]
@@ -233,6 +454,111 @@ fn handoff_native_kafka_layout_appends_and_fetches_contiguous_offsets() {
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
+}
+
+fn seed_foreign_kafka_layout(root: &std::path::Path, topic: &str) {
+    let partition_dir = root.join(format!("{topic}-0"));
+    std::fs::create_dir_all(&partition_dir).unwrap();
+    let existing_records = [
+        non_idempotent_record(0, 10, b"zero"),
+        non_idempotent_record(1, 20, b"one"),
+    ];
+    std::fs::File::create(partition_dir.join("00000000000000000000.log"))
+        .unwrap()
+        .write_all(
+            &StoredBatch::from_records(&existing_records)
+                .encode_binary()
+                .unwrap(),
+        )
+        .unwrap();
+    std::fs::File::create(partition_dir.join("00000000000000000000.index"))
+        .unwrap()
+        .write_all(b"foreign-kafka-index")
+        .unwrap();
+    std::fs::File::create(partition_dir.join("00000000000000000000.timeindex"))
+        .unwrap()
+        .write_all(b"foreign-kafka-timeindex")
+        .unwrap();
+}
+
+fn seed_kafka_indexed_layout(root: &std::path::Path, topic: &str) -> u64 {
+    let partition_dir = root.join(format!("{topic}-0"));
+    std::fs::create_dir_all(&partition_dir).unwrap();
+    let existing_records = [
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from(vec![b'x'; 5000])),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+        BrokerRecord {
+            offset: 1,
+            timestamp_ms: 20,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"key")),
+            value: Some(Bytes::from_static(b"one")),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+    ];
+    let log_bytes = StoredBatch::from_records(&existing_records)
+        .encode_binary()
+        .unwrap();
+    let log_path = partition_dir.join("00000000000000000000.log");
+    std::fs::File::create(&log_path)
+        .unwrap()
+        .write_all(&log_bytes)
+        .unwrap();
+    std::fs::File::create(partition_dir.join("00000000000000000000.index"))
+        .unwrap()
+        .write_all(&[0, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let mut timeindex = Vec::new();
+    timeindex.extend_from_slice(&20_i64.to_be_bytes());
+    timeindex.extend_from_slice(&1_i32.to_be_bytes());
+    std::fs::File::create(partition_dir.join("00000000000000000000.timeindex"))
+        .unwrap()
+        .write_all(&timeindex)
+        .unwrap();
+    log_bytes.len() as u64
+}
+
+fn seed_small_kafka_indexed_layout(root: &std::path::Path, topic: &str) {
+    let partition_dir = root.join(format!("{topic}-0"));
+    std::fs::create_dir_all(&partition_dir).unwrap();
+    let existing_records = [
+        non_idempotent_record(0, 10, b"zero"),
+        non_idempotent_record(1, 20, b"one"),
+    ];
+    let log_bytes = StoredBatch::from_records(&existing_records)
+        .encode_binary()
+        .unwrap();
+    std::fs::File::create(partition_dir.join("00000000000000000000.log"))
+        .unwrap()
+        .write_all(&log_bytes)
+        .unwrap();
+    std::fs::File::create(partition_dir.join("00000000000000000000.index"))
+        .unwrap()
+        .write_all(&[0, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let mut timeindex = Vec::new();
+    timeindex.extend_from_slice(&20_i64.to_be_bytes());
+    timeindex.extend_from_slice(&1_i32.to_be_bytes());
+    std::fs::File::create(partition_dir.join("00000000000000000000.timeindex"))
+        .unwrap()
+        .write_all(&timeindex)
+        .unwrap();
 }
 
 #[test]
@@ -291,5 +617,8 @@ fn non_idempotent_record(offset: i64, timestamp_ms: i64, value: &'static [u8]) -
         key: Some(Bytes::from_static(b"key")),
         value: Some(Bytes::from_static(value)),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }
 }

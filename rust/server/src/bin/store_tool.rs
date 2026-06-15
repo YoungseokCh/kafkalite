@@ -111,6 +111,9 @@ mod tests {
                     key: Some(Bytes::from_static(b"key")),
                     value: Some(Bytes::from_static(b"value")),
                     headers_json: b"[]".to_vec(),
+                    partition_leader_epoch: 0,
+                    transactional: false,
+                    control: false,
                 }],
                 20,
             )
@@ -141,6 +144,9 @@ mod tests {
                     key: Some(Bytes::from_static(b"key")),
                     value: Some(Bytes::from_static(b"value")),
                     headers_json: b"[]".to_vec(),
+                    partition_leader_epoch: 0,
+                    transactional: false,
+                    control: false,
                 }],
                 20,
             )

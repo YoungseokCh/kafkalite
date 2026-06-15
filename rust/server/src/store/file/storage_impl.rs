@@ -2,13 +2,14 @@ use super::FileStore;
 use crate::store::{
     BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
     OffsetCommitRequest, ProducerSession, ReplicaFetchResult, Result, Storage, SyncGroupResult,
-    TopicMetadata,
+    TopicMetadata, TransactionMarkerRequest,
 };
 
 use super::control_plane::SyncGroupStateRequest;
 use super::data_plane::AppendDecision;
 use super::log::StoredBatch;
 use super::replica_prepare::strict_replica_prepare;
+use super::transaction_state;
 
 impl Storage for FileStore {
     fn topic_metadata(
@@ -61,8 +62,52 @@ impl Storage for FileStore {
                     partition,
                     &StoredBatch::from_records(&prepared.records),
                 )?;
+                self.logs
+                    .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
+                let active_segment_base_offset =
+                    self.logs.active_segment_base_offset(topic, partition)?;
                 let result = (prepared.base_offset, prepared.last_offset);
                 data.finish_append(&prepared, now_ms)?;
+                data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
+                Ok(result)
+            }
+        }
+    }
+
+    fn write_transaction_marker(
+        &self,
+        request: TransactionMarkerRequest<'_>,
+    ) -> Result<(i64, i64)> {
+        let mut data = self.data.lock().expect("file store mutex poisoned");
+        let decision = data.prepare_transaction_marker(request)?;
+        match decision {
+            AppendDecision::Duplicate {
+                base_offset,
+                last_offset,
+            } => Ok((base_offset, last_offset)),
+            AppendDecision::Append(prepared) => {
+                self.logs
+                    .ensure_partition(request.topic, request.partition)?;
+                self.logs.append_batch(
+                    request.topic,
+                    request.partition,
+                    &StoredBatch::from_records(&prepared.records),
+                )?;
+                self.logs.update_root_checkpoints(
+                    request.topic,
+                    request.partition,
+                    prepared.last_offset + 1,
+                )?;
+                let active_segment_base_offset = self
+                    .logs
+                    .active_segment_base_offset(request.topic, request.partition)?;
+                let result = (prepared.base_offset, prepared.last_offset);
+                data.finish_append(&prepared, request.now_ms)?;
+                data.set_active_segment_base_offset(
+                    request.topic,
+                    request.partition,
+                    active_segment_base_offset,
+                )?;
                 Ok(result)
             }
         }
@@ -150,7 +195,11 @@ impl Storage for FileStore {
             partition,
             &StoredBatch::from_records(&prepared.records),
         )?;
+        self.logs
+            .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
+        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
         data.finish_append(&prepared, now_ms)?;
+        data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
         data.latest_offset(topic, partition)
     }
 
@@ -172,7 +221,11 @@ impl Storage for FileStore {
                 partition,
                 &StoredBatch::from_records(&prepared.records),
             )?;
+            self.logs
+                .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
         }
+        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
+        data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
         data.finish_replica_append(
             prepared.as_ref(),
             topic,
@@ -186,7 +239,9 @@ impl Storage for FileStore {
         self.logs
             .truncate_to_offset(topic, partition, next_offset)?;
         let mut data = self.data.lock().expect("file store mutex poisoned");
-        data.reconcile_partition_offset(topic, partition, next_offset)
+        data.reconcile_partition_offset(topic, partition, next_offset)?;
+        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
+        data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)
     }
 
     fn list_offsets(
@@ -195,6 +250,15 @@ impl Storage for FileStore {
         partition: i32,
     ) -> Result<(ListOffsetResult, ListOffsetResult)> {
         self.partition_offsets(topic, partition)
+    }
+
+    fn list_offset_for_timestamp(
+        &self,
+        topic: &str,
+        partition: i32,
+        timestamp_ms: i64,
+    ) -> Result<Option<ListOffsetResult>> {
+        self.partition_offset_for_timestamp(topic, partition, timestamp_ms)
     }
 
     fn join_group(&self, request: GroupJoinRequest<'_>) -> Result<GroupJoinResult> {
@@ -243,6 +307,22 @@ impl Storage for FileStore {
         control.leave_group(group_id, member_id, now_ms)
     }
 
+    fn validate_offset_commit(&self, request: OffsetCommitRequest<'_>) -> Result<()> {
+        let known_partition = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .has_partition(request.topic, request.partition);
+        if !known_partition {
+            return Err(crate::store::StoreError::UnknownTopicOrPartition {
+                topic: request.topic.to_string(),
+                partition: request.partition,
+            });
+        }
+        let mut control = self.control.lock().expect("file store mutex poisoned");
+        control.validate_offset_commit(request)
+    }
+
     fn commit_offset(&self, request: OffsetCommitRequest<'_>) -> Result<()> {
         let known_partition = self
             .data
@@ -273,5 +353,65 @@ impl Storage for FileStore {
         }
         let control = self.control.lock().expect("file store mutex poisoned");
         Ok(control.fetch_offset(group_id, topic, partition))
+    }
+
+    fn transaction_sessions(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::store::TransactionSessionState>> {
+        Ok(self
+            .transaction_sessions
+            .lock()
+            .expect("file store mutex poisoned")
+            .clone())
+    }
+
+    fn persist_transaction_session(
+        &self,
+        transactional_id: &str,
+        session: &crate::store::TransactionSessionState,
+        now_ms: i64,
+    ) -> Result<()> {
+        let partition = transaction_state::partition_for_transactional_id(transactional_id);
+        let mut next_offsets = self
+            .transaction_records
+            .lock()
+            .expect("file store mutex poisoned");
+        let record_offset = next_offsets.get(&partition).copied().unwrap_or(0);
+        transaction_state::append_session(
+            &self.logs,
+            record_offset,
+            partition,
+            transactional_id,
+            session,
+            now_ms,
+        )?;
+        next_offsets.insert(partition, record_offset + 1);
+        self.transaction_sessions
+            .lock()
+            .expect("file store mutex poisoned")
+            .insert(transactional_id.to_string(), session.clone());
+        Ok(())
+    }
+
+    fn delete_transaction_session(&self, transactional_id: &str, now_ms: i64) -> Result<()> {
+        let partition = transaction_state::partition_for_transactional_id(transactional_id);
+        let mut next_offsets = self
+            .transaction_records
+            .lock()
+            .expect("file store mutex poisoned");
+        let record_offset = next_offsets.get(&partition).copied().unwrap_or(0);
+        transaction_state::append_tombstone(
+            &self.logs,
+            record_offset,
+            partition,
+            transactional_id,
+            now_ms,
+        )?;
+        next_offsets.insert(partition, record_offset + 1);
+        self.transaction_sessions
+            .lock()
+            .expect("file store mutex poisoned")
+            .remove(transactional_id);
+        Ok(())
     }
 }

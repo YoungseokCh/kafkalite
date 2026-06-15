@@ -79,9 +79,9 @@ impl StoredBatch {
 
 fn to_kafka_record(record: &BrokerRecord) -> Record {
     Record {
-        transactional: false,
-        control: false,
-        partition_leader_epoch: 0,
+        transactional: record.transactional,
+        control: record.control,
+        partition_leader_epoch: record.partition_leader_epoch,
         producer_id: record.producer_id,
         producer_epoch: record.producer_epoch,
         timestamp_type: TimestampType::Creation,
@@ -96,7 +96,7 @@ fn to_kafka_record(record: &BrokerRecord) -> Record {
 
 fn kafka_sequence(record: &BrokerRecord) -> i32 {
     if record.producer_id < 0 {
-        record.offset as i32
+        -1
     } else {
         record.sequence
     }
@@ -109,6 +109,9 @@ fn to_broker_record(record: Record) -> BrokerRecord {
         producer_id: record.producer_id,
         producer_epoch: record.producer_epoch,
         sequence: record.sequence,
+        partition_leader_epoch: record.partition_leader_epoch,
+        transactional: record.transactional,
+        control: record.control,
         key: record.key,
         value: record.value,
         headers_json: serde_json::to_vec(

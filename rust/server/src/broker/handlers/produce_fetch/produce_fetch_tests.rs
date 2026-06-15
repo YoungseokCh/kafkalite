@@ -7,6 +7,7 @@ use kafka_protocol::messages::{FetchRequest, ListOffsetsRequest, ProduceRequest,
 use kafka_protocol::records::{
     Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
+use std::path::Path;
 use tempfile::tempdir;
 
 use crate::cluster::{ControllerQuorumVoter, ProcessRole};
@@ -46,9 +47,19 @@ mod fetch_offset_tests;
 #[path = "produce_fetch_tests/fetch_long_poll_tests.rs"]
 mod fetch_long_poll_tests;
 
+#[path = "produce_fetch_tests/write_txn_markers_tests.rs"]
+mod write_txn_markers_tests;
+
+#[path = "produce_fetch_tests/transaction_api_tests.rs"]
+mod transaction_api_tests;
+
 fn test_broker() -> KafkaBroker {
     let dir = tempdir().unwrap().keep();
-    let config = Config::single_node(dir.join("data"), 9092, 1);
+    broker_for_data_dir(&dir.join("data"))
+}
+
+fn broker_for_data_dir(data_dir: &Path) -> KafkaBroker {
+    let config = Config::single_node(data_dir.to_path_buf(), 9092, 1);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     KafkaBroker::new(config, store).unwrap()
 }
@@ -69,8 +80,59 @@ fn produce_request_for_partition(
     producer_epoch: i16,
     sequence: i32,
 ) -> ProduceRequest {
+    produce_request_for_partition_with_transactional_flag(
+        topic,
+        partition,
+        producer_id,
+        producer_epoch,
+        sequence,
+        false,
+    )
+}
+
+fn transactional_produce_request(
+    topic: &str,
+    producer_id: i64,
+    producer_epoch: i16,
+    sequence: i32,
+) -> ProduceRequest {
+    produce_request_for_partition_with_transactional_flag(
+        topic,
+        0,
+        producer_id,
+        producer_epoch,
+        sequence,
+        true,
+    )
+}
+
+fn transactional_produce_request_for_partition(
+    topic: &str,
+    partition: i32,
+    producer_id: i64,
+    producer_epoch: i16,
+    sequence: i32,
+) -> ProduceRequest {
+    produce_request_for_partition_with_transactional_flag(
+        topic,
+        partition,
+        producer_id,
+        producer_epoch,
+        sequence,
+        true,
+    )
+}
+
+fn produce_request_for_partition_with_transactional_flag(
+    topic: &str,
+    partition: i32,
+    producer_id: i64,
+    producer_epoch: i16,
+    sequence: i32,
+    transactional: bool,
+) -> ProduceRequest {
     let records = vec![Record {
-        transactional: false,
+        transactional,
         control: false,
         partition_leader_epoch: 0,
         producer_id,

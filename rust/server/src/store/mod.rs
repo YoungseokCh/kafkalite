@@ -6,8 +6,10 @@ pub use error::{Result, StoreError};
 pub use file::{FileStore, StorageSummary, TopicPartitionSummary, TopicSummary};
 pub use models::{
     BrokerRecord, FetchResult, GroupJoinResult, GroupMember, ListOffsetResult, PartitionMetadata,
-    ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult, TopicMetadata,
+    PendingOffsetCommit, ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult,
+    TopicMetadata, TransactionSessionState, TransactionStatus,
 };
+use std::collections::BTreeMap;
 
 pub const DEFAULT_PARTITION: i32 = 0;
 
@@ -34,6 +36,18 @@ pub struct OffsetCommitRequest<'a> {
     pub now_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionMarkerRequest<'a> {
+    pub topic: &'a str,
+    pub partition: i32,
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub coordinator_epoch: i32,
+    pub committed: bool,
+    pub partition_leader_epoch: i32,
+    pub now_ms: i64,
+}
+
 pub trait Storage: Send + Sync {
     fn topic_metadata(&self, topics: Option<&[String]>, now_ms: i64) -> Result<Vec<TopicMetadata>>;
     fn ensure_topic(&self, topic: &str, partition_count: i32, now_ms: i64) -> Result<()>;
@@ -45,6 +59,8 @@ pub trait Storage: Send + Sync {
         records: &[BrokerRecord],
         now_ms: i64,
     ) -> Result<(i64, i64)>;
+    fn write_transaction_marker(&self, request: TransactionMarkerRequest<'_>)
+    -> Result<(i64, i64)>;
     fn fetch_records(
         &self,
         topic: &str,
@@ -87,6 +103,12 @@ pub trait Storage: Send + Sync {
         topic: &str,
         partition: i32,
     ) -> Result<(ListOffsetResult, ListOffsetResult)>;
+    fn list_offset_for_timestamp(
+        &self,
+        topic: &str,
+        partition: i32,
+        timestamp_ms: i64,
+    ) -> Result<Option<ListOffsetResult>>;
     fn join_group(&self, request: GroupJoinRequest<'_>) -> Result<GroupJoinResult>;
     fn sync_group(
         &self,
@@ -105,6 +127,15 @@ pub trait Storage: Send + Sync {
         now_ms: i64,
     ) -> Result<()>;
     fn leave_group(&self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()>;
+    fn validate_offset_commit(&self, request: OffsetCommitRequest<'_>) -> Result<()>;
     fn commit_offset(&self, request: OffsetCommitRequest<'_>) -> Result<()>;
     fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Result<Option<i64>>;
+    fn transaction_sessions(&self) -> Result<BTreeMap<String, TransactionSessionState>>;
+    fn persist_transaction_session(
+        &self,
+        transactional_id: &str,
+        session: &TransactionSessionState,
+        now_ms: i64,
+    ) -> Result<()>;
+    fn delete_transaction_session(&self, transactional_id: &str, now_ms: i64) -> Result<()>;
 }

@@ -8,7 +8,8 @@ use crate::store::{
 
 use super::TopicSummary;
 use super::internal_topics::is_internal_topic_name;
-use super::state::{ProducerState, TopicState};
+use super::log::RecordLog;
+use super::state::{ProducerSequenceState, ProducerState, TopicState, TransactionMarkerState};
 use super::topic_catalog::{PartitionRuntime, TopicCatalog, TopicRuntime};
 
 pub struct DataPlaneState {
@@ -140,6 +141,22 @@ impl DataPlaneState {
             .ensure_known_partitions(topic, partitions, now_ms)
     }
 
+    pub fn set_active_segment_base_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        active_segment_base_offset: i64,
+    ) -> Result<()> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        runtime.state.active_segment_base_offset = active_segment_base_offset;
+        Ok(())
+    }
+
     pub fn finish_replica_append(
         &mut self,
         prepared: Option<&PreparedAppend>,
@@ -157,6 +174,48 @@ impl DataPlaneState {
             high_watermark,
             log_end_offset,
         })
+    }
+
+    pub fn recover_producer_state(&mut self, logs: &RecordLog) -> Result<()> {
+        let mut max_producer_id = self.next_producer_id - 1;
+        for (topic, partition) in logs.discover_user_partitions()? {
+            let records = logs.read_all_records(&topic, partition)?;
+            for record in records {
+                if record.producer_id < 0 {
+                    continue;
+                }
+                max_producer_id = max_producer_id.max(record.producer_id);
+                let runtime = self.partition_state_mut(&topic, partition).ok_or_else(|| {
+                    StoreError::UnknownTopicOrPartition {
+                        topic: topic.clone(),
+                        partition,
+                    }
+                })?;
+                let entry = runtime
+                    .producer_sequences
+                    .entry(record.producer_id)
+                    .or_insert(ProducerSequenceState {
+                        producer_epoch: record.producer_epoch,
+                        first_sequence: record.sequence,
+                        last_sequence: record.sequence,
+                        base_offset: record.offset,
+                        last_offset: record.offset,
+                        last_transaction_marker: transaction_marker_state(&record),
+                    });
+                if record.producer_epoch > entry.producer_epoch {
+                    entry.producer_epoch = record.producer_epoch;
+                    entry.first_sequence = record.sequence;
+                    entry.base_offset = record.offset;
+                }
+                if record.offset >= entry.last_offset {
+                    entry.last_sequence = record.sequence;
+                    entry.last_offset = record.offset;
+                    entry.last_transaction_marker = transaction_marker_state(&record);
+                }
+            }
+        }
+        self.next_producer_id = self.next_producer_id.max(max_producer_id + 1);
+        Ok(())
     }
 
     fn ensure_topic_runtime(
@@ -203,4 +262,34 @@ impl DataPlaneState {
         runtime.high_watermark = leader_high_watermark.min(runtime.state.next_offset);
         Ok(runtime.high_watermark)
     }
+}
+
+fn transaction_marker_state(record: &BrokerRecord) -> Option<TransactionMarkerState> {
+    if !record.control {
+        return None;
+    }
+    let committed = parse_transaction_marker_key(record.key.as_deref()?)?;
+    let coordinator_epoch = parse_transaction_marker_value(record.value.as_deref()?)?;
+    Some(TransactionMarkerState {
+        committed,
+        coordinator_epoch,
+    })
+}
+
+fn parse_transaction_marker_key(key: &[u8]) -> Option<bool> {
+    if key.len() < 4 {
+        return None;
+    }
+    match i16::from_be_bytes([key[2], key[3]]) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+fn parse_transaction_marker_value(value: &[u8]) -> Option<i32> {
+    if value.len() < 6 {
+        return None;
+    }
+    Some(i32::from_be_bytes([value[2], value[3], value[4], value[5]]))
 }

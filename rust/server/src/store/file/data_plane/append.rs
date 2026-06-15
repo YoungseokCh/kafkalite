@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::store::{BrokerRecord, Result, StoreError};
+use bytes::Bytes;
 
-use super::super::state::ProducerSequenceState;
+use crate::store::{BrokerRecord, Result, StoreError, TransactionMarkerRequest};
+
+use super::super::state::{ProducerSequenceState, TransactionMarkerState};
 use super::{AppendDecision, DataPlaneState, PreparedAppend};
 
 impl DataPlaneState {
@@ -34,6 +36,7 @@ impl DataPlaneState {
         }
 
         let base_offset = runtime.state.next_offset;
+        let current_leader_epoch = runtime.state.current_leader_epoch;
         let appended = records
             .iter()
             .enumerate()
@@ -43,6 +46,9 @@ impl DataPlaneState {
                 producer_id: record.producer_id,
                 producer_epoch: record.producer_epoch,
                 sequence: record.sequence,
+                partition_leader_epoch: current_leader_epoch,
+                transactional: record.transactional,
+                control: record.control,
                 key: record.key.clone(),
                 value: record.value.clone(),
                 headers_json: record.headers_json.clone(),
@@ -97,6 +103,39 @@ impl DataPlaneState {
         }))
     }
 
+    pub fn prepare_transaction_marker(
+        &mut self,
+        request: TransactionMarkerRequest<'_>,
+    ) -> Result<AppendDecision> {
+        let sequence = next_transaction_marker_sequence(
+            self.next_producer_id,
+            self.partition_state(request.topic, request.partition)
+                .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                    topic: request.topic.to_string(),
+                    partition: request.partition,
+                })?
+                .producer_sequences_ref(),
+            request.producer_id,
+            request.producer_epoch,
+            request.committed,
+            request.coordinator_epoch,
+        )?;
+        let marker = BrokerRecord {
+            offset: 0,
+            timestamp_ms: request.now_ms,
+            producer_id: request.producer_id,
+            producer_epoch: request.producer_epoch,
+            sequence,
+            partition_leader_epoch: request.partition_leader_epoch,
+            transactional: true,
+            control: true,
+            key: Some(transaction_marker_key(request.committed)),
+            value: Some(transaction_marker_value(request.coordinator_epoch)),
+            headers_json: b"[]".to_vec(),
+        };
+        self.prepare_append(request.topic, request.partition, &[marker], request.now_ms)
+    }
+
     pub(super) fn apply_prepared_append(
         &mut self,
         prepared: &PreparedAppend,
@@ -125,6 +164,7 @@ impl DataPlaneState {
                     last_sequence: record.sequence,
                     base_offset: prepared.base_offset,
                     last_offset: record.offset,
+                    last_transaction_marker: transaction_marker_state(record),
                 },
             );
         }
@@ -220,6 +260,89 @@ fn validate_replica_offsets(next_offset: i64, records: &[BrokerRecord]) -> Resul
         }
     }
     Ok(())
+}
+
+fn next_transaction_marker_sequence(
+    next_producer_id: i64,
+    producer_sequences: &BTreeMap<i64, ProducerSequenceState>,
+    producer_id: i64,
+    producer_epoch: i16,
+    committed: bool,
+    coordinator_epoch: i32,
+) -> Result<i32> {
+    if producer_id < 0 {
+        return Ok(0);
+    }
+    if producer_id >= next_producer_id {
+        return Err(StoreError::UnknownProducerId { producer_id });
+    }
+    match producer_sequences.get(&producer_id) {
+        Some(sequence) if producer_epoch < sequence.producer_epoch => {
+            Err(StoreError::StaleProducerEpoch {
+                producer_id,
+                expected: sequence.producer_epoch,
+                actual: producer_epoch,
+            })
+        }
+        Some(sequence) if producer_epoch == sequence.producer_epoch => {
+            if sequence.last_transaction_marker.as_ref()
+                == Some(&TransactionMarkerState {
+                    committed,
+                    coordinator_epoch,
+                })
+            {
+                Ok(sequence.last_sequence)
+            } else {
+                Ok(sequence.last_sequence + 1)
+            }
+        }
+        _ => Ok(0),
+    }
+}
+
+fn transaction_marker_key(committed: bool) -> Bytes {
+    let marker_type = if committed { 1_i16 } else { 0_i16 };
+    let mut key = Vec::with_capacity(4);
+    key.extend_from_slice(&0_i16.to_be_bytes());
+    key.extend_from_slice(&marker_type.to_be_bytes());
+    Bytes::from(key)
+}
+
+fn transaction_marker_value(coordinator_epoch: i32) -> Bytes {
+    let mut value = Vec::with_capacity(6);
+    value.extend_from_slice(&0_i16.to_be_bytes());
+    value.extend_from_slice(&coordinator_epoch.to_be_bytes());
+    Bytes::from(value)
+}
+
+fn transaction_marker_state(record: &BrokerRecord) -> Option<TransactionMarkerState> {
+    if !record.control {
+        return None;
+    }
+    let committed = parse_transaction_marker_key(record.key.as_deref()?)?;
+    let coordinator_epoch = parse_transaction_marker_value(record.value.as_deref()?)?;
+    Some(TransactionMarkerState {
+        committed,
+        coordinator_epoch,
+    })
+}
+
+fn parse_transaction_marker_key(key: &[u8]) -> Option<bool> {
+    if key.len() < 4 {
+        return None;
+    }
+    match i16::from_be_bytes([key[2], key[3]]) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+fn parse_transaction_marker_value(value: &[u8]) -> Option<i32> {
+    if value.len() < 6 {
+        return None;
+    }
+    Some(i32::from_be_bytes([value[2], value[3], value[4], value[5]]))
 }
 
 struct ProducerBatchInfo {

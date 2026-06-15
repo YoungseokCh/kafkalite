@@ -15,6 +15,9 @@ fn sample_batch(offset: i64) -> StoredBatch {
         key: None,
         value: Some(bytes::Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }])
 }
 
@@ -60,7 +63,7 @@ fn recover_partition_truncates_invalid_batch_payload() {
     let log = RecordLog::open(dir.path()).unwrap();
     log.ensure_partition("broken", 0).unwrap();
 
-    let segment = log.segment_path("broken", 0);
+    let segment = log.segment_paths("broken", 0).unwrap().pop().unwrap().log;
     let mut file = OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -95,7 +98,12 @@ fn read_records_scans_log_when_index_file_missing() {
     let log = RecordLog::open(dir.path()).unwrap();
     log.append_batch("index-missing", 0, &sample_batch(0))
         .unwrap();
-    std::fs::remove_file(log.index_path("index-missing", 0)).unwrap();
+    let segment = log
+        .segment_paths("index-missing", 0)
+        .unwrap()
+        .pop()
+        .unwrap();
+    std::fs::remove_file(segment.index).unwrap();
 
     let records = log.read_records("index-missing", 0, 0, 10).unwrap();
     assert_eq!(records.len(), 1);
@@ -118,6 +126,9 @@ fn read_records_for_client_filters_records_before_start_offset_within_batch() {
                 key: None,
                 value: Some(bytes::Bytes::from_static(b"value-0")),
                 headers_json: b"[]".to_vec(),
+                partition_leader_epoch: 0,
+                transactional: false,
+                control: false,
             },
             BrokerRecord {
                 offset: 1,
@@ -128,6 +139,9 @@ fn read_records_for_client_filters_records_before_start_offset_within_batch() {
                 key: None,
                 value: Some(bytes::Bytes::from_static(b"value-1")),
                 headers_json: b"[]".to_vec(),
+                partition_leader_epoch: 0,
+                transactional: false,
+                control: false,
             },
         ]),
     )
@@ -144,4 +158,79 @@ fn read_records_for_client_filters_records_before_start_offset_within_batch() {
             .collect::<Vec<_>>(),
         vec![1]
     );
+}
+
+#[test]
+fn rolls_to_new_segment_when_partition_exceeds_segment_bytes() {
+    let dir = tempdir().unwrap();
+    let log = RecordLog::open(dir.path()).unwrap();
+    let value = vec![b'x'; DEFAULT_POLICY.segment_bytes as usize];
+    log.append_batch(
+        "rolled",
+        0,
+        &StoredBatch::from_records(&[BrokerRecord {
+            offset: 0,
+            timestamp_ms: 100,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: None,
+            value: Some(bytes::Bytes::from(value.clone())),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        }]),
+    )
+    .unwrap();
+    log.append_batch(
+        "rolled",
+        0,
+        &StoredBatch::from_records(&[BrokerRecord {
+            offset: 1,
+            timestamp_ms: 101,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: None,
+            value: Some(bytes::Bytes::from(value)),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        }]),
+    )
+    .unwrap();
+
+    let segments = log.segment_paths("rolled", 0).unwrap();
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].base_offset, 0);
+    assert_eq!(segments[1].base_offset, 1);
+}
+
+#[test]
+fn stored_batch_round_trips_transactional_metadata() {
+    let batch = StoredBatch::from_records(&[BrokerRecord {
+        offset: 5,
+        timestamp_ms: 123,
+        producer_id: 77,
+        producer_epoch: 2,
+        sequence: 9,
+        key: Some(bytes::Bytes::from_static(b"k")),
+        value: Some(bytes::Bytes::from_static(b"v")),
+        headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 4,
+        transactional: true,
+        control: false,
+    }]);
+
+    let encoded = batch.encode_binary().unwrap();
+    let decoded = StoredBatch::decode_binary(&encoded).unwrap();
+    let record = &decoded.records[0];
+
+    assert_eq!(record.partition_leader_epoch, 4);
+    assert!(record.transactional);
+    assert!(!record.control);
+    assert_eq!(record.producer_id, 77);
+    assert_eq!(record.producer_epoch, 2);
 }

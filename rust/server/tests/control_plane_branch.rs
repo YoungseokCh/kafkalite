@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use kafka_protocol::messages::{ConsumerProtocolAssignment, ConsumerProtocolSubscription};
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use tempfile::tempdir;
@@ -14,13 +14,15 @@ fn encode_subscription(topics: &[&str]) -> Vec<u8> {
             .collect(),
     );
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     subscription.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }
 
 fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
     let mut payload = Bytes::copy_from_slice(bytes);
-    let assignment = ConsumerProtocolAssignment::decode(&mut payload, 3).unwrap();
+    let version = payload.get_i16();
+    let assignment = ConsumerProtocolAssignment::decode(&mut payload, version).unwrap();
     assignment
         .assigned_partitions
         .into_iter()

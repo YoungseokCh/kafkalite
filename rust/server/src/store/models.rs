@@ -19,6 +19,9 @@ pub struct BrokerRecord {
     pub producer_id: i64,
     pub producer_epoch: i16,
     pub sequence: i32,
+    pub partition_leader_epoch: i32,
+    pub transactional: bool,
+    pub control: bool,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
     pub headers_json: Vec<u8>,
@@ -74,4 +77,43 @@ pub struct GroupJoinResult {
 pub struct SyncGroupResult {
     pub protocol_name: String,
     pub assignment: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOffsetCommit {
+    pub group_id: String,
+    pub member_id: String,
+    pub generation_id: i32,
+    pub topic: String,
+    pub partition: i32,
+    pub next_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionSessionState {
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub transaction_timeout_ms: i32,
+    pub last_updated_ms: i64,
+    #[serde(default = "default_transaction_start_timestamp_ms")]
+    pub transaction_start_timestamp_ms: i64,
+    #[serde(default)]
+    pub fenced: bool,
+    pub status: TransactionStatus,
+    pub partitions: Vec<(String, i32)>,
+    pub pending_offset_commits: Vec<PendingOffsetCommit>,
+}
+
+fn default_transaction_start_timestamp_ms() -> i64 {
+    -1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransactionStatus {
+    Empty,
+    Ongoing,
+    PrepareCommit,
+    PrepareAbort,
+    CompleteCommit,
+    CompleteAbort,
 }

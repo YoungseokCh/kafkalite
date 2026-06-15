@@ -27,4 +27,19 @@ impl FileStore {
             },
         ))
     }
+
+    pub(super) fn partition_offset_for_timestamp(
+        &self,
+        topic: &str,
+        partition: i32,
+        timestamp_ms: i64,
+    ) -> Result<Option<ListOffsetResult>> {
+        Ok(self
+            .logs
+            .offset_for_timestamp(topic, partition, timestamp_ms)?
+            .map(|(offset, timestamp_ms)| ListOffsetResult {
+                offset,
+                timestamp_ms,
+            }))
+    }
 }

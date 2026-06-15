@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use bytes::{Buf, Bytes};
 
@@ -34,7 +34,7 @@ pub(super) fn recover_topic_states(logs: &RecordLog) -> Result<BTreeMap<String, 
 }
 
 fn apply_metadata_record(
-    topics: &mut BTreeMap<String, BTreeSet<i32>>,
+    topics: &mut BTreeMap<String, BTreeMap<i32, i32>>,
     topic_ids: &mut BTreeMap<TopicId, String>,
     value: &[u8],
 ) -> Result<()> {
@@ -61,12 +61,14 @@ fn apply_metadata_record(
         PARTITION_RECORD_API_KEY
             if (PARTITION_RECORD_MIN_VERSION..=PARTITION_RECORD_MAX_VERSION).contains(&version) =>
         {
-            if let Some((topic_id, partition)) = decode_partition_record(&mut bytes, version)? {
+            if let Some((topic_id, partition, leader_epoch)) =
+                decode_partition_record(&mut bytes, version)?
+            {
                 if let Some(topic_name) = topic_ids.get(&topic_id) {
                     topics
                         .entry(topic_name.clone())
                         .or_default()
-                        .insert(partition);
+                        .insert(partition, leader_epoch);
                 }
             }
         }
@@ -86,7 +88,7 @@ fn decode_topic_record(bytes: &mut Bytes) -> Result<Option<(TopicId, String)>> {
     Ok(Some((topic_id, name)))
 }
 
-fn decode_partition_record(bytes: &mut Bytes, version: u32) -> Result<Option<(TopicId, i32)>> {
+fn decode_partition_record(bytes: &mut Bytes, version: u32) -> Result<Option<(TopicId, i32, i32)>> {
     if bytes.remaining() < 4 {
         return Ok(None);
     }
@@ -101,12 +103,14 @@ fn decode_partition_record(bytes: &mut Bytes, version: u32) -> Result<Option<(To
     if bytes.remaining() < 12 {
         return Ok(None);
     }
-    bytes.advance(12);
+    bytes.advance(4);
+    let leader_epoch = bytes.get_i32();
+    bytes.advance(4);
     if version >= 1 {
         skip_compact_uuid_array(bytes)?;
     }
     skip_tagged_fields(bytes)?;
-    Ok(Some((topic_id, partition_id)))
+    Ok(Some((topic_id, partition_id, leader_epoch)))
 }
 
 fn get_uuid(bytes: &mut Bytes) -> Option<TopicId> {
@@ -196,14 +200,18 @@ fn get_unsigned_varint(bytes: &mut Bytes) -> Option<u32> {
 }
 
 pub(super) fn to_topic_states(
-    topics: BTreeMap<String, BTreeSet<i32>>,
+    topics: BTreeMap<String, BTreeMap<i32, i32>>,
 ) -> BTreeMap<String, TopicState> {
     topics
         .into_iter()
         .map(|(name, partitions)| {
             let partitions = partitions
                 .into_iter()
-                .map(|partition| (partition, PartitionState::new(0)))
+                .map(|(partition, leader_epoch)| {
+                    let mut state = PartitionState::new(0);
+                    state.current_leader_epoch = leader_epoch;
+                    (partition, state)
+                })
                 .collect();
             (
                 name.clone(),

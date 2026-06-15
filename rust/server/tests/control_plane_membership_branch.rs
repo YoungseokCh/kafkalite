@@ -14,6 +14,7 @@ fn encode_subscription(topics: &[&str]) -> Vec<u8> {
             .collect(),
     );
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     subscription.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }

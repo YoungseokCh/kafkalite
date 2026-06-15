@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::net::TcpListener;
@@ -10,7 +11,7 @@ use crate::cluster::{
     UpdateReplicaProgressRequest,
 };
 use crate::config::Config;
-use crate::store::Storage;
+use crate::store::{PendingOffsetCommit, Storage, TransactionSessionState, TransactionStatus};
 
 use self::connection_errors::is_expected_disconnect;
 use super::dispatcher;
@@ -18,29 +19,94 @@ use super::fetch_signals::FetchSignals;
 
 mod connection_errors;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedOffsetCommit {
+    pub group_id: String,
+    pub member_id: String,
+    pub generation_id: i32,
+    pub topic: String,
+    pub partition: i32,
+    pub next_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionSession {
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub transaction_timeout_ms: i32,
+    pub last_updated_ms: i64,
+    pub transaction_start_timestamp_ms: i64,
+    pub fenced: bool,
+    pub status: TransactionStatus,
+    pub partitions: BTreeSet<(String, i32)>,
+    pub pending_offset_commits: Vec<StagedOffsetCommit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitTransactionalProducerError {
+    ConcurrentTransactions,
+}
+
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: Config,
     cluster: ClusterRuntime,
     store: Arc<dyn Storage>,
     pub(super) fetch_signals: Arc<FetchSignals>,
+    transactions: Arc<Mutex<BTreeMap<String, TransactionSession>>>,
 }
 
 impl KafkaBroker {
     pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
         let cluster = ClusterRuntime::from_config(&config)?;
+        let persisted_transactions = store.transaction_sessions()?;
         let broker = Self {
             config,
             cluster,
             store,
             fetch_signals: Arc::new(FetchSignals::default()),
+            transactions: Arc::new(Mutex::new(
+                persisted_transactions
+                    .into_iter()
+                    .map(|(transactional_id, session)| {
+                        (
+                            transactional_id,
+                            TransactionSession {
+                                producer_id: session.producer_id,
+                                producer_epoch: session.producer_epoch,
+                                transaction_timeout_ms: session.transaction_timeout_ms,
+                                last_updated_ms: session.last_updated_ms,
+                                transaction_start_timestamp_ms: session
+                                    .transaction_start_timestamp_ms,
+                                fenced: session.fenced,
+                                status: session.status,
+                                partitions: session.partitions.into_iter().collect(),
+                                pending_offset_commits: session
+                                    .pending_offset_commits
+                                    .into_iter()
+                                    .map(|commit| StagedOffsetCommit {
+                                        group_id: commit.group_id,
+                                        member_id: commit.member_id,
+                                        generation_id: commit.generation_id,
+                                        topic: commit.topic,
+                                        partition: commit.partition,
+                                        next_offset: commit.next_offset,
+                                    })
+                                    .collect(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )),
         };
         if broker.cluster.can_auto_create_topics_locally() {
             let metadata = broker
                 .store
                 .topic_metadata(None, chrono::Utc::now().timestamp_millis())?;
             broker.sync_topic_metadata(&metadata)?;
+            broker.recover_local_replica_progress(chrono::Utc::now().timestamp_millis())?;
         }
+        broker.recover_transaction_coordinator_state()?;
         Ok(broker)
     }
 
@@ -104,6 +170,449 @@ impl KafkaBroker {
         &self.cluster
     }
 
+    pub fn init_transactional_producer(
+        &self,
+        transactional_id: &str,
+        transaction_timeout_ms: i32,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(i64, i16), InitTransactionalProducerError>> {
+        if let Some(existing) = self.transaction_session(transactional_id) {
+            if matches!(
+                existing.status,
+                TransactionStatus::Ongoing
+                    | TransactionStatus::PrepareCommit
+                    | TransactionStatus::PrepareAbort
+            ) {
+                let session = TransactionSession {
+                    fenced: true,
+                    last_updated_ms: now_ms,
+                    ..existing
+                };
+                self.transactions
+                    .lock()
+                    .expect("transaction registry poisoned")
+                    .insert(transactional_id.to_string(), session.clone());
+                self.persist_transaction_session(transactional_id, &session)?;
+                return Ok(Err(InitTransactionalProducerError::ConcurrentTransactions));
+            }
+            let next_epoch = existing.producer_epoch.saturating_add(1);
+            let session = TransactionSession {
+                producer_id: existing.producer_id,
+                producer_epoch: next_epoch,
+                transaction_timeout_ms,
+                last_updated_ms: now_ms,
+                transaction_start_timestamp_ms: -1,
+                fenced: false,
+                status: TransactionStatus::Empty,
+                partitions: BTreeSet::new(),
+                pending_offset_commits: Vec::new(),
+            };
+            self.transactions
+                .lock()
+                .expect("transaction registry poisoned")
+                .insert(transactional_id.to_string(), session.clone());
+            self.persist_transaction_session(transactional_id, &session)?;
+            return Ok(Ok((session.producer_id, session.producer_epoch)));
+        }
+        let session = self.store.init_producer()?;
+        self.bind_transactional_producer(
+            transactional_id,
+            session.producer_id,
+            session.producer_epoch,
+            transaction_timeout_ms,
+            now_ms,
+        )?;
+        Ok(Ok((session.producer_id, session.producer_epoch)))
+    }
+
+    pub fn bind_transactional_producer(
+        &self,
+        transactional_id: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        transaction_timeout_ms: i32,
+        now_ms: i64,
+    ) -> Result<()> {
+        let session = TransactionSession {
+            producer_id,
+            producer_epoch,
+            transaction_timeout_ms,
+            last_updated_ms: now_ms,
+            transaction_start_timestamp_ms: -1,
+            fenced: false,
+            status: TransactionStatus::Empty,
+            partitions: BTreeSet::new(),
+            pending_offset_commits: Vec::new(),
+        };
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .insert(transactional_id.to_string(), session.clone());
+        self.persist_transaction_session(transactional_id, &session)
+    }
+
+    pub fn transaction_session(&self, transactional_id: &str) -> Option<TransactionSession> {
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .get(transactional_id)
+            .cloned()
+    }
+
+    pub fn transaction_session_by_producer(
+        &self,
+        producer_id: i64,
+    ) -> Option<(String, TransactionSession)> {
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .iter()
+            .find_map(|(transactional_id, session)| {
+                (session.producer_id == producer_id)
+                    .then(|| (transactional_id.clone(), session.clone()))
+            })
+    }
+
+    pub fn add_transaction_partitions(
+        &self,
+        transactional_id: &str,
+        partitions: impl IntoIterator<Item = (String, i32)>,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.partitions.extend(partitions);
+            session.status = TransactionStatus::Ongoing;
+            if session.transaction_start_timestamp_ms < 0 {
+                session.transaction_start_timestamp_ms = now_ms;
+            }
+            session.last_updated_ms = now_ms;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn transaction_contains_partition(
+        &self,
+        transactional_id: &str,
+        topic: &str,
+        partition: i32,
+    ) -> bool {
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .get(transactional_id)
+            .is_some_and(|session| session.partitions.contains(&(topic.to_string(), partition)))
+    }
+
+    pub fn transaction_partitions(&self, transactional_id: &str) -> Vec<(String, i32)> {
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .get(transactional_id)
+            .map(|session| session.partitions.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_transaction_partitions(&self, transactional_id: &str) -> Result<()> {
+        self.clear_transaction_partitions_with_timestamp(
+            transactional_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    }
+
+    pub fn clear_transaction_partitions_with_timestamp(
+        &self,
+        transactional_id: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.partitions.clear();
+            session.status = TransactionStatus::Empty;
+            session.last_updated_ms = now_ms;
+            session.transaction_start_timestamp_ms = -1;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn stage_transaction_offset_commit(
+        &self,
+        transactional_id: &str,
+        commit: StagedOffsetCommit,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.pending_offset_commits.push(commit);
+            session.status = TransactionStatus::Ongoing;
+            if session.transaction_start_timestamp_ms < 0 {
+                session.transaction_start_timestamp_ms = now_ms;
+            }
+            session.last_updated_ms = now_ms;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn transaction_offset_commits(&self, transactional_id: &str) -> Vec<StagedOffsetCommit> {
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .get(transactional_id)
+            .map(|session| session.pending_offset_commits.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_transaction_offset_commits(&self, transactional_id: &str) -> Result<()> {
+        self.clear_transaction_offset_commits_with_timestamp(
+            transactional_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    }
+
+    pub fn clear_transaction_offset_commits_with_timestamp(
+        &self,
+        transactional_id: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.pending_offset_commits.clear();
+            if session.partitions.is_empty() {
+                session.status = TransactionStatus::Empty;
+                session.transaction_start_timestamp_ms = -1;
+            }
+            session.last_updated_ms = now_ms;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn set_transaction_status(
+        &self,
+        transactional_id: &str,
+        status: TransactionStatus,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.status = status;
+            session.last_updated_ms = now_ms;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn finalize_transaction_metadata(
+        &self,
+        transactional_id: &str,
+        status: TransactionStatus,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            session.status = status;
+            session.partitions.clear();
+            session.pending_offset_commits.clear();
+            session.last_updated_ms = now_ms;
+            session.transaction_start_timestamp_ms = -1;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn touch_transaction_by_producer(&self, producer_id: i64, now_ms: i64) -> Result<()> {
+        let Some((transactional_id, mut session)) =
+            self.transaction_session_by_producer(producer_id)
+        else {
+            return Ok(());
+        };
+        session.last_updated_ms = now_ms;
+        self.transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .insert(transactional_id.clone(), session.clone());
+        self.persist_transaction_session(&transactional_id, &session)
+    }
+
+    pub fn expire_timed_out_transactions(&self, now_ms: i64) -> Result<()> {
+        let expired = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .iter()
+            .filter(|(_, session)| {
+                session.transaction_timeout_ms > 0
+                    && now_ms - session.last_updated_ms > i64::from(session.transaction_timeout_ms)
+            })
+            .map(|(transactional_id, session)| (transactional_id.clone(), session.clone()))
+            .collect::<Vec<_>>();
+        for (transactional_id, session) in &expired {
+            for (topic, partition) in &session.partitions {
+                let _ =
+                    self.store
+                        .write_transaction_marker(crate::store::TransactionMarkerRequest {
+                            topic,
+                            partition: *partition,
+                            producer_id: session.producer_id,
+                            producer_epoch: session.producer_epoch,
+                            coordinator_epoch: 0,
+                            committed: false,
+                            partition_leader_epoch: 0,
+                            now_ms,
+                        });
+            }
+            self.store
+                .delete_transaction_session(transactional_id, now_ms)?;
+        }
+        if !expired.is_empty() {
+            let mut transactions = self
+                .transactions
+                .lock()
+                .expect("transaction registry poisoned");
+            for (transactional_id, _) in expired {
+                transactions.remove(&transactional_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn recover_transaction_coordinator_state(&self) -> Result<()> {
+        let sessions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned")
+            .iter()
+            .map(|(transactional_id, session)| (transactional_id.clone(), session.clone()))
+            .collect::<Vec<_>>();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for (transactional_id, session) in sessions {
+            match session.status {
+                TransactionStatus::PrepareCommit => {
+                    self.finish_recovered_transaction(
+                        &transactional_id,
+                        &session,
+                        true,
+                        true,
+                        now_ms,
+                    )?;
+                }
+                TransactionStatus::CompleteCommit => {
+                    self.finish_recovered_transaction(
+                        &transactional_id,
+                        &session,
+                        true,
+                        false,
+                        now_ms,
+                    )?;
+                }
+                TransactionStatus::PrepareAbort => {
+                    self.finish_recovered_transaction(
+                        &transactional_id,
+                        &session,
+                        false,
+                        true,
+                        now_ms,
+                    )?;
+                }
+                TransactionStatus::CompleteAbort => {
+                    self.finish_recovered_transaction(
+                        &transactional_id,
+                        &session,
+                        false,
+                        false,
+                        now_ms,
+                    )?;
+                }
+                TransactionStatus::Empty | TransactionStatus::Ongoing => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_recovered_transaction(
+        &self,
+        transactional_id: &str,
+        session: &TransactionSession,
+        committed: bool,
+        resolve_in_doubt: bool,
+        now_ms: i64,
+    ) -> Result<()> {
+        if resolve_in_doubt {
+            for (topic, partition) in &session.partitions {
+                let _ =
+                    self.store
+                        .write_transaction_marker(crate::store::TransactionMarkerRequest {
+                            topic,
+                            partition: *partition,
+                            producer_id: session.producer_id,
+                            producer_epoch: session.producer_epoch,
+                            coordinator_epoch: 0,
+                            committed,
+                            partition_leader_epoch: 0,
+                            now_ms,
+                        });
+                let _ = self.update_local_replica_progress(topic, *partition, now_ms);
+            }
+            if committed {
+                for staged in &session.pending_offset_commits {
+                    let _ = self.store.commit_offset(crate::store::OffsetCommitRequest {
+                        group_id: &staged.group_id,
+                        member_id: &staged.member_id,
+                        generation_id: staged.generation_id,
+                        topic: &staged.topic,
+                        partition: staged.partition,
+                        next_offset: staged.next_offset,
+                        now_ms,
+                    });
+                }
+            }
+        }
+        self.finalize_transaction_metadata(
+            transactional_id,
+            if committed {
+                TransactionStatus::CompleteCommit
+            } else {
+                TransactionStatus::CompleteAbort
+            },
+            now_ms,
+        )?;
+        self.set_transaction_status(transactional_id, TransactionStatus::Empty, now_ms)?;
+        Ok(())
+    }
+
     pub fn sync_topic_metadata(&self, topics: &[crate::store::TopicMetadata]) -> Result<()> {
         self.cluster
             .sync_local_topics(topics, self.config.broker.broker_id)
@@ -124,6 +633,13 @@ impl KafkaBroker {
         self.cluster()
             .metadata_image()
             .partition_high_watermark(topic, partition)
+    }
+
+    pub fn partition_leader_epoch(&self, topic: &str, partition: i32) -> Option<i32> {
+        self.cluster()
+            .metadata_image()
+            .partition_state_view(topic, partition)
+            .map(|(_, leader_epoch, _, _)| leader_epoch)
     }
 
     pub fn partition_has_replica_progress(&self, topic: &str, partition: i32) -> bool {
@@ -162,6 +678,17 @@ impl KafkaBroker {
             response.high_watermark,
         );
         Ok(response.high_watermark)
+    }
+
+    fn recover_local_replica_progress(&self, now_ms: i64) -> Result<()> {
+        let metadata = self.store.topic_metadata(None, now_ms)?;
+        for topic in &metadata {
+            for partition in &topic.partitions {
+                let _ =
+                    self.update_local_replica_progress(&topic.name, partition.partition, now_ms)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn sync_follower_progress_from_remote<T: ClusterRpcTransport>(
@@ -321,6 +848,40 @@ impl KafkaBroker {
         if high_watermark > previous_high_watermark.unwrap_or(-1) {
             self.notify_fetch_signal(topic, partition);
         }
+    }
+
+    fn persist_transaction_session(
+        &self,
+        transactional_id: &str,
+        session: &TransactionSession,
+    ) -> Result<()> {
+        self.store.persist_transaction_session(
+            transactional_id,
+            &TransactionSessionState {
+                producer_id: session.producer_id,
+                producer_epoch: session.producer_epoch,
+                transaction_timeout_ms: session.transaction_timeout_ms,
+                last_updated_ms: session.last_updated_ms,
+                transaction_start_timestamp_ms: session.transaction_start_timestamp_ms,
+                fenced: session.fenced,
+                status: session.status,
+                partitions: session.partitions.iter().cloned().collect(),
+                pending_offset_commits: session
+                    .pending_offset_commits
+                    .iter()
+                    .map(|commit| PendingOffsetCommit {
+                        group_id: commit.group_id.clone(),
+                        member_id: commit.member_id.clone(),
+                        generation_id: commit.generation_id,
+                        topic: commit.topic.clone(),
+                        partition: commit.partition,
+                        next_offset: commit.next_offset,
+                    })
+                    .collect(),
+            },
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        Ok(())
     }
 }
 

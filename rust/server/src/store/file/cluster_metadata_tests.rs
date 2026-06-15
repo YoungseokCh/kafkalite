@@ -44,6 +44,9 @@ fn metadata_record(offset: i64, value: Vec<u8>) -> BrokerRecord {
         key: None,
         value: Some(Bytes::from(value)),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }
 }
 

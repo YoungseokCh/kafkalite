@@ -81,6 +81,7 @@ async fn offset_fetch_without_topics_returns_empty_topics() {
         OffsetFetchRequest::default()
             .with_group_id(GroupId(StrBytes::from("group-d".to_string())))
             .with_topics(None),
+        7,
     )
     .await
     .unwrap();
@@ -102,6 +103,7 @@ async fn offset_fetch_reports_unknown_topic_or_partition() {
                     .with_name(TopicName(StrBytes::from("missing".to_string())))
                     .with_partition_indexes(vec![0]),
             ])),
+        7,
     )
     .await
     .unwrap();

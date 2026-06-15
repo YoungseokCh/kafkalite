@@ -1,3 +1,4 @@
+use bytes::Buf;
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{ConsumerProtocolAssignment, ConsumerProtocolSubscription};
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
@@ -24,13 +25,15 @@ fn encode_subscription(topics: &[&str]) -> Vec<u8> {
             .collect(),
     );
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     subscription.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }
 
 fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
     let mut payload = Bytes::copy_from_slice(bytes);
-    let assignment = ConsumerProtocolAssignment::decode(&mut payload, 3).unwrap();
+    let version = payload.get_i16();
+    let assignment = ConsumerProtocolAssignment::decode(&mut payload, version).unwrap();
     assignment
         .assigned_partitions
         .into_iter()
@@ -40,7 +43,8 @@ fn decode_assignment_topics(bytes: &[u8]) -> Vec<String> {
 
 fn decode_assignment_partitions(bytes: &[u8], topic: &str) -> Vec<i32> {
     let mut payload = Bytes::copy_from_slice(bytes);
-    let assignment = ConsumerProtocolAssignment::decode(&mut payload, 3).unwrap();
+    let version = payload.get_i16();
+    let assignment = ConsumerProtocolAssignment::decode(&mut payload, version).unwrap();
     assignment
         .assigned_partitions
         .into_iter()
@@ -116,15 +120,9 @@ fn append_expected_index_entry(
     bytes.extend_from_slice(&last_offset.to_le_bytes());
 }
 
-fn append_expected_time_index_entry(
-    bytes: &mut Vec<u8>,
-    max_timestamp_ms: i64,
-    base_offset: i64,
-    position: u64,
-) {
+fn append_expected_time_index_entry(bytes: &mut Vec<u8>, max_timestamp_ms: i64, base_offset: i64) {
     bytes.extend_from_slice(&max_timestamp_ms.to_le_bytes());
     bytes.extend_from_slice(&base_offset.to_le_bytes());
-    bytes.extend_from_slice(&position.to_le_bytes());
 }
 
 fn collect_manifest_entries(

@@ -56,6 +56,9 @@ fn replica_record(offset: i64) -> BrokerRecord {
         key: Some(Bytes::from_static(b"key")),
         value: Some(Bytes::from_static(b"value")),
         headers_json: vec![],
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }
 }
 

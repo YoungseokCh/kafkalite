@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::store::{BrokerRecord, Result, StoreError};
 
+use super::internal_hash;
 use super::log::{RecordLog, StoredBatch};
 use super::state::GroupState;
 
@@ -14,9 +15,6 @@ const DEFAULT_CONSUMER_OFFSETS_PARTITIONS: i32 = 50;
 const OFFSET_COMMIT_KEY_VERSION: i16 = 1;
 const OFFSET_COMMIT_VALUE_VERSION: i16 = 1;
 const NO_EXPIRATION_TIMESTAMP: i64 = -1;
-const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
-const FNV_PRIME: u32 = 16_777_619;
-
 pub(super) struct ReplayState {
     pub offsets: BTreeMap<String, i64>,
     pub groups: BTreeMap<String, GroupState>,
@@ -89,6 +87,9 @@ pub(super) fn append_commit(
             commit.now_ms,
         ))),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     };
     logs.append_batch(
         CONSUMER_OFFSETS_TOPIC,
@@ -113,6 +114,9 @@ pub(super) fn append_group_state(
         ))),
         value: Some(Bytes::from(group_metadata::encode_value(group_state.group))),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     };
     logs.append_batch(
         CONSUMER_OFFSETS_TOPIC,
@@ -122,12 +126,7 @@ pub(super) fn append_group_state(
 }
 
 pub(super) fn partition_for_group_id(group_id: &str) -> i32 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in group_id.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    (hash % DEFAULT_CONSUMER_OFFSETS_PARTITIONS as u32) as i32
+    internal_hash::partition_for_key(group_id, DEFAULT_CONSUMER_OFFSETS_PARTITIONS)
 }
 
 fn apply_record(

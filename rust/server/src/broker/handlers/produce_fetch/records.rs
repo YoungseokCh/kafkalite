@@ -15,6 +15,9 @@ pub(super) fn to_broker_record(record: Record) -> BrokerRecord {
         producer_id: record.producer_id,
         producer_epoch: record.producer_epoch,
         sequence: record.sequence,
+        partition_leader_epoch: record.partition_leader_epoch,
+        transactional: record.transactional,
+        control: record.control,
         key: record.key,
         value: record.value,
         headers_json: serde_json::to_vec(
@@ -28,16 +31,19 @@ pub(super) fn to_broker_record(record: Record) -> BrokerRecord {
     }
 }
 
-pub(super) fn encode_records(records: &[BrokerRecord]) -> Result<Bytes> {
+pub(super) fn encode_records(
+    records: &[BrokerRecord],
+    partition_leader_epoch: i32,
+) -> Result<Bytes> {
     let kafka_records = records
         .iter()
         .enumerate()
         .map(|(index, record)| Record {
-            transactional: false,
-            control: false,
-            partition_leader_epoch: 0,
-            producer_id: -1,
-            producer_epoch: -1,
+            transactional: record.transactional,
+            control: record.control,
+            partition_leader_epoch,
+            producer_id: record.producer_id,
+            producer_epoch: record.producer_epoch,
             timestamp_type: TimestampType::Creation,
             offset: record.offset.max(index as i64),
             sequence: record.sequence,

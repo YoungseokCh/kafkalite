@@ -19,6 +19,10 @@ pub const LEAVE_GROUP_VERSION: i16 = 4;
 pub const OFFSET_COMMIT_VERSION: i16 = 7;
 pub const OFFSET_FETCH_VERSION: i16 = 7;
 pub const INIT_PRODUCER_ID_VERSION: i16 = 4;
+pub const WRITE_TXN_MARKERS_VERSION: i16 = 1;
+pub const ADD_PARTITIONS_TO_TXN_VERSION: i16 = 5;
+pub const END_TXN_VERSION: i16 = 4;
+pub const TXN_OFFSET_COMMIT_VERSION: i16 = 5;
 
 pub async fn read_frame(stream: &mut TcpStream) -> Result<Bytes> {
     let size = stream.read_i32().await.context("read frame size")?;

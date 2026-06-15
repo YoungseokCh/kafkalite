@@ -18,6 +18,9 @@ fn append_creates_only_kafka_user_partition_directory() {
         key: Some(Bytes::from_static(b"key")),
         value: Some(Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
 
     store.append_records("d1.events", 0, &records, 20).unwrap();
@@ -40,6 +43,9 @@ fn topic_offsets_are_recovered_from_log_after_reopen() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"one")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 0,
@@ -50,6 +56,9 @@ fn topic_offsets_are_recovered_from_log_after_reopen() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"two")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
     ];
     store
@@ -78,6 +87,9 @@ fn non_idempotent_producer_records_do_not_persist_sequence_state() {
         key: Some(Bytes::from_static(b"key")),
         value: Some(Bytes::from_static(b"value")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
 
     store

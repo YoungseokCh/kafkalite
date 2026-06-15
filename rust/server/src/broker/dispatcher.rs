@@ -68,10 +68,61 @@ pub async fn serve_connection(
                 .await?;
             }
             ApiKey::InitProducerId => {
-                let _request = protocol::decode_body::<
+                let request = protocol::decode_body::<
                     kafka_protocol::messages::InitProducerIdRequest,
                 >(&frame, api_key, header.request_api_version)?;
-                let response = bootstrap::handle_init_producer_id(&broker).await?;
+                let response = bootstrap::handle_init_producer_id(&broker, request).await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
+            ApiKey::WriteTxnMarkers => {
+                let request = protocol::decode_body::<
+                    kafka_protocol::messages::WriteTxnMarkersRequest,
+                >(&frame, api_key, header.request_api_version)?;
+                let response = produce_fetch::handle_write_txn_markers(&broker, request).await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
+            ApiKey::AddPartitionsToTxn => {
+                let request = protocol::decode_body::<
+                    kafka_protocol::messages::AddPartitionsToTxnRequest,
+                >(&frame, api_key, header.request_api_version)?;
+                let response = produce_fetch::handle_add_partitions_to_txn(
+                    &broker,
+                    request,
+                    header.request_api_version,
+                )
+                .await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
+            ApiKey::EndTxn => {
+                let request = protocol::decode_body::<kafka_protocol::messages::EndTxnRequest>(
+                    &frame,
+                    api_key,
+                    header.request_api_version,
+                )?;
+                let response =
+                    produce_fetch::handle_end_txn(&broker, request, header.request_api_version)
+                        .await?;
                 protocol::write_response(
                     &mut stream,
                     api_key,
@@ -229,13 +280,29 @@ pub async fn serve_connection(
                 )
                 .await?;
             }
+            ApiKey::TxnOffsetCommit => {
+                let request = protocol::decode_body::<
+                    kafka_protocol::messages::TxnOffsetCommitRequest,
+                >(&frame, api_key, header.request_api_version)?;
+                let response = groups::handle_txn_offset_commit(&broker, request).await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
             ApiKey::OffsetFetch => {
                 let request = protocol::decode_body::<kafka_protocol::messages::OffsetFetchRequest>(
                     &frame,
                     api_key,
                     header.request_api_version,
                 )?;
-                let response = groups::handle_offset_fetch(&broker, request).await?;
+                let response =
+                    groups::handle_offset_fetch(&broker, request, header.request_api_version)
+                        .await?;
                 protocol::write_response(
                     &mut stream,
                     api_key,

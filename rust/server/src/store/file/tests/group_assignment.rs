@@ -267,6 +267,9 @@ fn committed_offset_resume_survives_restart_after_tombstone() {
             key: Some(Bytes::from_static(b"key-one")),
             value: Some(Bytes::from_static(b"payload-one")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 0,
@@ -277,6 +280,9 @@ fn committed_offset_resume_survives_restart_after_tombstone() {
             key: Some(Bytes::from_static(b"key-two")),
             value: None,
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 0,
@@ -287,6 +293,9 @@ fn committed_offset_resume_survives_restart_after_tombstone() {
             key: None,
             value: Some(Bytes::from_static(b"payload-three")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
     ];
     store

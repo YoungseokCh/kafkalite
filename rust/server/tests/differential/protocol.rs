@@ -1,4 +1,7 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+use kafka_protocol::messages::add_partitions_to_txn_request::{
+    AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
+};
 use kafka_protocol::messages::consumer_protocol_assignment::TopicPartition as AssignmentTopicPartition;
 use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
 use kafka_protocol::messages::leave_group_request::MemberIdentity;
@@ -8,11 +11,13 @@ use kafka_protocol::messages::offset_commit_request::{
 use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
-    ApiKey, ConsumerProtocolAssignment, ConsumerProtocolSubscription, FetchRequest, FetchResponse,
-    GroupId, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
-    LeaveGroupRequest, LeaveGroupResponse, OffsetCommitRequest, OffsetCommitResponse,
-    OffsetFetchRequest, OffsetFetchResponse, RequestHeader, ResponseHeader, SyncGroupRequest,
-    SyncGroupResponse, TopicName,
+    AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, ApiKey, ApiVersionsRequest,
+    ApiVersionsResponse, ConsumerProtocolAssignment, ConsumerProtocolSubscription, EndTxnRequest,
+    EndTxnResponse, FetchRequest, FetchResponse, FindCoordinatorRequest, FindCoordinatorResponse,
+    GroupId, HeartbeatRequest, HeartbeatResponse, InitProducerIdRequest, InitProducerIdResponse,
+    JoinGroupRequest, JoinGroupResponse, LeaveGroupRequest, LeaveGroupResponse,
+    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse, ProducerId,
+    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName, TransactionalId,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use std::time::Duration;
@@ -200,6 +205,100 @@ pub(super) fn fetch(bootstrap: &str, request: FetchRequest) -> FetchResponse {
     )
 }
 
+pub(super) fn api_versions(bootstrap: &str) -> ApiVersionsResponse {
+    send_request::<ApiVersionsRequest, ApiVersionsResponse>(
+        bootstrap,
+        ApiKey::ApiVersions,
+        protocol::API_VERSIONS_VERSION,
+        ApiVersionsRequest::default(),
+    )
+}
+
+pub(super) fn find_transaction_coordinator(
+    bootstrap: &str,
+    transactional_id: &str,
+) -> FindCoordinatorResponse {
+    send_request::<FindCoordinatorRequest, FindCoordinatorResponse>(
+        bootstrap,
+        ApiKey::FindCoordinator,
+        protocol::FIND_COORDINATOR_VERSION,
+        FindCoordinatorRequest::default()
+            .with_key_type(1)
+            .with_coordinator_keys(vec![StrBytes::from(transactional_id.to_string())]),
+    )
+}
+
+pub(super) fn init_producer_id(
+    bootstrap: &str,
+    transactional_id: Option<&str>,
+    transaction_timeout_ms: i32,
+) -> InitProducerIdResponse {
+    let request = if let Some(transactional_id) = transactional_id {
+        InitProducerIdRequest::default()
+            .with_transactional_id(Some(TransactionalId(StrBytes::from(
+                transactional_id.to_string(),
+            ))))
+            .with_transaction_timeout_ms(transaction_timeout_ms)
+    } else {
+        InitProducerIdRequest::default().with_transaction_timeout_ms(transaction_timeout_ms)
+    };
+    send_request::<InitProducerIdRequest, InitProducerIdResponse>(
+        bootstrap,
+        ApiKey::InitProducerId,
+        protocol::INIT_PRODUCER_ID_VERSION,
+        request,
+    )
+}
+
+pub(super) fn add_partitions_to_txn(
+    bootstrap: &str,
+    transactional_id: &str,
+    producer_id: i64,
+    producer_epoch: i16,
+    topic: &str,
+    partition: i32,
+) -> AddPartitionsToTxnResponse {
+    send_request::<AddPartitionsToTxnRequest, AddPartitionsToTxnResponse>(
+        bootstrap,
+        ApiKey::AddPartitionsToTxn,
+        protocol::ADD_PARTITIONS_TO_TXN_VERSION,
+        AddPartitionsToTxnRequest::default().with_transactions(vec![
+            AddPartitionsToTxnTransaction::default()
+                .with_transactional_id(TransactionalId(StrBytes::from(
+                    transactional_id.to_string(),
+                )))
+                .with_producer_id(ProducerId(producer_id))
+                .with_producer_epoch(producer_epoch)
+                .with_topics(vec![
+                    AddPartitionsToTxnTopic::default()
+                        .with_name(TopicName(StrBytes::from(topic.to_string())))
+                        .with_partitions(vec![partition]),
+                ]),
+        ]),
+    )
+}
+
+pub(super) fn end_txn(
+    bootstrap: &str,
+    transactional_id: &str,
+    producer_id: i64,
+    producer_epoch: i16,
+    committed: bool,
+) -> EndTxnResponse {
+    send_request::<EndTxnRequest, EndTxnResponse>(
+        bootstrap,
+        ApiKey::EndTxn,
+        protocol::END_TXN_VERSION,
+        EndTxnRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from(
+                transactional_id.to_string(),
+            )))
+            .with_producer_id(ProducerId(producer_id))
+            .with_producer_epoch(producer_epoch)
+            .with_committed(committed),
+    )
+}
+
 pub(super) fn send_request<TReq: Encodable, TResp: Decodable>(
     bootstrap: &str,
     api_key: ApiKey,
@@ -247,6 +346,7 @@ pub(super) fn encode_subscription(topic: &str, user_data: &[u8]) -> Vec<u8> {
         .with_topics(vec![StrBytes::from(topic.to_string())])
         .with_user_data(Some(Bytes::copy_from_slice(user_data)));
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     subscription.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }
@@ -262,6 +362,7 @@ pub(super) fn encode_assignment_partitions(topic: &str, partitions: &[i32]) -> V
             .with_partitions(partitions.to_vec()),
     ]);
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     assignment.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }
@@ -269,11 +370,16 @@ pub(super) fn encode_assignment_partitions(topic: &str, partitions: &[i32]) -> V
 pub(super) fn encode_empty_assignment() -> Vec<u8> {
     let assignment = ConsumerProtocolAssignment::default().with_assigned_partitions(vec![]);
     let mut bytes = BytesMut::new();
+    bytes.extend_from_slice(&3_i16.to_be_bytes());
     assignment.encode(&mut bytes, 3).unwrap();
     bytes.to_vec()
 }
 
 pub(super) fn decode_assignment(bytes: &[u8]) -> bool {
     let mut payload = Bytes::copy_from_slice(bytes);
-    ConsumerProtocolAssignment::decode(&mut payload, 3).is_ok()
+    if payload.remaining() < 2 {
+        return false;
+    }
+    let version = payload.get_i16();
+    ConsumerProtocolAssignment::decode(&mut payload, version).is_ok()
 }

@@ -29,6 +29,11 @@ name = "bench_runner"
 path = "src/bin/bench_runner.rs"
 required-features = ["bench-internal"]
 
+[[bin]]
+name = "real_kafka_fixture"
+path = "src/bin/real_kafka_fixture.rs"
+required-features = ["bench-internal"]
+
 [dependencies]
 anyhow = "1.0"
 bytes = { version = "1.10", features = ["serde"] }
@@ -36,6 +41,7 @@ chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 kafka-protocol = { version = "0.17", default-features = false, features = ["broker", "client"] }
 libc = "0.2"
+memmap2 = "0.9"
 rdkafka = { version = "0.37", features = ["tokio"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

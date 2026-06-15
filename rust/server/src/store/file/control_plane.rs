@@ -224,6 +224,13 @@ impl ControlPlaneState {
             if group.members.remove(member_id).is_some() {
                 group.generation_id += 1;
                 group.leader_member_id = group.members.keys().next().cloned();
+                for member in group.members.values_mut() {
+                    member.generation_id = group.generation_id;
+                    member.assignment = Vec::new();
+                    member.updated_at_unix_ms = now_ms;
+                }
+                group.assignments_ready = false;
+                group.assignments_failed = false;
                 group.updated_at_unix_ms = now_ms;
                 group_snapshot = Some(group.clone());
             }
@@ -235,6 +242,12 @@ impl ControlPlaneState {
     }
 
     pub fn commit_offset(&mut self, request: OffsetCommitRequest<'_>) -> Result<()> {
+        self.validate_offset_commit(request)?;
+        let offset_key = OffsetKey::new(request.group_id, request.topic, request.partition);
+        self.persist_offset_commit(request, offset_key)
+    }
+
+    pub fn validate_offset_commit(&mut self, request: OffsetCommitRequest<'_>) -> Result<()> {
         let group =
             self.groups
                 .get_mut(request.group_id)
@@ -257,8 +270,7 @@ impl ControlPlaneState {
         if let Some(member) = group.members.get_mut(request.member_id) {
             member.updated_at_unix_ms = request.now_ms;
         }
-        let offset_key = OffsetKey::new(request.group_id, request.topic, request.partition);
-        self.persist_offset_commit(request, offset_key)
+        Ok(())
     }
 
     pub fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Option<i64> {

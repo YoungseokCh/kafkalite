@@ -2,6 +2,7 @@ mod cluster_metadata;
 mod consumer_offsets;
 mod control_plane;
 mod data_plane;
+mod internal_hash;
 mod internal_topics;
 mod log;
 mod policy;
@@ -10,6 +11,7 @@ mod state;
 mod storage_impl;
 mod storage_offsets;
 mod topic_catalog;
+mod transaction_state;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -54,6 +56,9 @@ pub struct FileStore {
     logs: Arc<RecordLog>,
     data: Mutex<DataPlaneState>,
     control: Mutex<ControlPlaneState>,
+    transaction_records: Mutex<std::collections::BTreeMap<i32, i64>>,
+    transaction_sessions:
+        Mutex<std::collections::BTreeMap<String, crate::store::TransactionSessionState>>,
 }
 
 impl FileStore {
@@ -62,6 +67,7 @@ impl FileStore {
         let logs = Arc::new(RecordLog::open(&root)?);
         let mut snapshots = SnapshotSet::load();
         let replayed_control = consumer_offsets::replay(&logs)?;
+        let replayed_transactions = transaction_state::replay(&logs)?;
         snapshots.offsets = replayed_control.offsets;
         snapshots.groups = replayed_control.groups;
         snapshots.topics = cluster_metadata::recover_topic_states(&logs)?;
@@ -80,6 +86,7 @@ impl FileStore {
         for (topic, partitions) in recovered {
             data.ensure_known_partitions(&topic, &partitions, 0);
         }
+        data.recover_producer_state(&logs)?;
         Ok(Self {
             root,
             logs: logs.clone(),
@@ -90,6 +97,8 @@ impl FileStore {
                 logs.clone(),
                 replayed_control.next_record_offsets,
             )),
+            transaction_records: Mutex::new(replayed_transactions.next_record_offsets),
+            transaction_sessions: Mutex::new(replayed_transactions.sessions),
         })
     }
 

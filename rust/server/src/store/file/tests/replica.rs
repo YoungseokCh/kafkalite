@@ -17,6 +17,9 @@ fn replica_fetch_and_apply_preserve_offsets_and_clamp_high_watermark() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"one")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 0,
@@ -27,6 +30,9 @@ fn replica_fetch_and_apply_preserve_offsets_and_clamp_high_watermark() {
             key: Some(Bytes::from_static(b"key")),
             value: Some(Bytes::from_static(b"two")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
     ];
     leader
@@ -78,6 +84,9 @@ fn replica_apply_rejects_offset_mismatches() {
             key: None,
             value: Some(Bytes::from_static(b"value")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         }],
         1,
         20,
@@ -107,6 +116,9 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
         key: Some(Bytes::from_static(b"seed")),
         value: Some(Bytes::from_static(b"seed")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     store.append_records("replica.topic", 0, &seed, 1).unwrap();
 
@@ -119,6 +131,9 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
         key: Some(Bytes::from_static(b"m")),
         value: Some(Bytes::from_static(b"m")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     let misaligned_err = store.append_replica_records("replica.topic", 0, &misaligned, 2);
     assert!(matches!(
@@ -139,6 +154,9 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
             key: Some(Bytes::from_static(b"a")),
             value: Some(Bytes::from_static(b"a")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
         BrokerRecord {
             offset: 3,
@@ -149,6 +167,9 @@ fn replica_append_rejects_misaligned_or_non_contiguous_offsets() {
             key: Some(Bytes::from_static(b"b")),
             value: Some(Bytes::from_static(b"b")),
             headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
         },
     ];
     let non_contiguous_err = store
@@ -173,6 +194,9 @@ fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
         key: Some(Bytes::from_static(b"seed")),
         value: Some(Bytes::from_static(b"seed")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     store
         .append_records("replica-skip.topic", 0, &seed, 1)
@@ -187,6 +211,9 @@ fn replica_append_skips_stale_offsets_and_returns_current_high_watermark() {
         key: Some(Bytes::from_static(b"stale")),
         value: Some(Bytes::from_static(b"stale")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     let latest = store
         .append_replica_records("replica-skip.topic", 0, &stale, 2)
@@ -210,6 +237,9 @@ fn replica_append_with_empty_batch_is_a_noop() {
         key: Some(Bytes::from_static(b"seed")),
         value: Some(Bytes::from_static(b"seed")),
         headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: false,
+        control: false,
     }];
     store
         .append_records("replica-empty.topic", 0, &seed, 1)

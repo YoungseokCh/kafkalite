@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use kafka_protocol::messages::ApiKey;
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use tempfile::tempdir;
 
@@ -149,6 +150,32 @@ async fn metadata_with_explicit_empty_topic_list_returns_empty_topics() {
     let response = handle_metadata(&broker, request).await.unwrap();
 
     assert!(response.topics.is_empty());
+}
+
+#[test]
+fn api_versions_advertise_write_txn_markers() {
+    let response = handle_api_versions();
+    assert!(response.api_keys.iter().any(|api| {
+        api.api_key == ApiKey::WriteTxnMarkers as i16
+            && api.min_version == 1
+            && api.max_version == crate::protocol::WRITE_TXN_MARKERS_VERSION
+    }));
+}
+
+#[test]
+fn api_versions_advertise_transaction_coordinator_apis() {
+    let response = handle_api_versions();
+    assert!(response.api_keys.iter().any(|api| {
+        api.api_key == ApiKey::AddPartitionsToTxn as i16
+            && api.max_version == crate::protocol::ADD_PARTITIONS_TO_TXN_VERSION
+    }));
+    assert!(response.api_keys.iter().any(|api| {
+        api.api_key == ApiKey::EndTxn as i16 && api.max_version == crate::protocol::END_TXN_VERSION
+    }));
+    assert!(response.api_keys.iter().any(|api| {
+        api.api_key == ApiKey::TxnOffsetCommit as i16
+            && api.max_version == crate::protocol::TXN_OFFSET_COMMIT_VERSION
+    }));
 }
 
 fn test_broker() -> KafkaBroker {

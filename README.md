@@ -13,6 +13,15 @@ cargo run --manifest-path rust/server/Cargo.toml -- --config rust/server/example
 
 ## Changelog
 
+### Unreleased
+
+- Add transactional produce flow scaffolding, including coordinator-side transaction session/state handling and transaction marker persistence
+- Persist transaction coordinator state in Kafka-compatible `__transaction_state` records and extend internal-topic recovery coverage
+- Tighten Kafka-compatible log/index/timeindex/leader-epoch-checkpoint filesystem behavior for real Kafka log directory recovery
+- Expand replica and fetch behavior around watermarks, long-polling, leadership-sensitive reads, and append/recovery edge cases
+- Add broader recovery and differential coverage, including real Kafka fixture generation, rolled-segment cases, multi-append scenarios, and filesystem compatibility checks
+- Add storage and producer regression tests for recovery, replica application, and Kafka-format on-disk state transitions
+
 ### v1.1.4
 
 - Support fetch long polling
