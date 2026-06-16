@@ -326,10 +326,9 @@ fn update_kafka_time_index_entry(
     appended_offset_index: bool,
 ) -> Result<()> {
     let last = last_time_index_entry(segment)?;
-    if let Some(previous) = last
-        && (batch_max_timestamp_ms <= previous.max_timestamp_ms
-            || batch_last_offset <= previous.offset)
-    {
+    if last.is_some_and(|previous| {
+        batch_max_timestamp_ms <= previous.max_timestamp_ms || batch_last_offset <= previous.offset
+    }) {
         return Ok(());
     }
 
@@ -460,14 +459,10 @@ fn native_offset_entries_plausible(bytes: &[u8], log_len: u64) -> bool {
         if entry.position > log_len || entry.last_offset < entry.base_offset {
             return false;
         }
-        if let Some(prev) = previous_offset
-            && entry.base_offset < prev
-        {
+        if previous_offset.is_some_and(|prev| entry.base_offset < prev) {
             return false;
         }
-        if let Some(prev) = previous_position
-            && entry.position < prev
-        {
+        if previous_position.is_some_and(|prev| entry.position < prev) {
             return false;
         }
         previous_offset = Some(entry.base_offset);
@@ -484,14 +479,10 @@ fn kafka_offset_entries_plausible(bytes: &[u8], segment_base_offset: i64, log_le
         if entry.position > log_len {
             return false;
         }
-        if let Some(prev) = previous_offset
-            && entry.base_offset < prev
-        {
+        if previous_offset.is_some_and(|prev| entry.base_offset < prev) {
             return false;
         }
-        if let Some(prev) = previous_position
-            && entry.position < prev
-        {
+        if previous_position.is_some_and(|prev| entry.position < prev) {
             return false;
         }
         previous_offset = Some(entry.base_offset);
@@ -512,14 +503,10 @@ fn native_time_index_entries_plausible(
         if entry.offset < segment_base_offset {
             return false;
         }
-        if let Some(prev) = previous_timestamp
-            && entry.max_timestamp_ms < prev
-        {
+        if previous_timestamp.is_some_and(|prev| entry.max_timestamp_ms < prev) {
             return false;
         }
-        if let Some(prev) = previous_offset
-            && entry.offset < prev
-        {
+        if previous_offset.is_some_and(|prev| entry.offset < prev) {
             return false;
         }
         previous_timestamp = Some(entry.max_timestamp_ms);
@@ -536,14 +523,10 @@ fn kafka_time_index_entries_plausible(bytes: &[u8], segment_base_offset: i64) ->
         if entry.offset < segment_base_offset {
             return false;
         }
-        if let Some(prev) = previous_timestamp
-            && entry.max_timestamp_ms < prev
-        {
+        if previous_timestamp.is_some_and(|prev| entry.max_timestamp_ms < prev) {
             return false;
         }
-        if let Some(prev) = previous_offset
-            && entry.offset < prev
-        {
+        if previous_offset.is_some_and(|prev| entry.offset < prev) {
             return false;
         }
         previous_timestamp = Some(entry.max_timestamp_ms);
