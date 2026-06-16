@@ -35,6 +35,11 @@ pub fn handle_api_versions() -> ApiVersionsResponse {
             0,
             protocol::ADD_PARTITIONS_TO_TXN_VERSION,
         ),
+        api(
+            ApiKey::AddOffsetsToTxn,
+            0,
+            protocol::ADD_OFFSETS_TO_TXN_VERSION,
+        ),
         api(ApiKey::EndTxn, 0, protocol::END_TXN_VERSION),
         api(
             ApiKey::TxnOffsetCommit,

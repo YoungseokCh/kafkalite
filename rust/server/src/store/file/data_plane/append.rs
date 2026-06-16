@@ -107,14 +107,44 @@ impl DataPlaneState {
         &mut self,
         request: TransactionMarkerRequest<'_>,
     ) -> Result<AppendDecision> {
+        let producer_sequences = self
+            .partition_state(request.topic, request.partition)
+            .ok_or_else(|| StoreError::UnknownTopicOrPartition {
+                topic: request.topic.to_string(),
+                partition: request.partition,
+            })?
+            .producer_sequences_ref();
+        if request.producer_id >= 0 {
+            if request.producer_id >= self.next_producer_id {
+                return Err(StoreError::UnknownProducerId {
+                    producer_id: request.producer_id,
+                });
+            }
+            if let Some(sequence) = producer_sequences.get(&request.producer_id) {
+                if request.producer_epoch < sequence.producer_epoch {
+                    return Err(StoreError::StaleProducerEpoch {
+                        producer_id: request.producer_id,
+                        expected: sequence.producer_epoch,
+                        actual: request.producer_epoch,
+                    });
+                }
+                if request.producer_epoch == sequence.producer_epoch
+                    && sequence.last_transaction_marker.as_ref()
+                        == Some(&TransactionMarkerState {
+                            committed: request.committed,
+                            coordinator_epoch: request.coordinator_epoch,
+                        })
+                {
+                    return Ok(AppendDecision::Duplicate {
+                        base_offset: sequence.last_offset,
+                        last_offset: sequence.last_offset,
+                    });
+                }
+            }
+        }
         let sequence = next_transaction_marker_sequence(
             self.next_producer_id,
-            self.partition_state(request.topic, request.partition)
-                .ok_or_else(|| StoreError::UnknownTopicOrPartition {
-                    topic: request.topic.to_string(),
-                    partition: request.partition,
-                })?
-                .producer_sequences_ref(),
+            producer_sequences,
             request.producer_id,
             request.producer_epoch,
             request.committed,

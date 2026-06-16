@@ -160,6 +160,20 @@ struct TransactionVisibilitySnapshot {
     aborted_read_committed_count: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TransactionalOffsetCommitSnapshot {
+    committed_txn_offset: i64,
+    aborted_txn_offset: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MultiGroupTransactionalOffsetCommitSnapshot {
+    group_a_committed_offset: i64,
+    group_b_committed_offset: i64,
+    group_a_aborted_offset: i64,
+    group_b_aborted_offset: i64,
+}
+
 async fn start_local_broker() -> (
     String,
     tokio::task::JoinHandle<anyhow::Result<()>>,

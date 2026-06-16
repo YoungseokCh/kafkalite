@@ -6,8 +6,9 @@ use kafkalite_server::{Config, FileStore, KafkaBroker};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+use rdkafka::util::Timeout;
 use tempfile::tempdir;
 
 fn init_test_logging() {
@@ -42,6 +43,16 @@ fn producer(bootstrap: &str) -> FutureProducer {
         .set("bootstrap.servers", bootstrap)
         .set("message.timeout.ms", "3000")
         .set("enable.idempotence", "true")
+        .create()
+        .unwrap()
+}
+
+fn transactional_producer(bootstrap: &str, transactional_id: &str) -> FutureProducer {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("message.timeout.ms", "3000")
+        .set("enable.idempotence", "true")
+        .set("transactional.id", transactional_id)
         .create()
         .unwrap()
 }
@@ -242,6 +253,74 @@ async fn committed_offsets_are_partition_scoped() {
     assert_eq!(seen[0].1, b"p1-second".to_vec());
     assert_eq!(seen[1].0, 2);
     assert_eq!(seen[1].1, b"p2-only".to_vec());
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transactional_offsets_survive_broker_restart() {
+    init_test_logging();
+    let tempdir = tempdir().unwrap();
+    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
+    let producer = producer(&bootstrap);
+
+    for payload in ["first", "second", "third"] {
+        producer
+            .send(
+                FutureRecord::to("txn.resume.events")
+                    .payload(payload)
+                    .key("resume-key"),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+    }
+
+    let consumer = group_consumer(&bootstrap, "txn-resume-group");
+    consumer.subscribe(&["txn.resume.events"]).unwrap();
+    let first = poll_for_message(&consumer, Duration::from_secs(8));
+    assert_eq!(first.payload(), Some(&b"first"[..]));
+
+    let mut baseline = TopicPartitionList::new();
+    baseline
+        .add_partition_offset("txn.resume.events", 0, Offset::Offset(1))
+        .unwrap();
+    consumer
+        .commit(&baseline, rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+
+    let transactional = transactional_producer(&bootstrap, "txn-resume-id");
+    transactional
+        .init_transactions(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    let group_metadata = consumer.group_metadata().unwrap();
+    transactional.begin_transaction().unwrap();
+    let mut offsets = TopicPartitionList::new();
+    offsets
+        .add_partition_offset("txn.resume.events", 0, Offset::Offset(2))
+        .unwrap();
+    transactional
+        .send_offsets_to_transaction(
+            &offsets,
+            &group_metadata,
+            Timeout::After(Duration::from_secs(10)),
+        )
+        .unwrap();
+    transactional
+        .commit_transaction(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    drop(first);
+    drop(consumer);
+
+    handle.abort();
+    let _ = handle.await;
+
+    let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
+    let resumed = group_consumer(&bootstrap, "txn-resume-group");
+    resumed.subscribe(&["txn.resume.events"]).unwrap();
+    let next = poll_for_message(&resumed, Duration::from_secs(8));
+    assert_eq!(next.payload(), Some(&b"third"[..]));
 
     handle.abort();
     let _ = handle.await;

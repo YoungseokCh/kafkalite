@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::store::{BrokerRecord, Result, StoreError};
+use crate::store::{BrokerRecord, Result, StoreError, TransactionalOffsetCommit};
 
 use super::internal_hash;
 use super::log::{RecordLog, StoredBatch};
@@ -15,13 +15,18 @@ const DEFAULT_CONSUMER_OFFSETS_PARTITIONS: i32 = 50;
 const OFFSET_COMMIT_KEY_VERSION: i16 = 1;
 const OFFSET_COMMIT_VALUE_VERSION: i16 = 1;
 const NO_EXPIRATION_TIMESTAMP: i64 = -1;
+type PendingTransactionalOffsets = BTreeMap<(i64, i32), Vec<TransactionalOffsetCommit>>;
+
 pub(super) struct ReplayState {
     pub offsets: BTreeMap<String, i64>,
     pub groups: BTreeMap<String, GroupState>,
+    pub pending_transactional_offsets: PendingTransactionalOffsets,
     pub next_record_offsets: BTreeMap<i32, i64>,
 }
 
 pub(super) struct OffsetCommitRecord<'a> {
+    pub producer_id: i64,
+    pub producer_epoch: i16,
     pub group_id: &'a str,
     pub offset_topic_partition: i32,
     pub topic: &'a str,
@@ -49,19 +54,27 @@ pub(super) fn replay(logs: &RecordLog) -> Result<ReplayState> {
     }
     let mut offsets = BTreeMap::new();
     let mut groups = BTreeMap::new();
+    let mut pending_transactional_offsets = BTreeMap::new();
     let mut next_record_offsets = BTreeMap::new();
     for partition in partitions {
         logs.recover_internal_partition(CONSUMER_OFFSETS_TOPIC, partition)?;
         let records = logs.read_all_records(CONSUMER_OFFSETS_TOPIC, partition)?;
         let next_record_offset = records.last().map(|record| record.offset + 1).unwrap_or(0);
         for record in records {
-            apply_record(&mut offsets, &mut groups, record)?;
+            apply_record(
+                &mut offsets,
+                &mut groups,
+                &mut pending_transactional_offsets,
+                partition,
+                record,
+            )?;
         }
         next_record_offsets.insert(partition, next_record_offset);
     }
     Ok(ReplayState {
         offsets,
         groups,
+        pending_transactional_offsets,
         next_record_offsets,
     })
 }
@@ -74,8 +87,8 @@ pub(super) fn append_commit(
     let record = BrokerRecord {
         offset: record_offset,
         timestamp_ms: commit.now_ms,
-        producer_id: -1,
-        producer_epoch: -1,
+        producer_id: commit.producer_id,
+        producer_epoch: commit.producer_epoch,
         sequence: record_offset as i32,
         key: Some(Bytes::from(encode_offset_key(
             commit.group_id,
@@ -88,12 +101,41 @@ pub(super) fn append_commit(
         ))),
         headers_json: b"[]".to_vec(),
         partition_leader_epoch: 0,
-        transactional: false,
+        transactional: commit.producer_id >= 0,
         control: false,
     };
     logs.append_batch(
         CONSUMER_OFFSETS_TOPIC,
         commit.offset_topic_partition,
+        &StoredBatch::from_records(&[record]),
+    )
+}
+
+pub(super) fn append_transaction_marker(
+    logs: &RecordLog,
+    record_offset: i64,
+    offset_topic_partition: i32,
+    producer_id: i64,
+    producer_epoch: i16,
+    committed: bool,
+    now_ms: i64,
+) -> Result<()> {
+    let record = BrokerRecord {
+        offset: record_offset,
+        timestamp_ms: now_ms,
+        producer_id,
+        producer_epoch,
+        sequence: record_offset as i32,
+        key: Some(transaction_marker_key(committed)),
+        value: Some(transaction_marker_value(0)),
+        headers_json: b"[]".to_vec(),
+        partition_leader_epoch: 0,
+        transactional: true,
+        control: true,
+    };
+    logs.append_batch(
+        CONSUMER_OFFSETS_TOPIC,
+        offset_topic_partition,
         &StoredBatch::from_records(&[record]),
     )
 }
@@ -132,8 +174,18 @@ pub(super) fn partition_for_group_id(group_id: &str) -> i32 {
 fn apply_record(
     offsets: &mut BTreeMap<String, i64>,
     groups: &mut BTreeMap<String, GroupState>,
+    pending_transactional_offsets: &mut PendingTransactionalOffsets,
+    offset_topic_partition: i32,
     record: BrokerRecord,
 ) -> Result<()> {
+    if record.transactional {
+        return apply_transactional_record(
+            offsets,
+            pending_transactional_offsets,
+            offset_topic_partition,
+            record,
+        );
+    }
     let Some(key) = record.key else {
         return Ok(());
     };
@@ -161,6 +213,76 @@ fn apply_record(
         }
     }
     Ok(())
+}
+
+fn apply_transactional_record(
+    offsets: &mut BTreeMap<String, i64>,
+    pending_transactional_offsets: &mut PendingTransactionalOffsets,
+    offset_topic_partition: i32,
+    record: BrokerRecord,
+) -> Result<()> {
+    if record.control {
+        let committed = parse_transaction_marker_key(record.key.as_deref().unwrap_or_default());
+        let pending = pending_transactional_offsets
+            .remove(&(record.producer_id, offset_topic_partition))
+            .unwrap_or_default();
+        if committed == Some(true) {
+            for commit in pending {
+                offsets.insert(
+                    serialize_offset_key(&commit.group_id, &commit.topic, commit.partition),
+                    commit.next_offset,
+                );
+            }
+        }
+        return Ok(());
+    }
+    let Some(pending) = decode_pending_transactional_offset_commit(&record)? else {
+        return Ok(());
+    };
+    let key = (record.producer_id, pending.offset_topic_partition);
+    let Some(producer_records) = pending_transactional_offsets.get_mut(&key) else {
+        pending_transactional_offsets.insert(key, vec![pending]);
+        return Ok(());
+    };
+    if let Some(existing) = producer_records.iter_mut().find(|existing| {
+        existing.group_id == pending.group_id
+            && existing.topic == pending.topic
+            && existing.partition == pending.partition
+    }) {
+        *existing = pending;
+    } else {
+        producer_records.push(pending);
+    }
+    Ok(())
+}
+
+fn decode_pending_transactional_offset_commit(
+    record: &BrokerRecord,
+) -> Result<Option<TransactionalOffsetCommit>> {
+    let Some(key) = record.key.as_deref() else {
+        return Ok(None);
+    };
+    let Some(ConsumerOffsetsKey::OffsetCommit(offset_key)) = decode_record_key(key)? else {
+        return Ok(None);
+    };
+    let Some(value) = record.value.as_deref() else {
+        return Ok(None);
+    };
+    let Some(next_offset) = decode_offset_value(value)? else {
+        return Ok(None);
+    };
+    let Some((group_id, topic, partition)) = deserialize_offset_key(&offset_key) else {
+        return Ok(None);
+    };
+    Ok(Some(TransactionalOffsetCommit {
+        producer_id: record.producer_id,
+        producer_epoch: record.producer_epoch,
+        offset_topic_partition: partition_for_group_id(&group_id),
+        group_id,
+        topic,
+        partition,
+        next_offset,
+    }))
 }
 
 fn decode_record_key(bytes: &[u8]) -> Result<Option<ConsumerOffsetsKey>> {
@@ -204,6 +326,14 @@ fn serialize_offset_key(group_id: &str, topic: &str, partition: i32) -> String {
     format!("{group_id}:{topic}:{partition}")
 }
 
+fn deserialize_offset_key(value: &str) -> Option<(String, String, i32)> {
+    let mut parts = value.splitn(3, ':');
+    let group_id = parts.next()?.to_string();
+    let topic = parts.next()?.to_string();
+    let partition = parts.next()?.parse().ok()?;
+    Some((group_id, topic, partition))
+}
+
 fn encode_offset_value(next_offset: i64, now_ms: i64) -> Vec<u8> {
     let mut bytes = BytesMut::new();
     bytes.put_i16(OFFSET_COMMIT_VALUE_VERSION);
@@ -223,6 +353,32 @@ fn decode_offset_value(bytes: &[u8]) -> Result<Option<i64>> {
         return Ok(None);
     }
     Ok(Some(bytes.get_i64()))
+}
+
+fn transaction_marker_key(committed: bool) -> Bytes {
+    let marker_type = if committed { 1_i16 } else { 0_i16 };
+    let mut key = Vec::with_capacity(4);
+    key.extend_from_slice(&0_i16.to_be_bytes());
+    key.extend_from_slice(&marker_type.to_be_bytes());
+    Bytes::from(key)
+}
+
+fn transaction_marker_value(coordinator_epoch: i32) -> Bytes {
+    let mut value = Vec::with_capacity(6);
+    value.extend_from_slice(&0_i16.to_be_bytes());
+    value.extend_from_slice(&coordinator_epoch.to_be_bytes());
+    Bytes::from(value)
+}
+
+fn parse_transaction_marker_key(key: &[u8]) -> Option<bool> {
+    if key.len() < 4 {
+        return None;
+    }
+    match i16::from_be_bytes([key[2], key[3]]) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 pub(super) fn put_string(bytes: &mut BytesMut, value: &str) {

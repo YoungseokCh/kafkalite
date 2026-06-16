@@ -7,4 +7,3 @@ pub(crate) const INVALID_PRODUCER_ID_MAPPING: i16 = 49;
 pub(crate) const INVALID_TRANSACTION_TIMEOUT: i16 = 50;
 pub(crate) const CONCURRENT_TRANSACTIONS: i16 = 51;
 pub(crate) const UNKNOWN_PRODUCER_ID: i16 = 59;
-pub(crate) const PRODUCER_FENCED: i16 = 90;

@@ -1,5 +1,7 @@
 use super::*;
 use crate::store::file::log::StoredBatch;
+use crate::store::{StoreError, TransactionalOffsetCommitRequest};
+use std::fs;
 
 #[test]
 fn truncated_tail_is_recovered_on_restart() {
@@ -100,6 +102,16 @@ fn truncate_partition_discards_tail_and_rebuilds_indexes() {
     store
         .append_records("truncate.topic", 0, &records, 10)
         .unwrap();
+    fs::write(
+        dir.path().join("recovery-point-offset-checkpoint"),
+        "0\n1\ntruncate.topic 0 3\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("replication-offset-checkpoint"),
+        "0\n1\ntruncate.topic 0 3\n",
+    )
+    .unwrap();
 
     store.truncate_partition("truncate.topic", 0, 2).unwrap();
     let fetched = store.fetch_records("truncate.topic", 0, 0, 10).unwrap();
@@ -108,6 +120,70 @@ fn truncate_partition_discards_tail_and_rebuilds_indexes() {
     assert_eq!(fetched.records[0].offset, 0);
     assert_eq!(fetched.records[1].offset, 1);
     assert_eq!(store.list_offsets("truncate.topic", 0).unwrap().1.offset, 2);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("recovery-point-offset-checkpoint")).unwrap(),
+        "0\n1\ntruncate.topic 0 2\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("replication-offset-checkpoint")).unwrap(),
+        "0\n1\ntruncate.topic 0 2\n"
+    );
+}
+
+#[test]
+fn append_fails_without_rewriting_malformed_root_checkpoint() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    let producer = store.init_producer().unwrap();
+    store
+        .append_records(
+            "checkpoint.topic",
+            0,
+            &[BrokerRecord {
+                offset: 0,
+                timestamp_ms: 10,
+                producer_id: producer.producer_id,
+                producer_epoch: producer.producer_epoch,
+                sequence: 0,
+                key: Some(Bytes::from_static(b"key")),
+                value: Some(Bytes::from_static(b"value")),
+                headers_json: b"[]".to_vec(),
+                partition_leader_epoch: 0,
+                transactional: false,
+                control: false,
+            }],
+            10,
+        )
+        .unwrap();
+    let checkpoint_path = dir.path().join("recovery-point-offset-checkpoint");
+    fs::write(&checkpoint_path, "0\n1\ncheckpoint.topic oops\n").unwrap();
+
+    let err = store
+        .append_records(
+            "checkpoint.topic",
+            0,
+            &[BrokerRecord {
+                offset: 0,
+                timestamp_ms: 11,
+                producer_id: producer.producer_id,
+                producer_epoch: producer.producer_epoch,
+                sequence: 1,
+                key: Some(Bytes::from_static(b"key-2")),
+                value: Some(Bytes::from_static(b"value-2")),
+                headers_json: b"[]".to_vec(),
+                partition_leader_epoch: 0,
+                transactional: false,
+                control: false,
+            }],
+            11,
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("invalid checkpoint line"));
+    assert_eq!(
+        fs::read_to_string(checkpoint_path).unwrap(),
+        "0\n1\ncheckpoint.topic oops\n"
+    );
 }
 
 #[test]
@@ -165,6 +241,124 @@ fn opening_valid_kafka_layout_does_not_change_filesystem_bytes() {
 }
 
 #[test]
+fn transactional_offset_completion_keeps_pending_state_on_epoch_error() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("txn.offset.recovery", 1, 0).unwrap();
+
+    store
+        .stage_transactional_offset_commit(TransactionalOffsetCommitRequest {
+            producer_id: 41,
+            producer_epoch: 3,
+            group_id: "txn-offset-recovery-group",
+            topic: "txn.offset.recovery",
+            partition: 0,
+            next_offset: 9,
+            now_ms: 10,
+        })
+        .unwrap();
+
+    let err = store
+        .complete_transactional_offset_commits(41, 2, true, 11)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        StoreError::StaleProducerEpoch {
+            producer_id: 41,
+            expected: 3,
+            actual: 2,
+        }
+    ));
+    assert_eq!(store.transactional_offset_commits(41).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fetch_offset("txn-offset-recovery-group", "txn.offset.recovery", 0)
+            .unwrap(),
+        None
+    );
+
+    store
+        .complete_transactional_offset_commits(41, 3, true, 12)
+        .unwrap();
+    assert!(store.transactional_offset_commits(41).unwrap().is_empty());
+    assert_eq!(
+        store
+            .fetch_offset("txn-offset-recovery-group", "txn.offset.recovery", 0)
+            .unwrap(),
+        Some(9)
+    );
+}
+
+#[test]
+fn transactional_offset_recovery_is_scoped_per_consumer_offsets_partition() {
+    let dir = tempdir().unwrap();
+    let logs = super::super::log::RecordLog::open(dir.path()).unwrap();
+    let (group_a, partition_a, group_b, partition_b) = groups_for_distinct_offset_partitions();
+
+    super::super::consumer_offsets::append_commit(
+        &logs,
+        0,
+        super::super::consumer_offsets::OffsetCommitRecord {
+            producer_id: 77,
+            producer_epoch: 4,
+            group_id: &group_a,
+            offset_topic_partition: partition_a,
+            topic: "txn.offset.partitioned",
+            partition: 0,
+            next_offset: 11,
+            now_ms: 10,
+        },
+    )
+    .unwrap();
+    super::super::consumer_offsets::append_transaction_marker(
+        &logs,
+        1,
+        partition_a,
+        77,
+        4,
+        true,
+        11,
+    )
+    .unwrap();
+    super::super::consumer_offsets::append_commit(
+        &logs,
+        0,
+        super::super::consumer_offsets::OffsetCommitRecord {
+            producer_id: 77,
+            producer_epoch: 4,
+            group_id: &group_b,
+            offset_topic_partition: partition_b,
+            topic: "txn.offset.partitioned",
+            partition: 0,
+            next_offset: 22,
+            now_ms: 12,
+        },
+    )
+    .unwrap();
+    drop(logs);
+
+    let store = FileStore::open(dir.path()).unwrap();
+    store.ensure_topic("txn.offset.partitioned", 1, 0).unwrap();
+    assert_eq!(
+        store
+            .fetch_offset(&group_a, "txn.offset.partitioned", 0)
+            .unwrap(),
+        Some(11)
+    );
+    assert_eq!(
+        store
+            .fetch_offset(&group_b, "txn.offset.partitioned", 0)
+            .unwrap(),
+        None
+    );
+
+    let pending = store.transactional_offset_commits(77).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].group_id, group_b);
+    assert_eq!(pending[0].offset_topic_partition, partition_b);
+}
+
+#[test]
 fn appending_to_valid_kafka_layout_changes_only_expected_log_and_indexes() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
@@ -212,6 +406,19 @@ fn appending_to_valid_kafka_layout_changes_only_expected_log_and_indexes() {
 
     assert_eq!(filesystem_manifest(dir.path()), expected);
     assert_eq!(root_directories(dir.path()), vec!["byte-exact.append-0"]);
+}
+
+fn groups_for_distinct_offset_partitions() -> (String, i32, String, i32) {
+    let first_group = "txn-offset-partition-a".to_string();
+    let first_partition = super::super::consumer_offsets::partition_for_group_id(&first_group);
+    for suffix in 0..10_000 {
+        let candidate = format!("txn-offset-partition-b-{suffix}");
+        let partition = super::super::consumer_offsets::partition_for_group_id(&candidate);
+        if partition != first_partition {
+            return (first_group, first_partition, candidate, partition);
+        }
+    }
+    panic!("failed to find distinct __consumer_offsets partitions for test");
 }
 
 #[test]

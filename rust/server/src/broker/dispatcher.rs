@@ -294,6 +294,20 @@ pub async fn serve_connection(
                 )
                 .await?;
             }
+            ApiKey::AddOffsetsToTxn => {
+                let request = protocol::decode_body::<
+                    kafka_protocol::messages::AddOffsetsToTxnRequest,
+                >(&frame, api_key, header.request_api_version)?;
+                let response = produce_fetch::handle_add_offsets_to_txn(&broker, request).await?;
+                protocol::write_response(
+                    &mut stream,
+                    api_key,
+                    header.correlation_id,
+                    header.request_api_version,
+                    &response,
+                )
+                .await?;
+            }
             ApiKey::OffsetFetch => {
                 let request = protocol::decode_body::<kafka_protocol::messages::OffsetFetchRequest>(
                     &frame,

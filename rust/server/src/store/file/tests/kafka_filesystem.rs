@@ -1,6 +1,17 @@
 use super::*;
 use crate::store::file::log::StoredBatch;
 use crate::{Config, KafkaBroker};
+use kafka_protocol::messages::offset_commit_request::{
+    OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
+use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
+use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
+use kafka_protocol::messages::{
+    ApiKey, GroupId, HeartbeatRequest, HeartbeatResponse, LeaveGroupRequest, LeaveGroupResponse,
+    OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
+    RequestHeader, ResponseHeader, SyncGroupRequest, SyncGroupResponse, TopicName,
+};
+use kafka_protocol::protocol::{Decodable, Encodable, StrBytes};
 use rdkafka::Message;
 use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -64,6 +75,242 @@ async fn real_kafka_log_dir_recovery_preserves_transaction_visibility() {
     assert_eq!(
         visible_message_count(&bootstrap, &aborted_topic, "read_committed"),
         0
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_log_dir_recovery_preserves_committed_offsets() {
+    let Some(source) = real_kafka_recovery_log_dir() else {
+        eprintln!(
+            "skipping filesystem recovery test: set REAL_KAFKA_RECOVERY_LOG_DIR to a stopped Kafka log dir"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    copy_dir_all(&source, dir.path());
+
+    let topic = find_topic_dir_with_prefix(dir.path(), "diff.resume.")
+        .expect("expected resume topic from differential fixture");
+    let suffix = topic
+        .strip_prefix("diff.resume.")
+        .expect("topic prefix should match");
+    let group_id = format!("group.{suffix}");
+
+    let broker = broker_for_data_dir(dir.path());
+    assert_eq!(
+        broker.store().fetch_offset(&group_id, &topic, 0).unwrap(),
+        Some(1)
+    );
+
+    let (bootstrap, handle) = start_broker_on_data_dir(dir.path()).await;
+    let fetched = offset_fetch_via_network(&bootstrap, &group_id, &topic, &[0]);
+    assert_eq!(fetched.groups[0].topics[0].partitions[0].error_code, 0);
+    assert_eq!(
+        fetched.groups[0].topics[0].partitions[0].committed_offset,
+        1
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_log_dir_recovery_preserves_transactional_offset_commits() {
+    let Some(source) = real_kafka_recovery_log_dir() else {
+        eprintln!(
+            "skipping filesystem recovery test: set REAL_KAFKA_RECOVERY_LOG_DIR to a stopped Kafka log dir"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    copy_dir_all(&source, dir.path());
+
+    let topic = find_topic_dir_with_prefix(dir.path(), "diff.txn.offsets.")
+        .expect("expected transactional offset topic from differential fixture");
+    let suffix = topic
+        .strip_prefix("diff.txn.offsets.")
+        .expect("topic prefix should match");
+    let group_id = format!("diff.txn.offsets.group.{suffix}");
+
+    let broker = broker_for_data_dir(dir.path());
+    assert_eq!(
+        broker.store().fetch_offset(&group_id, &topic, 0).unwrap(),
+        Some(20)
+    );
+
+    let (bootstrap, handle) = start_broker_on_data_dir(dir.path()).await;
+    let fetched = offset_fetch_via_network(&bootstrap, &group_id, &topic, &[0]);
+    assert_eq!(fetched.groups[0].topics[0].partitions[0].error_code, 0);
+    assert_eq!(
+        fetched.groups[0].topics[0].partitions[0].committed_offset,
+        20
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_log_dir_recovery_preserves_multi_partition_committed_offsets() {
+    let Some(source) = real_kafka_recovery_log_dir() else {
+        eprintln!(
+            "skipping filesystem recovery test: set REAL_KAFKA_RECOVERY_LOG_DIR to a stopped Kafka log dir"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    copy_dir_all(&source, dir.path());
+
+    let topic = find_topic_dir_with_prefix(dir.path(), "diff.multi-offsets.")
+        .expect("expected multi-offset topic from differential fixture");
+    let group_id = format!("group.{topic}");
+
+    let broker = broker_for_data_dir(dir.path());
+    assert_eq!(
+        broker.store().fetch_offset(&group_id, &topic, 1).unwrap(),
+        Some(11)
+    );
+    assert_eq!(
+        broker.store().fetch_offset(&group_id, &topic, 2).unwrap(),
+        Some(22)
+    );
+
+    let (bootstrap, handle) = start_broker_on_data_dir(dir.path()).await;
+    let fetched = offset_fetch_via_network(&bootstrap, &group_id, &topic, &[1, 2]);
+    assert_eq!(fetched.groups[0].topics[0].partitions[0].error_code, 0);
+    assert_eq!(
+        fetched.groups[0].topics[0].partitions[0].committed_offset,
+        11
+    );
+    assert_eq!(fetched.groups[0].topics[0].partitions[1].error_code, 0);
+    assert_eq!(
+        fetched.groups[0].topics[0].partitions[1].committed_offset,
+        22
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_log_dir_recovery_preserves_group_metadata_state() {
+    let Some(source) = real_kafka_recovery_log_dir() else {
+        eprintln!(
+            "skipping filesystem recovery test: set REAL_KAFKA_RECOVERY_LOG_DIR to a stopped Kafka log dir"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    copy_dir_all(&source, dir.path());
+
+    let topic = find_topic_dir_with_prefix(dir.path(), "diff.multi-offsets.")
+        .expect("expected multi-offset topic from differential fixture");
+    let group_id = format!("group.{topic}");
+
+    let store = FileStore::open(dir.path()).unwrap();
+    let group = store
+        .debug_group_state(&group_id)
+        .expect("expected recovered group metadata");
+    assert_eq!(group.generation_id, 1);
+    assert_eq!(group.protocol_name, "range");
+    assert_eq!(group.members.len(), 1);
+    let member = group
+        .members
+        .values()
+        .next()
+        .expect("expected recovered group member")
+        .clone();
+    assert_eq!(
+        decode_assignment_partitions(&member.assignment, &topic),
+        vec![1, 2]
+    );
+    drop(store);
+
+    let (bootstrap, handle) = start_broker_on_data_dir(dir.path()).await;
+
+    let sync = sync_group_via_network(
+        &bootstrap,
+        &group_id,
+        group.generation_id,
+        &member.member_id,
+        &member.member_id,
+        "range",
+        &[],
+    );
+    assert_eq!(sync.error_code, 0);
+    assert_eq!(
+        decode_assignment_partitions(&sync.assignment, &topic),
+        vec![1, 2]
+    );
+
+    let heartbeat = heartbeat_via_network(
+        &bootstrap,
+        &group_id,
+        group.generation_id,
+        &member.member_id,
+    );
+    assert_eq!(heartbeat.error_code, 0);
+
+    let leave = leave_group_via_network(&bootstrap, &group_id, &member.member_id);
+    assert_eq!(leave.error_code, 0);
+    let heartbeat_after_leave = heartbeat_via_network(
+        &bootstrap,
+        &group_id,
+        group.generation_id,
+        &member.member_id,
+    );
+    assert_eq!(heartbeat_after_leave.error_code, 25);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_log_dir_recovery_allows_offset_commit_with_recovered_member() {
+    let Some(source) = real_kafka_recovery_log_dir() else {
+        eprintln!(
+            "skipping filesystem recovery test: set REAL_KAFKA_RECOVERY_LOG_DIR to a stopped Kafka log dir"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    copy_dir_all(&source, dir.path());
+
+    let topic = find_topic_dir_with_prefix(dir.path(), "diff.multi-offsets.")
+        .expect("expected multi-offset topic from differential fixture");
+    let group_id = format!("group.{topic}");
+
+    let store = FileStore::open(dir.path()).unwrap();
+    let group = store
+        .debug_group_state(&group_id)
+        .expect("expected recovered group metadata");
+    let member = group
+        .members
+        .values()
+        .next()
+        .expect("expected recovered group member")
+        .clone();
+    drop(store);
+
+    let (bootstrap, handle) = start_broker_on_data_dir(dir.path()).await;
+    let commit = offset_commit_via_network(
+        &bootstrap,
+        &group_id,
+        group.generation_id,
+        &member.member_id,
+        &topic,
+        1,
+        12,
+    );
+    assert_eq!(commit.topics[0].partitions[0].error_code, 0);
+
+    let fetched = offset_fetch_via_network(&bootstrap, &group_id, &topic, &[1]);
+    assert_eq!(
+        fetched.groups[0].topics[0].partitions[0].committed_offset,
+        12
     );
 
     handle.abort();
@@ -540,6 +787,159 @@ fn wait_for_topic_ready(consumer: &BaseConsumer, topic: &str) {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("topic {topic} did not become ready: {last_state}");
+}
+
+fn offset_fetch_via_network(
+    bootstrap: &str,
+    group_id: &str,
+    topic: &str,
+    partitions: &[i32],
+) -> OffsetFetchResponse {
+    send_request(
+        bootstrap,
+        ApiKey::OffsetFetch,
+        crate::protocol::OFFSET_FETCH_VERSION,
+        OffsetFetchRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partition_indexes(partitions.to_vec()),
+            ])),
+    )
+}
+
+fn offset_commit_via_network(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+    topic: &str,
+    partition: i32,
+    next_offset: i64,
+) -> OffsetCommitResponse {
+    send_request(
+        bootstrap,
+        ApiKey::OffsetCommit,
+        crate::protocol::OFFSET_COMMIT_VERSION,
+        OffsetCommitRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id_or_member_epoch(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string()))
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(TopicName(StrBytes::from(topic.to_string())))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(partition)
+                            .with_committed_offset(next_offset),
+                    ]),
+            ]),
+    )
+}
+
+fn sync_group_via_network(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+    leader_member_id: &str,
+    protocol_name: &str,
+    assignments: &[(&str, Vec<u8>)],
+) -> SyncGroupResponse {
+    send_request(
+        bootstrap,
+        ApiKey::SyncGroup,
+        crate::protocol::SYNC_GROUP_VERSION,
+        SyncGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string()))
+            .with_protocol_type(Some(StrBytes::from("consumer".to_string())))
+            .with_protocol_name(Some(StrBytes::from(protocol_name.to_string())))
+            .with_assignments(if member_id == leader_member_id {
+                assignments
+                    .iter()
+                    .map(|(member, assignment)| {
+                        SyncGroupRequestAssignment::default()
+                            .with_member_id(StrBytes::from((*member).to_string()))
+                            .with_assignment(Bytes::from(assignment.clone()))
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }),
+    )
+}
+
+fn heartbeat_via_network(
+    bootstrap: &str,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+) -> HeartbeatResponse {
+    send_request(
+        bootstrap,
+        ApiKey::Heartbeat,
+        crate::protocol::HEARTBEAT_VERSION,
+        HeartbeatRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_generation_id(generation_id)
+            .with_member_id(StrBytes::from(member_id.to_string())),
+    )
+}
+
+fn leave_group_via_network(bootstrap: &str, group_id: &str, member_id: &str) -> LeaveGroupResponse {
+    send_request(
+        bootstrap,
+        ApiKey::LeaveGroup,
+        crate::protocol::LEAVE_GROUP_VERSION,
+        LeaveGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group_id.to_string())))
+            .with_member_id(StrBytes::from(member_id.to_string())),
+    )
+}
+
+fn send_request<TReq: Encodable, TResp: Decodable>(
+    bootstrap: &str,
+    api_key: ApiKey,
+    api_version: i16,
+    request: TReq,
+) -> TResp {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(bootstrap).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    let mut payload = BytesMut::new();
+    RequestHeader::default()
+        .with_request_api_key(api_key as i16)
+        .with_request_api_version(api_version)
+        .with_correlation_id(1)
+        .with_client_id(Some(StrBytes::from("kafka-filesystem-test".to_string())))
+        .encode(&mut payload, api_key.request_header_version(api_version))
+        .unwrap();
+    request.encode(&mut payload, api_version).unwrap();
+
+    stream
+        .write_all(&(payload.len() as i32).to_be_bytes())
+        .unwrap();
+    stream.write_all(payload.as_ref()).unwrap();
+
+    let mut size = [0_u8; 4];
+    stream.read_exact(&mut size).unwrap();
+    let size = i32::from_be_bytes(size) as usize;
+    let mut body = vec![0_u8; size];
+    stream.read_exact(&mut body).unwrap();
+    let mut bytes = Bytes::from(body);
+    let _ =
+        ResponseHeader::decode(&mut bytes, api_key.response_header_version(api_version)).unwrap();
+    TResp::decode(&mut bytes, api_version).unwrap()
 }
 
 fn free_port() -> u16 {

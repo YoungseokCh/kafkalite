@@ -88,13 +88,8 @@ async fn create_topic_record(bootstrap: &str, args: &CreateTopicRecordArgs) -> R
         .context("create producer")?;
     let payload = args
         .payload_bytes
-        .map(|len| {
-            args.payload
-                .repeat(len.div_ceil(args.payload.len()))
-                .chars()
-                .take(len)
-                .collect()
-        })
+        .map(|len| build_payload(&args.payload, len))
+        .transpose()?
         .unwrap_or_else(|| args.payload.to_string());
     let record = if let Some(timestamp_ms) = args.timestamp_ms {
         FutureRecord::to(&args.topic)
@@ -113,4 +108,44 @@ async fn create_topic_record(bootstrap: &str, args: &CreateTopicRecordArgs) -> R
         .await
         .map(|_| ())
         .map_err(|(err, _)| anyhow::anyhow!("produce fixture record: {err}"))
+}
+
+fn build_payload(seed: &str, len: usize) -> Result<String> {
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if seed.is_empty() {
+        return Err(anyhow::anyhow!(
+            "--payload must be non-empty when --payload-bytes is set"
+        ));
+    }
+    let seed = seed.as_bytes();
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        let take = (len - bytes.len()).min(seed.len());
+        bytes.extend_from_slice(&seed[..take]);
+    }
+    String::from_utf8(bytes).context("generated payload is not valid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_payload;
+
+    #[test]
+    fn build_payload_is_byte_accurate_for_ascii_seed() {
+        let payload = build_payload("abc", 8).unwrap();
+        assert_eq!(payload.as_bytes(), b"abcabcab");
+    }
+
+    #[test]
+    fn build_payload_supports_zero_length() {
+        let payload = build_payload("abc", 0).unwrap();
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn build_payload_rejects_empty_seed_for_non_zero_length() {
+        assert!(build_payload("", 4).is_err());
+    }
 }

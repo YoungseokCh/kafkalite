@@ -3,11 +3,15 @@ use std::time::Duration;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::util::Timeout;
+use rdkafka::{Offset, TopicPartitionList};
 
-use super::{TransactionCoordinatorSnapshot, TransactionVisibilitySnapshot, producer, protocol};
+use super::{
+    MultiGroupTransactionalOffsetCommitSnapshot, TransactionCoordinatorSnapshot,
+    TransactionVisibilitySnapshot, TransactionalOffsetCommitSnapshot, producer, protocol,
+};
 use kafka_protocol::messages::ApiKey;
 
 fn advertised_version_range(bootstrap: &str, api_key: ApiKey) -> Option<(i16, i16)> {
@@ -341,6 +345,209 @@ async fn transaction_visibility_snapshot(
     }
 }
 
+async fn transactional_offset_commit_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_id: &str,
+    transactional_id: &str,
+) -> TransactionalOffsetCommitSnapshot {
+    ensure_topic(bootstrap, topic).await;
+    let producer = producer(bootstrap);
+    for offset in 0..30 {
+        producer
+            .send(
+                FutureRecord::to(topic)
+                    .payload(format!("payload-{offset}").as_bytes())
+                    .key(format!("key-{offset}").as_bytes()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    let consumer = isolation_consumer(bootstrap, group_id, "read_committed");
+    consumer.subscribe(&[topic]).unwrap();
+    let _ = super::poll_for_message(&consumer, Duration::from_secs(10));
+
+    let mut committed_tpl = TopicPartitionList::new();
+    committed_tpl
+        .add_partition_offset(topic, 0, Offset::Offset(10))
+        .unwrap();
+    consumer.commit(&committed_tpl, CommitMode::Sync).unwrap();
+
+    let producer = transactional_producer(bootstrap, transactional_id);
+    producer
+        .init_transactions(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    let cgm = consumer.group_metadata().unwrap();
+
+    producer.begin_transaction().unwrap();
+    let mut txn_tpl = TopicPartitionList::new();
+    txn_tpl
+        .add_partition_offset(topic, 0, Offset::Offset(20))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(&txn_tpl, &cgm, Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    producer
+        .commit_transaction(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    let committed_txn_offset = protocol::offset_fetch(bootstrap, group_id, topic, &[0]).topics[0]
+        .partitions[0]
+        .committed_offset;
+
+    producer.begin_transaction().unwrap();
+    let mut aborted_tpl = TopicPartitionList::new();
+    aborted_tpl
+        .add_partition_offset(topic, 0, Offset::Offset(25))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(&aborted_tpl, &cgm, Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    producer
+        .abort_transaction(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    let aborted_txn_offset = protocol::offset_fetch(bootstrap, group_id, topic, &[0]).topics[0]
+        .partitions[0]
+        .committed_offset;
+
+    TransactionalOffsetCommitSnapshot {
+        committed_txn_offset,
+        aborted_txn_offset,
+    }
+}
+
+fn distinct_consumer_offset_groups(seed: &str) -> (String, String) {
+    let group_a = format!("{seed}.group.a");
+    let partition_a = kafkalite_server::store::consumer_offsets_partition_for_group_id(&group_a);
+    for suffix in 0..10_000 {
+        let group_b = format!("{seed}.group.b.{suffix}");
+        let partition_b =
+            kafkalite_server::store::consumer_offsets_partition_for_group_id(&group_b);
+        if partition_b != partition_a {
+            return (group_a, group_b);
+        }
+    }
+    panic!("failed to find distinct __consumer_offsets groups");
+}
+
+async fn multi_group_transactional_offset_commit_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    group_a: &str,
+    group_b: &str,
+    transactional_id: &str,
+) -> MultiGroupTransactionalOffsetCommitSnapshot {
+    ensure_topic(bootstrap, topic).await;
+    let seeded = producer(bootstrap);
+    for offset in 0..40 {
+        seeded
+            .send(
+                FutureRecord::to(topic)
+                    .payload(format!("payload-{offset}").as_bytes())
+                    .key(format!("key-{offset}").as_bytes()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    let consumer_a = isolation_consumer(bootstrap, group_a, "read_committed");
+    consumer_a.subscribe(&[topic]).unwrap();
+    let _ = super::poll_for_message(&consumer_a, Duration::from_secs(10));
+    let mut committed_a = TopicPartitionList::new();
+    committed_a
+        .add_partition_offset(topic, 0, Offset::Offset(5))
+        .unwrap();
+    consumer_a.commit(&committed_a, CommitMode::Sync).unwrap();
+    let cgm_a = consumer_a.group_metadata().unwrap();
+
+    let consumer_b = isolation_consumer(bootstrap, group_b, "read_committed");
+    consumer_b.subscribe(&[topic]).unwrap();
+    let _ = super::poll_for_message(&consumer_b, Duration::from_secs(10));
+    let mut committed_b = TopicPartitionList::new();
+    committed_b
+        .add_partition_offset(topic, 0, Offset::Offset(7))
+        .unwrap();
+    consumer_b.commit(&committed_b, CommitMode::Sync).unwrap();
+    let cgm_b = consumer_b.group_metadata().unwrap();
+
+    let producer = transactional_producer(bootstrap, transactional_id);
+    producer
+        .init_transactions(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    producer.begin_transaction().unwrap();
+    let mut txn_tpl_a = TopicPartitionList::new();
+    txn_tpl_a
+        .add_partition_offset(topic, 0, Offset::Offset(20))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(&txn_tpl_a, &cgm_a, Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    let mut txn_tpl_b = TopicPartitionList::new();
+    txn_tpl_b
+        .add_partition_offset(topic, 0, Offset::Offset(25))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(&txn_tpl_b, &cgm_b, Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+    producer
+        .commit_transaction(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    let group_a_committed_offset =
+        protocol::offset_fetch(bootstrap, group_a, topic, &[0]).topics[0].partitions[0]
+            .committed_offset;
+    let group_b_committed_offset =
+        protocol::offset_fetch(bootstrap, group_b, topic, &[0]).topics[0].partitions[0]
+            .committed_offset;
+
+    producer.begin_transaction().unwrap();
+    let mut aborted_tpl_a = TopicPartitionList::new();
+    aborted_tpl_a
+        .add_partition_offset(topic, 0, Offset::Offset(30))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(
+            &aborted_tpl_a,
+            &cgm_a,
+            Timeout::After(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let mut aborted_tpl_b = TopicPartitionList::new();
+    aborted_tpl_b
+        .add_partition_offset(topic, 0, Offset::Offset(35))
+        .unwrap();
+    producer
+        .send_offsets_to_transaction(
+            &aborted_tpl_b,
+            &cgm_b,
+            Timeout::After(Duration::from_secs(10)),
+        )
+        .unwrap();
+    producer
+        .abort_transaction(Timeout::After(Duration::from_secs(10)))
+        .unwrap();
+
+    let group_a_aborted_offset = protocol::offset_fetch(bootstrap, group_a, topic, &[0]).topics[0]
+        .partitions[0]
+        .committed_offset;
+    let group_b_aborted_offset = protocol::offset_fetch(bootstrap, group_b, topic, &[0]).topics[0]
+        .partitions[0]
+        .committed_offset;
+
+    MultiGroupTransactionalOffsetCommitSnapshot {
+        group_a_committed_offset,
+        group_b_committed_offset,
+        group_a_aborted_offset,
+        group_b_aborted_offset,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_kafka_and_local_broker_match_transaction_visibility() {
     let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
@@ -380,6 +587,97 @@ async fn real_kafka_and_local_broker_match_transaction_visibility() {
         &transactional_id,
     )
     .await;
+    assert_eq!(local_snapshot, real_snapshot);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_and_local_broker_match_transactional_offset_commit_flow() {
+    let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
+        eprintln!(
+            "skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server"
+        );
+        return;
+    };
+
+    let (local_bootstrap, handle, _tempdir) = super::start_local_broker().await;
+    let real_bootstrap = real_bootstrap
+        .into_string()
+        .expect("bootstrap must be utf-8");
+    if !super::bootstrap_available(&real_bootstrap) {
+        eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
+        handle.abort();
+        let _ = handle.await;
+        return;
+    }
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let topic = format!("diff.txn.offsets.{suffix}");
+    let group_id = format!("diff.txn.offsets.group.{suffix}");
+    let transactional_id = format!("diff.txn.offsets.id.{suffix}");
+
+    let real_snapshot =
+        transactional_offset_commit_snapshot(&real_bootstrap, &topic, &group_id, &transactional_id)
+            .await;
+    let local_snapshot = transactional_offset_commit_snapshot(
+        &local_bootstrap,
+        &topic,
+        &group_id,
+        &transactional_id,
+    )
+    .await;
+
+    assert_eq!(local_snapshot, real_snapshot);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_kafka_and_local_broker_match_multi_group_transactional_offset_commit_flow() {
+    let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
+        eprintln!(
+            "skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server"
+        );
+        return;
+    };
+
+    let (local_bootstrap, handle, _tempdir) = super::start_local_broker().await;
+    let real_bootstrap = real_bootstrap
+        .into_string()
+        .expect("bootstrap must be utf-8");
+    if !super::bootstrap_available(&real_bootstrap) {
+        eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
+        handle.abort();
+        let _ = handle.await;
+        return;
+    }
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let topic = format!("diff.txn.offsets.multi.{suffix}");
+    let transactional_id = format!("diff.txn.offsets.multi.id.{suffix}");
+    let (group_a, group_b) =
+        distinct_consumer_offset_groups(&format!("diff.txn.offsets.multi.{suffix}"));
+
+    let real_snapshot = multi_group_transactional_offset_commit_snapshot(
+        &real_bootstrap,
+        &topic,
+        &group_a,
+        &group_b,
+        &transactional_id,
+    )
+    .await;
+    let local_snapshot = multi_group_transactional_offset_commit_snapshot(
+        &local_bootstrap,
+        &topic,
+        &group_a,
+        &group_b,
+        &transactional_id,
+    )
+    .await;
+
     assert_eq!(local_snapshot, real_snapshot);
 
     handle.abort();

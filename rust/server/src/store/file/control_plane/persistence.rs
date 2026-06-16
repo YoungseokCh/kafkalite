@@ -17,6 +17,8 @@ impl ControlPlaneState {
             &self.logs,
             record_offset,
             OffsetCommitRecord {
+                producer_id: -1,
+                producer_epoch: -1,
                 group_id: request.group_id,
                 offset_topic_partition,
                 topic: request.topic,
@@ -52,14 +54,18 @@ impl ControlPlaneState {
         Ok(())
     }
 
-    fn next_record_offset(&self, offset_topic_partition: i32) -> i64 {
+    pub(super) fn next_record_offset(&self, offset_topic_partition: i32) -> i64 {
         self.next_consumer_offsets_records
             .get(&offset_topic_partition)
             .copied()
             .unwrap_or(0)
     }
 
-    fn advance_record_offset(&mut self, offset_topic_partition: i32, record_offset: i64) {
+    pub(super) fn advance_record_offset(
+        &mut self,
+        offset_topic_partition: i32,
+        record_offset: i64,
+    ) {
         self.next_consumer_offsets_records
             .insert(offset_topic_partition, record_offset + 1);
     }

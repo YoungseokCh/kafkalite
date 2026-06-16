@@ -24,6 +24,10 @@ use log::RecordLog;
 pub use policy::FileStorePolicy;
 use state::SnapshotSet;
 
+pub(crate) fn consumer_offsets_partition_for_group_id(group_id: &str) -> i32 {
+    consumer_offsets::partition_for_group_id(group_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitionSummary {
     pub partition: i32,
@@ -50,6 +54,9 @@ pub struct StorageSummary {
     pub timeindex_bytes: u64,
     pub state_bytes: u64,
 }
+
+#[cfg(test)]
+pub(crate) type DebugGroupState = state::GroupState;
 
 pub struct FileStore {
     root: PathBuf,
@@ -94,6 +101,7 @@ impl FileStore {
             control: Mutex::new(ControlPlaneState::new(
                 snapshots.groups,
                 snapshots.offsets,
+                replayed_control.pending_transactional_offsets,
                 logs.clone(),
                 replayed_control.next_record_offsets,
             )),
@@ -129,6 +137,12 @@ impl FileStore {
 
     pub fn rebuild_indexes(&self, topic: &str) -> Result<()> {
         self.logs.rebuild_indexes_for_topic(topic)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_group_state(&self, group_id: &str) -> Option<DebugGroupState> {
+        let control = self.control.lock().expect("file store mutex poisoned");
+        control.debug_group_state(group_id)
     }
 }
 

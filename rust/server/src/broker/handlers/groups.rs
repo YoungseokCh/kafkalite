@@ -24,11 +24,13 @@ use kafka_protocol::protocol::StrBytes;
 use super::super::KafkaBroker;
 use super::super::server::StagedOffsetCommit;
 use super::error_codes::{
-    INVALID_PRODUCER_EPOCH, INVALID_PRODUCER_ID_MAPPING, PRODUCER_FENCED,
-    UNKNOWN_TOPIC_OR_PARTITION,
+    INVALID_PRODUCER_EPOCH, INVALID_PRODUCER_ID_MAPPING, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::store::TransactionStatus;
-use crate::store::{GroupJoinRequest, OffsetCommitRequest as StoreOffsetCommitRequest, StoreError};
+use crate::store::{
+    GroupJoinRequest, OffsetCommitRequest as StoreOffsetCommitRequest, StoreError,
+    TransactionalOffsetCommitRequest as StoreTransactionalOffsetCommitRequest,
+};
 
 pub fn handle_find_coordinator(
     broker: &KafkaBroker,
@@ -245,14 +247,24 @@ pub async fn handle_txn_offset_commit(
         request.producer_id.0,
         request.producer_epoch,
     );
+    let consumer_offsets_partition =
+        crate::store::consumer_offsets_partition_for_group_id(request.group_id.as_ref());
     let session_error = validated_session
         .as_ref()
         .and_then(|session| {
-            (!matches!(
+            if !matches!(
                 session.status,
                 TransactionStatus::Empty | TransactionStatus::Ongoing
-            ))
-            .then_some(crate::broker::handlers::error_codes::INVALID_TXN_STATE)
+            ) {
+                Some(crate::broker::handlers::error_codes::INVALID_TXN_STATE)
+            } else {
+                (!broker.transaction_contains_partition(
+                    request.transactional_id.as_ref(),
+                    "__consumer_offsets",
+                    consumer_offsets_partition,
+                ))
+                .then_some(crate::broker::handlers::error_codes::INVALID_TXN_STATE)
+            }
         })
         .or_else(|| {
             if validated_session.is_none() {
@@ -314,18 +326,35 @@ fn stage_txn_offset_commits(
             };
             let error_code = match broker.store().validate_offset_commit(store_request) {
                 Ok(()) => {
+                    let staged_commit = StagedOffsetCommit {
+                        group_id: request.group_id.to_string(),
+                        topic: topic_name.clone(),
+                        partition: partition.partition_index,
+                        next_offset: partition.committed_offset,
+                    };
                     broker.stage_transaction_offset_commit(
                         request.transactional_id.as_ref(),
-                        StagedOffsetCommit {
-                            group_id: request.group_id.to_string(),
-                            member_id: request.member_id.to_string(),
-                            generation_id: request.generation_id,
-                            topic: topic_name.clone(),
-                            partition: partition.partition_index,
-                            next_offset: partition.committed_offset,
-                        },
+                        staged_commit.clone(),
                         now_ms,
                     )?;
+                    if let Err(err) = broker.store().stage_transactional_offset_commit(
+                        StoreTransactionalOffsetCommitRequest {
+                            producer_id: request.producer_id.0,
+                            producer_epoch: request.producer_epoch,
+                            group_id: request.group_id.as_ref(),
+                            topic: &topic_name,
+                            partition: partition.partition_index,
+                            next_offset: partition.committed_offset,
+                            now_ms,
+                        },
+                    ) {
+                        broker.remove_transaction_offset_commit(
+                            request.transactional_id.as_ref(),
+                            &staged_commit,
+                            now_ms,
+                        )?;
+                        return Err(err.into());
+                    }
                     0
                 }
                 Err(StoreError::UnknownTopicOrPartition { .. }) => UNKNOWN_TOPIC_OR_PARTITION,
@@ -464,12 +493,6 @@ fn transaction_session_error(
     let Some(session) = broker.transaction_session(transactional_id) else {
         return Some(INVALID_PRODUCER_ID_MAPPING);
     };
-    if session.fenced
-        && session.producer_id == producer_id
-        && session.producer_epoch == producer_epoch
-    {
-        return Some(PRODUCER_FENCED);
-    }
     if session.producer_id != producer_id {
         return Some(INVALID_PRODUCER_ID_MAPPING);
     }
@@ -486,9 +509,6 @@ fn validated_transaction_session(
     producer_epoch: i16,
 ) -> Option<crate::broker::server::TransactionSession> {
     let session = broker.transaction_session(transactional_id)?;
-    if session.fenced {
-        return None;
-    }
     if session.producer_id != producer_id || session.producer_epoch != producer_epoch {
         return None;
     }

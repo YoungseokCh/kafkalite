@@ -11,7 +11,7 @@ use crate::cluster::{
     UpdateReplicaProgressRequest,
 };
 use crate::config::Config;
-use crate::store::{PendingOffsetCommit, Storage, TransactionSessionState, TransactionStatus};
+use crate::store::{Storage, TransactionSessionState, TransactionStatus};
 
 use self::connection_errors::is_expected_disconnect;
 use super::dispatcher;
@@ -22,8 +22,6 @@ mod connection_errors;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedOffsetCommit {
     pub group_id: String,
-    pub member_id: String,
-    pub generation_id: i32,
     pub topic: String,
     pub partition: i32,
     pub next_offset: i64,
@@ -36,7 +34,6 @@ pub struct TransactionSession {
     pub transaction_timeout_ms: i32,
     pub last_updated_ms: i64,
     pub transaction_start_timestamp_ms: i64,
-    pub fenced: bool,
     pub status: TransactionStatus,
     pub partitions: BTreeSet<(String, i32)>,
     pub pending_offset_commits: Vec<StagedOffsetCommit>,
@@ -60,44 +57,38 @@ impl KafkaBroker {
     pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
         let cluster = ClusterRuntime::from_config(&config)?;
         let persisted_transactions = store.transaction_sessions()?;
+        let mut transactions = BTreeMap::new();
+        for (transactional_id, session) in persisted_transactions {
+            let pending_offset_commits = store
+                .transactional_offset_commits(session.producer_id)?
+                .into_iter()
+                .map(|commit| StagedOffsetCommit {
+                    group_id: commit.group_id,
+                    topic: commit.topic,
+                    partition: commit.partition,
+                    next_offset: commit.next_offset,
+                })
+                .collect::<Vec<_>>();
+            transactions.insert(
+                transactional_id,
+                TransactionSession {
+                    producer_id: session.producer_id,
+                    producer_epoch: session.producer_epoch,
+                    transaction_timeout_ms: session.transaction_timeout_ms,
+                    last_updated_ms: session.last_updated_ms,
+                    transaction_start_timestamp_ms: session.transaction_start_timestamp_ms,
+                    status: session.status,
+                    partitions: session.partitions.into_iter().collect(),
+                    pending_offset_commits,
+                },
+            );
+        }
         let broker = Self {
             config,
             cluster,
             store,
             fetch_signals: Arc::new(FetchSignals::default()),
-            transactions: Arc::new(Mutex::new(
-                persisted_transactions
-                    .into_iter()
-                    .map(|(transactional_id, session)| {
-                        (
-                            transactional_id,
-                            TransactionSession {
-                                producer_id: session.producer_id,
-                                producer_epoch: session.producer_epoch,
-                                transaction_timeout_ms: session.transaction_timeout_ms,
-                                last_updated_ms: session.last_updated_ms,
-                                transaction_start_timestamp_ms: session
-                                    .transaction_start_timestamp_ms,
-                                fenced: session.fenced,
-                                status: session.status,
-                                partitions: session.partitions.into_iter().collect(),
-                                pending_offset_commits: session
-                                    .pending_offset_commits
-                                    .into_iter()
-                                    .map(|commit| StagedOffsetCommit {
-                                        group_id: commit.group_id,
-                                        member_id: commit.member_id,
-                                        generation_id: commit.generation_id,
-                                        topic: commit.topic,
-                                        partition: commit.partition,
-                                        next_offset: commit.next_offset,
-                                    })
-                                    .collect(),
-                            },
-                        )
-                    })
-                    .collect(),
-            )),
+            transactions: Arc::new(Mutex::new(transactions)),
         };
         if broker.cluster.can_auto_create_topics_locally() {
             let metadata = broker
@@ -183,16 +174,6 @@ impl KafkaBroker {
                     | TransactionStatus::PrepareCommit
                     | TransactionStatus::PrepareAbort
             ) {
-                let session = TransactionSession {
-                    fenced: true,
-                    last_updated_ms: now_ms,
-                    ..existing
-                };
-                self.transactions
-                    .lock()
-                    .expect("transaction registry poisoned")
-                    .insert(transactional_id.to_string(), session.clone());
-                self.persist_transaction_session(transactional_id, &session)?;
                 return Ok(Err(InitTransactionalProducerError::ConcurrentTransactions));
             }
             let next_epoch = existing.producer_epoch.saturating_add(1);
@@ -202,7 +183,6 @@ impl KafkaBroker {
                 transaction_timeout_ms,
                 last_updated_ms: now_ms,
                 transaction_start_timestamp_ms: -1,
-                fenced: false,
                 status: TransactionStatus::Empty,
                 partitions: BTreeSet::new(),
                 pending_offset_commits: Vec::new(),
@@ -239,7 +219,6 @@ impl KafkaBroker {
             transaction_timeout_ms,
             last_updated_ms: now_ms,
             transaction_start_timestamp_ms: -1,
-            fenced: false,
             status: TransactionStatus::Empty,
             partitions: BTreeSet::new(),
             pending_offset_commits: Vec::new(),
@@ -362,6 +341,37 @@ impl KafkaBroker {
             session.status = TransactionStatus::Ongoing;
             if session.transaction_start_timestamp_ms < 0 {
                 session.transaction_start_timestamp_ms = now_ms;
+            }
+            session.last_updated_ms = now_ms;
+            let session = session.clone();
+            drop(transactions);
+            return self.persist_transaction_session(transactional_id, &session);
+        }
+        Ok(())
+    }
+
+    pub fn remove_transaction_offset_commit(
+        &self,
+        transactional_id: &str,
+        commit: &StagedOffsetCommit,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut transactions = self
+            .transactions
+            .lock()
+            .expect("transaction registry poisoned");
+        if let Some(session) = transactions.get_mut(transactional_id) {
+            if let Some(index) = session.pending_offset_commits.iter().rposition(|existing| {
+                existing.group_id == commit.group_id
+                    && existing.topic == commit.topic
+                    && existing.partition == commit.partition
+                    && existing.next_offset == commit.next_offset
+            }) {
+                session.pending_offset_commits.remove(index);
+            }
+            if session.pending_offset_commits.is_empty() && session.partitions.is_empty() {
+                session.status = TransactionStatus::Empty;
+                session.transaction_start_timestamp_ms = -1;
             }
             session.last_updated_ms = now_ms;
             let session = session.clone();
@@ -572,33 +582,28 @@ impl KafkaBroker {
     ) -> Result<()> {
         if resolve_in_doubt {
             for (topic, partition) in &session.partitions {
-                let _ =
-                    self.store
-                        .write_transaction_marker(crate::store::TransactionMarkerRequest {
-                            topic,
-                            partition: *partition,
-                            producer_id: session.producer_id,
-                            producer_epoch: session.producer_epoch,
-                            coordinator_epoch: 0,
-                            committed,
-                            partition_leader_epoch: 0,
-                            now_ms,
-                        });
-                let _ = self.update_local_replica_progress(topic, *partition, now_ms);
-            }
-            if committed {
-                for staged in &session.pending_offset_commits {
-                    let _ = self.store.commit_offset(crate::store::OffsetCommitRequest {
-                        group_id: &staged.group_id,
-                        member_id: &staged.member_id,
-                        generation_id: staged.generation_id,
-                        topic: &staged.topic,
-                        partition: staged.partition,
-                        next_offset: staged.next_offset,
-                        now_ms,
-                    });
+                if topic == "__consumer_offsets" {
+                    continue;
                 }
+                self.store
+                    .write_transaction_marker(crate::store::TransactionMarkerRequest {
+                        topic,
+                        partition: *partition,
+                        producer_id: session.producer_id,
+                        producer_epoch: session.producer_epoch,
+                        coordinator_epoch: 0,
+                        committed,
+                        partition_leader_epoch: 0,
+                        now_ms,
+                    })?;
+                self.update_local_replica_progress(topic, *partition, now_ms)?;
             }
+            self.store.complete_transactional_offset_commits(
+                session.producer_id,
+                session.producer_epoch,
+                committed,
+                now_ms,
+            )?;
         }
         self.finalize_transaction_metadata(
             transactional_id,
@@ -863,21 +868,8 @@ impl KafkaBroker {
                 transaction_timeout_ms: session.transaction_timeout_ms,
                 last_updated_ms: session.last_updated_ms,
                 transaction_start_timestamp_ms: session.transaction_start_timestamp_ms,
-                fenced: session.fenced,
                 status: session.status,
                 partitions: session.partitions.iter().cloned().collect(),
-                pending_offset_commits: session
-                    .pending_offset_commits
-                    .iter()
-                    .map(|commit| PendingOffsetCommit {
-                        group_id: commit.group_id.clone(),
-                        member_id: commit.member_id.clone(),
-                        generation_id: commit.generation_id,
-                        topic: commit.topic.clone(),
-                        partition: commit.partition,
-                        next_offset: commit.next_offset,
-                    })
-                    .collect(),
             },
             chrono::Utc::now().timestamp_millis(),
         )?;

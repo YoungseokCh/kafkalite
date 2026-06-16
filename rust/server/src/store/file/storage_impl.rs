@@ -2,7 +2,8 @@ use super::FileStore;
 use crate::store::{
     BrokerRecord, FetchResult, GroupJoinRequest, GroupJoinResult, ListOffsetResult,
     OffsetCommitRequest, ProducerSession, ReplicaFetchResult, Result, Storage, SyncGroupResult,
-    TopicMetadata, TransactionMarkerRequest,
+    TopicMetadata, TransactionMarkerRequest, TransactionalOffsetCommit,
+    TransactionalOffsetCommitRequest,
 };
 
 use super::control_plane::SyncGroupStateRequest;
@@ -238,6 +239,8 @@ impl Storage for FileStore {
     fn truncate_partition(&self, topic: &str, partition: i32, next_offset: i64) -> Result<()> {
         self.logs
             .truncate_to_offset(topic, partition, next_offset)?;
+        self.logs
+            .update_root_checkpoints(topic, partition, next_offset)?;
         let mut data = self.data.lock().expect("file store mutex poisoned");
         data.reconcile_partition_offset(topic, partition, next_offset)?;
         let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
@@ -337,6 +340,49 @@ impl Storage for FileStore {
         }
         let mut control = self.control.lock().expect("file store mutex poisoned");
         control.commit_offset(request)
+    }
+
+    fn stage_transactional_offset_commit(
+        &self,
+        request: TransactionalOffsetCommitRequest<'_>,
+    ) -> Result<()> {
+        let known_partition = self
+            .data
+            .lock()
+            .expect("file store mutex poisoned")
+            .has_partition(request.topic, request.partition);
+        if !known_partition {
+            return Err(crate::store::StoreError::UnknownTopicOrPartition {
+                topic: request.topic.to_string(),
+                partition: request.partition,
+            });
+        }
+        let mut control = self.control.lock().expect("file store mutex poisoned");
+        control.stage_transactional_offset_commit(request)
+    }
+
+    fn complete_transactional_offset_commits(
+        &self,
+        producer_id: i64,
+        producer_epoch: i16,
+        committed: bool,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut control = self.control.lock().expect("file store mutex poisoned");
+        control.complete_transactional_offset_commits(
+            producer_id,
+            producer_epoch,
+            committed,
+            now_ms,
+        )
+    }
+
+    fn transactional_offset_commits(
+        &self,
+        producer_id: i64,
+    ) -> Result<Vec<TransactionalOffsetCommit>> {
+        let control = self.control.lock().expect("file store mutex poisoned");
+        Ok(control.transactional_offset_commits(producer_id))
     }
 
     fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Result<Option<i64>> {

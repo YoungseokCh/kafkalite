@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::store::{
     GroupJoinRequest, GroupJoinResult, GroupMember, OffsetCommitRequest, Result, StoreError,
-    SyncGroupResult, TopicMetadata,
+    SyncGroupResult, TopicMetadata, TransactionalOffsetCommit, TransactionalOffsetCommitRequest,
 };
 
 use self::assignment::{
@@ -21,9 +21,12 @@ mod membership;
 mod offset_key;
 mod persistence;
 
+type PendingTransactionalOffsets = BTreeMap<(i64, i32), Vec<TransactionalOffsetCommit>>;
+
 pub struct ControlPlaneState {
     groups: BTreeMap<String, GroupState>,
     offsets: BTreeMap<OffsetKey, i64>,
+    pending_transactional_offsets: PendingTransactionalOffsets,
     logs: Arc<RecordLog>,
     next_consumer_offsets_records: BTreeMap<i32, i64>,
 }
@@ -42,6 +45,7 @@ impl ControlPlaneState {
     pub fn new(
         groups: BTreeMap<String, GroupState>,
         offsets: BTreeMap<String, i64>,
+        pending_transactional_offsets: PendingTransactionalOffsets,
         logs: Arc<RecordLog>,
         next_consumer_offsets_records: BTreeMap<i32, i64>,
     ) -> Self {
@@ -51,6 +55,7 @@ impl ControlPlaneState {
                 .into_iter()
                 .map(|(key, value)| (OffsetKey::from_serialized(&key), value))
                 .collect(),
+            pending_transactional_offsets,
             logs,
             next_consumer_offsets_records,
         }
@@ -277,6 +282,130 @@ impl ControlPlaneState {
         self.offsets
             .get(&OffsetKey::new(group_id, topic, partition))
             .copied()
+    }
+
+    pub fn stage_transactional_offset_commit(
+        &mut self,
+        request: TransactionalOffsetCommitRequest<'_>,
+    ) -> Result<()> {
+        let offset_topic_partition =
+            super::consumer_offsets::partition_for_group_id(request.group_id);
+        let record_offset = self.next_record_offset(offset_topic_partition);
+        super::consumer_offsets::append_commit(
+            &self.logs,
+            record_offset,
+            super::consumer_offsets::OffsetCommitRecord {
+                producer_id: request.producer_id,
+                producer_epoch: request.producer_epoch,
+                group_id: request.group_id,
+                offset_topic_partition,
+                topic: request.topic,
+                partition: request.partition,
+                next_offset: request.next_offset,
+                now_ms: request.now_ms,
+            },
+        )?;
+        self.advance_record_offset(offset_topic_partition, record_offset);
+        let commit = TransactionalOffsetCommit {
+            producer_id: request.producer_id,
+            producer_epoch: request.producer_epoch,
+            offset_topic_partition,
+            group_id: request.group_id.to_string(),
+            topic: request.topic.to_string(),
+            partition: request.partition,
+            next_offset: request.next_offset,
+        };
+        let entry = self
+            .pending_transactional_offsets
+            .entry((request.producer_id, offset_topic_partition))
+            .or_default();
+        if let Some(existing) = entry.iter_mut().find(|existing| {
+            existing.group_id == commit.group_id
+                && existing.topic == commit.topic
+                && existing.partition == commit.partition
+        }) {
+            *existing = commit;
+        } else {
+            entry.push(commit);
+        }
+        Ok(())
+    }
+
+    pub fn complete_transactional_offset_commits(
+        &mut self,
+        producer_id: i64,
+        producer_epoch: i16,
+        committed: bool,
+        now_ms: i64,
+    ) -> Result<()> {
+        let pending = self
+            .pending_transactional_offsets
+            .iter()
+            .filter(|((pending_producer_id, _), _)| *pending_producer_id == producer_id)
+            .flat_map(|(_, commits)| commits.iter().cloned())
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if pending
+            .iter()
+            .any(|commit| commit.producer_epoch != producer_epoch)
+        {
+            return Err(StoreError::StaleProducerEpoch {
+                producer_id,
+                expected: pending
+                    .iter()
+                    .map(|commit| commit.producer_epoch)
+                    .max()
+                    .unwrap_or(producer_epoch),
+                actual: producer_epoch,
+            });
+        }
+        let mut partitions = pending
+            .iter()
+            .map(|commit| commit.offset_topic_partition)
+            .collect::<Vec<_>>();
+        partitions.sort_unstable();
+        partitions.dedup();
+        for &offset_topic_partition in &partitions {
+            let record_offset = self.next_record_offset(offset_topic_partition);
+            super::consumer_offsets::append_transaction_marker(
+                &self.logs,
+                record_offset,
+                offset_topic_partition,
+                producer_id,
+                producer_epoch,
+                committed,
+                now_ms,
+            )?;
+            self.advance_record_offset(offset_topic_partition, record_offset);
+        }
+        for offset_topic_partition in partitions {
+            self.pending_transactional_offsets
+                .remove(&(producer_id, offset_topic_partition));
+        }
+        if committed {
+            for commit in pending {
+                self.offsets.insert(
+                    OffsetKey::new(&commit.group_id, &commit.topic, commit.partition),
+                    commit.next_offset,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn transactional_offset_commits(&self, producer_id: i64) -> Vec<TransactionalOffsetCommit> {
+        self.pending_transactional_offsets
+            .iter()
+            .filter(|((pending_producer_id, _), _)| *pending_producer_id == producer_id)
+            .flat_map(|(_, commits)| commits.iter().cloned())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn debug_group_state(&self, group_id: &str) -> Option<GroupState> {
+        self.groups.get(group_id).cloned()
     }
 
     pub fn group_count(&self) -> usize {

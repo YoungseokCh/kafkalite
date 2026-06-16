@@ -150,7 +150,7 @@ fn decode_value(bytes: &[u8]) -> Result<Option<TransactionSessionState>> {
             if bytes.remaining() == 0 {
                 return Ok(None);
             }
-            decode_kafka_value_v0(&mut bytes)
+            decode_value_v0(&mut bytes)
         }
         _ => Ok(None),
     }
@@ -182,7 +182,7 @@ fn read_utf8(bytes: &mut &[u8], len: usize) -> Result<Option<String>> {
         .map_err(|err| StoreError::Protocol(err.to_string()))
 }
 
-fn decode_kafka_value_v0(bytes: &mut &[u8]) -> Result<Option<TransactionSessionState>> {
+fn decode_value_v0(bytes: &mut &[u8]) -> Result<Option<TransactionSessionState>> {
     if bytes.remaining() < 31 {
         return Ok(None);
     }
@@ -206,10 +206,8 @@ fn decode_kafka_value_v0(bytes: &mut &[u8]) -> Result<Option<TransactionSessionS
         transaction_timeout_ms,
         last_updated_ms,
         transaction_start_timestamp_ms,
-        fenced: false,
         status,
         partitions,
-        pending_offset_commits: Vec::new(),
     }))
 }
 
@@ -308,10 +306,8 @@ mod tests {
             transaction_timeout_ms: 45_000,
             last_updated_ms: 123_456,
             transaction_start_timestamp_ms: 123_000,
-            fenced: true,
             status: TransactionStatus::PrepareCommit,
             partitions: vec![("a".to_string(), 0), ("b".to_string(), 2)],
-            pending_offset_commits: vec![],
         };
 
         let encoded = encode_value(&session).unwrap();
@@ -329,8 +325,6 @@ mod tests {
         );
         assert_eq!(decoded.status, session.status);
         assert_eq!(decoded.partitions, session.partitions);
-        assert!(!decoded.fenced);
-        assert!(decoded.pending_offset_commits.is_empty());
     }
 
     #[test]
@@ -341,10 +335,8 @@ mod tests {
             transaction_timeout_ms: 60_000,
             last_updated_ms: 987_654,
             transaction_start_timestamp_ms: 987_000,
-            fenced: false,
             status: TransactionStatus::Ongoing,
             partitions: vec![("topic".to_string(), 1), ("topic".to_string(), 3)],
-            pending_offset_commits: vec![],
         };
 
         let mut bytes = BytesMut::new();
@@ -380,6 +372,5 @@ mod tests {
         let decoded = decode_value(&bytes).unwrap().unwrap();
         assert_eq!(decoded.status, TransactionStatus::Empty);
         assert!(decoded.partitions.is_empty());
-        assert!(decoded.pending_offset_commits.is_empty());
     }
 }

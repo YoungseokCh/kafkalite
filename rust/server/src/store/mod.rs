@@ -6,10 +6,14 @@ pub use error::{Result, StoreError};
 pub use file::{FileStore, StorageSummary, TopicPartitionSummary, TopicSummary};
 pub use models::{
     BrokerRecord, FetchResult, GroupJoinResult, GroupMember, ListOffsetResult, PartitionMetadata,
-    PendingOffsetCommit, ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult,
-    TopicMetadata, TransactionSessionState, TransactionStatus,
+    ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult, TopicMetadata,
+    TransactionSessionState, TransactionStatus, TransactionalOffsetCommit,
 };
 use std::collections::BTreeMap;
+
+pub fn consumer_offsets_partition_for_group_id(group_id: &str) -> i32 {
+    file::consumer_offsets_partition_for_group_id(group_id)
+}
 
 pub const DEFAULT_PARTITION: i32 = 0;
 
@@ -30,6 +34,17 @@ pub struct OffsetCommitRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
     pub generation_id: i32,
+    pub topic: &'a str,
+    pub partition: i32,
+    pub next_offset: i64,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionalOffsetCommitRequest<'a> {
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub group_id: &'a str,
     pub topic: &'a str,
     pub partition: i32,
     pub next_offset: i64,
@@ -129,6 +144,21 @@ pub trait Storage: Send + Sync {
     fn leave_group(&self, group_id: &str, member_id: &str, now_ms: i64) -> Result<()>;
     fn validate_offset_commit(&self, request: OffsetCommitRequest<'_>) -> Result<()>;
     fn commit_offset(&self, request: OffsetCommitRequest<'_>) -> Result<()>;
+    fn stage_transactional_offset_commit(
+        &self,
+        request: TransactionalOffsetCommitRequest<'_>,
+    ) -> Result<()>;
+    fn complete_transactional_offset_commits(
+        &self,
+        producer_id: i64,
+        producer_epoch: i16,
+        committed: bool,
+        now_ms: i64,
+    ) -> Result<()>;
+    fn transactional_offset_commits(
+        &self,
+        producer_id: i64,
+    ) -> Result<Vec<TransactionalOffsetCommit>>;
     fn fetch_offset(&self, group_id: &str, topic: &str, partition: i32) -> Result<Option<i64>>;
     fn transaction_sessions(&self) -> Result<BTreeMap<String, TransactionSessionState>>;
     fn persist_transaction_session(

@@ -12,9 +12,9 @@ use kafka_protocol::messages::write_txn_markers_response::{
     WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
 };
 use kafka_protocol::messages::{
-    AddPartitionsToTxnRequest, EndTxnRequest, EndTxnResponse, FetchRequest, FetchResponse,
-    ListOffsetsRequest, ListOffsetsResponse, ProduceRequest, ProduceResponse, TopicName,
-    WriteTxnMarkersRequest, WriteTxnMarkersResponse,
+    AddOffsetsToTxnRequest, AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, EndTxnRequest,
+    EndTxnResponse, FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse,
+    ProduceRequest, ProduceResponse, TopicName, WriteTxnMarkersRequest, WriteTxnMarkersResponse,
 };
 use kafka_protocol::protocol::StrBytes;
 use kafka_protocol::records::RecordBatchDecoder;
@@ -25,13 +25,15 @@ use self::records::encode_records;
 use self::records::to_broker_record;
 use super::error_codes::{
     INVALID_PRODUCER_EPOCH, INVALID_PRODUCER_ID_MAPPING, INVALID_TXN_STATE, NOT_LEADER_OR_FOLLOWER,
-    OUT_OF_ORDER_SEQUENCE_NUMBER, PRODUCER_FENCED, UNKNOWN_PRODUCER_ID, UNKNOWN_TOPIC_OR_PARTITION,
+    OUT_OF_ORDER_SEQUENCE_NUMBER, UNKNOWN_PRODUCER_ID, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::store::StoreError;
 use crate::store::TransactionMarkerRequest;
 use crate::store::TransactionStatus;
 
 use super::super::KafkaBroker;
+
+const CONSUMER_OFFSETS_TOPIC: &str = "__consumer_offsets";
 
 mod auto_create;
 mod fetch_long_poll;
@@ -223,9 +225,6 @@ fn validate_transactional_produce(
         let Some((_, session)) = broker.transaction_session_by_producer(record.producer_id) else {
             return Some(INVALID_PRODUCER_ID_MAPPING);
         };
-        if session.fenced {
-            return Some(PRODUCER_FENCED);
-        }
         if session.producer_epoch != record.producer_epoch {
             return Some(INVALID_PRODUCER_EPOCH);
         }
@@ -311,6 +310,43 @@ pub async fn handle_add_partitions_to_txn(
     Ok(response.with_throttle_time_ms(0))
 }
 
+pub async fn handle_add_offsets_to_txn(
+    broker: &KafkaBroker,
+    request: AddOffsetsToTxnRequest,
+) -> Result<AddOffsetsToTxnResponse> {
+    broker.expire_timed_out_transactions(chrono::Utc::now().timestamp_millis())?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let error_code = if validated_transaction_session(
+        broker,
+        request.transactional_id.as_ref(),
+        request.producer_id.0,
+        request.producer_epoch,
+    )
+    .is_some()
+    {
+        broker.add_transaction_partitions(
+            request.transactional_id.as_ref(),
+            [(
+                CONSUMER_OFFSETS_TOPIC.to_string(),
+                crate::store::consumer_offsets_partition_for_group_id(request.group_id.as_ref()),
+            )],
+            now_ms,
+        )?;
+        0
+    } else {
+        transaction_session_error(
+            broker,
+            request.transactional_id.as_ref(),
+            request.producer_id.0,
+            request.producer_epoch,
+        )
+        .unwrap_or(INVALID_TXN_STATE)
+    };
+    Ok(AddOffsetsToTxnResponse::default()
+        .with_throttle_time_ms(0)
+        .with_error_code(error_code))
+}
+
 pub async fn handle_end_txn(
     broker: &KafkaBroker,
     request: EndTxnRequest,
@@ -323,28 +359,32 @@ pub async fn handle_end_txn(
         request.producer_id.0,
         request.producer_epoch,
     ) {
-        if !matches!(
+        let prepare_status = if request.committed {
+            TransactionStatus::PrepareCommit
+        } else {
+            TransactionStatus::PrepareAbort
+        };
+        let should_enter_prepare = matches!(
             session.status,
             TransactionStatus::Ongoing | TransactionStatus::Empty
-        ) {
+        );
+        if !should_enter_prepare && session.status != prepare_status {
             INVALID_TXN_STATE
         } else {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let partitions = broker.transaction_partitions(request.transactional_id.as_ref());
-            let staged_offset_commits =
-                broker.transaction_offset_commits(request.transactional_id.as_ref());
-            let prepare_status = if request.committed {
-                TransactionStatus::PrepareCommit
-            } else {
-                TransactionStatus::PrepareAbort
-            };
-            broker.set_transaction_status(
-                request.transactional_id.as_ref(),
-                prepare_status,
-                now_ms,
-            )?;
+            if should_enter_prepare {
+                broker.set_transaction_status(
+                    request.transactional_id.as_ref(),
+                    prepare_status,
+                    now_ms,
+                )?;
+            }
             let mut first_error = 0;
             for (topic, partition) in &partitions {
+                if topic == CONSUMER_OFFSETS_TOPIC {
+                    continue;
+                }
                 let error = write_transaction_marker_for_partition(
                     broker,
                     MarkerWrite {
@@ -361,33 +401,13 @@ pub async fn handle_end_txn(
                     first_error = error;
                 }
             }
-            if first_error == 0 && request.committed {
-                for staged in &staged_offset_commits {
-                    let commit_result =
-                        broker
-                            .store()
-                            .commit_offset(crate::store::OffsetCommitRequest {
-                                group_id: &staged.group_id,
-                                member_id: &staged.member_id,
-                                generation_id: staged.generation_id,
-                                topic: &staged.topic,
-                                partition: staged.partition,
-                                next_offset: staged.next_offset,
-                                now_ms,
-                            });
-                    let error = match commit_result {
-                        Ok(()) => 0,
-                        Err(StoreError::UnknownTopicOrPartition { .. }) => {
-                            UNKNOWN_TOPIC_OR_PARTITION
-                        }
-                        Err(StoreError::UnknownMember { .. }) => 25,
-                        Err(StoreError::StaleGeneration { .. }) => 22,
-                        Err(err) => return Err(err.into()),
-                    };
-                    if first_error == 0 && error != 0 {
-                        first_error = error;
-                    }
-                }
+            if first_error == 0 {
+                broker.store().complete_transactional_offset_commits(
+                    request.producer_id.0,
+                    request.producer_epoch,
+                    request.committed,
+                    now_ms,
+                )?;
             }
             if first_error == 0 {
                 let complete_status = if request.committed {
@@ -405,22 +425,6 @@ pub async fn handle_end_txn(
                     TransactionStatus::Empty,
                     now_ms,
                 )?;
-            } else if !request.committed {
-                broker.clear_transaction_offset_commits_with_timestamp(
-                    request.transactional_id.as_ref(),
-                    now_ms,
-                )?;
-                broker.set_transaction_status(
-                    request.transactional_id.as_ref(),
-                    TransactionStatus::Ongoing,
-                    now_ms,
-                )?;
-            } else {
-                broker.set_transaction_status(
-                    request.transactional_id.as_ref(),
-                    TransactionStatus::Ongoing,
-                    now_ms,
-                )?;
             }
             first_error
         }
@@ -434,15 +438,29 @@ pub async fn handle_end_txn(
         .unwrap_or(INVALID_TXN_STATE)
     };
 
+    Ok(build_end_txn_response(
+        api_version,
+        request.producer_id,
+        request.producer_epoch,
+        error_code,
+    ))
+}
+
+fn build_end_txn_response(
+    api_version: i16,
+    producer_id: kafka_protocol::messages::ProducerId,
+    producer_epoch: i16,
+    error_code: i16,
+) -> EndTxnResponse {
     let mut response = EndTxnResponse::default()
         .with_throttle_time_ms(0)
         .with_error_code(error_code);
     if api_version >= 5 {
         response = response
-            .with_producer_id(request.producer_id)
-            .with_producer_epoch(request.producer_epoch);
+            .with_producer_id(producer_id)
+            .with_producer_epoch(producer_epoch);
     }
-    Ok(response)
+    response
 }
 
 pub async fn handle_list_offsets(
@@ -658,9 +676,6 @@ fn validated_transaction_session(
     producer_epoch: i16,
 ) -> Option<super::super::server::TransactionSession> {
     let session = broker.transaction_session(transactional_id)?;
-    if session.fenced {
-        return None;
-    }
     if session.producer_id != producer_id || session.producer_epoch != producer_epoch {
         return None;
     }
@@ -676,12 +691,6 @@ fn transaction_session_error(
     let Some(session) = broker.transaction_session(transactional_id) else {
         return Some(INVALID_PRODUCER_ID_MAPPING);
     };
-    if session.fenced
-        && session.producer_id == producer_id
-        && session.producer_epoch == producer_epoch
-    {
-        return Some(PRODUCER_FENCED);
-    }
     if session.producer_id != producer_id {
         return Some(INVALID_PRODUCER_ID_MAPPING);
     }

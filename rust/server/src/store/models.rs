@@ -79,11 +79,12 @@ pub struct SyncGroupResult {
     pub assignment: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingOffsetCommit {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionalOffsetCommit {
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub offset_topic_partition: i32,
     pub group_id: String,
-    pub member_id: String,
-    pub generation_id: i32,
     pub topic: String,
     pub partition: i32,
     pub next_offset: i64,
@@ -97,11 +98,8 @@ pub struct TransactionSessionState {
     pub last_updated_ms: i64,
     #[serde(default = "default_transaction_start_timestamp_ms")]
     pub transaction_start_timestamp_ms: i64,
-    #[serde(default)]
-    pub fenced: bool,
     pub status: TransactionStatus,
     pub partitions: Vec<(String, i32)>,
-    pub pending_offset_commits: Vec<PendingOffsetCommit>,
 }
 
 fn default_transaction_start_timestamp_ms() -> i64 {

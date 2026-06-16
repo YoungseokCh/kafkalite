@@ -366,14 +366,8 @@ impl RecordLog {
         let version = lines.next().unwrap_or("0");
         let _count = lines.next().unwrap_or("0");
         let mut entries = lines
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let topic = parts.next()?;
-                let partition = parts.next()?.parse::<i32>().ok()?;
-                let offset = parts.next()?.parse::<i64>().ok()?;
-                Some((topic.to_string(), partition, offset))
-            })
-            .collect::<Vec<_>>();
+            .map(parse_checkpoint_entry)
+            .collect::<Result<Vec<_>>>()?;
         let mut found = false;
         for entry in &mut entries {
             if entry.0 == topic && entry.1 == partition {
@@ -587,6 +581,37 @@ impl RecordLog {
         }
         Ok(())
     }
+}
+
+fn parse_checkpoint_entry(line: &str) -> Result<(String, i32, i64)> {
+    let mut parts = line.split_whitespace();
+    let topic = parts.next().ok_or_else(|| {
+        crate::store::StoreError::Protocol(format!("invalid checkpoint line `{line}`"))
+    })?;
+    let partition = parts
+        .next()
+        .ok_or_else(|| {
+            crate::store::StoreError::Protocol(format!("invalid checkpoint line `{line}`"))
+        })?
+        .parse::<i32>()
+        .map_err(|_| {
+            crate::store::StoreError::Protocol(format!("invalid checkpoint line `{line}`"))
+        })?;
+    let offset = parts
+        .next()
+        .ok_or_else(|| {
+            crate::store::StoreError::Protocol(format!("invalid checkpoint line `{line}`"))
+        })?
+        .parse::<i64>()
+        .map_err(|_| {
+            crate::store::StoreError::Protocol(format!("invalid checkpoint line `{line}`"))
+        })?;
+    if parts.next().is_some() {
+        return Err(crate::store::StoreError::Protocol(format!(
+            "invalid checkpoint line `{line}`"
+        )));
+    }
+    Ok((topic.to_string(), partition, offset))
 }
 
 fn read_next_batch(file: &mut File) -> Result<Option<StoredBatch>> {
