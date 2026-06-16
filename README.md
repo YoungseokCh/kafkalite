@@ -13,7 +13,7 @@ cargo run --manifest-path rust/server/Cargo.toml -- --config rust/server/example
 
 ## Changelog
 
-### Unreleased
+### v1.1.5
 
 - Simplify the embedded broker lifecycle: remove `KafkaBroker::run()` and make `KafkaBroker::start()` plus `BrokerHandle::{ready,wait,shutdown}` the supported API
 - Add transactional produce flow scaffolding, including coordinator-side transaction session/state handling and transaction marker persistence
