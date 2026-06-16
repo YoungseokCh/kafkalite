@@ -75,6 +75,7 @@ pub(super) fn append_session(
         TRANSACTION_STATE_TOPIC,
         offset_topic_partition,
         &StoredBatch::from_records(&[record]),
+        now_ms,
     )
 }
 
@@ -102,6 +103,7 @@ pub(super) fn append_tombstone(
         TRANSACTION_STATE_TOPIC,
         offset_topic_partition,
         &StoredBatch::from_records(&[record]),
+        now_ms,
     )
 }
 

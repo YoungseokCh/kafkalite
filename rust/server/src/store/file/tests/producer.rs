@@ -222,8 +222,15 @@ fn unknown_producer_id_is_rejected() {
 #[test]
 fn rolled_segments_fetch_tail_and_update_active_segment_base_offset() {
     let dir = tempdir().unwrap();
-    let store = FileStore::open(dir.path()).unwrap();
-    let payload = vec![b'x'; super::super::policy::DEFAULT_POLICY.segment_bytes as usize];
+    let store = FileStore::open_with_policy(
+        dir.path(),
+        FileStorePolicy {
+            segment_bytes: 1_024,
+            ..FileStorePolicy::default()
+        },
+    )
+    .unwrap();
+    let payload = vec![b'x'; 1_024];
     let records = [
         BrokerRecord {
             offset: 0,

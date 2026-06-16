@@ -84,7 +84,8 @@ fn append_batch_hits_sync_interval_branch() {
     let log = RecordLog::open(dir.path()).unwrap();
 
     for offset in 0..DEFAULT_POLICY.log_sync_interval {
-        log.append_batch("sync", 0, &sample_batch(offset as i64))
+        let batch = sample_batch(offset as i64);
+        log.append_batch("sync", 0, &batch, batch.max_timestamp_ms)
             .unwrap();
     }
 
@@ -96,7 +97,8 @@ fn append_batch_hits_sync_interval_branch() {
 fn read_records_scans_log_when_index_file_missing() {
     let dir = tempdir().unwrap();
     let log = RecordLog::open(dir.path()).unwrap();
-    log.append_batch("index-missing", 0, &sample_batch(0))
+    let batch = sample_batch(0);
+    log.append_batch("index-missing", 0, &batch, batch.max_timestamp_ms)
         .unwrap();
     let segment = log
         .segment_paths("index-missing", 0)
@@ -144,6 +146,7 @@ fn read_records_for_client_filters_records_before_start_offset_within_batch() {
                 control: false,
             },
         ]),
+        101,
     )
     .unwrap();
 
@@ -163,8 +166,15 @@ fn read_records_for_client_filters_records_before_start_offset_within_batch() {
 #[test]
 fn rolls_to_new_segment_when_partition_exceeds_segment_bytes() {
     let dir = tempdir().unwrap();
-    let log = RecordLog::open(dir.path()).unwrap();
-    let value = vec![b'x'; DEFAULT_POLICY.segment_bytes as usize];
+    let log = RecordLog::open_with_policy(
+        dir.path(),
+        FileStorePolicy {
+            segment_bytes: 1024,
+            ..DEFAULT_POLICY
+        },
+    )
+    .unwrap();
+    let value = vec![b'x'; 1024];
     log.append_batch(
         "rolled",
         0,
@@ -181,6 +191,7 @@ fn rolls_to_new_segment_when_partition_exceeds_segment_bytes() {
             transactional: false,
             control: false,
         }]),
+        100,
     )
     .unwrap();
     log.append_batch(
@@ -199,6 +210,7 @@ fn rolls_to_new_segment_when_partition_exceeds_segment_bytes() {
             transactional: false,
             control: false,
         }]),
+        101,
     )
     .unwrap();
 

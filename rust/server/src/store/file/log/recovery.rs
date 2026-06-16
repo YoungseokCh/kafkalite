@@ -116,9 +116,13 @@ impl RecordLog {
         for batch in self.read_all_batches(topic, partition)? {
             next_offset = batch.last_offset + 1;
         }
+        let log_start_offset = self
+            .earliest_offset(topic, partition)?
+            .map(|(offset, _)| offset)
+            .unwrap_or(0);
         Ok(PartitionState {
             next_offset,
-            log_start_offset: 0,
+            log_start_offset,
             active_segment_base_offset: segments
                 .last()
                 .map(|segment| segment.base_offset)
@@ -256,7 +260,7 @@ impl RecordLog {
             let payload_len = payload.len() as u64;
             let should_roll = current_segment.is_some()
                 && current_len > 0
-                && current_len + payload_len > super::DEFAULT_POLICY.segment_bytes;
+                && current_len + payload_len > self.policy.segment_bytes;
             if current_segment.is_none() || should_roll {
                 current_segment =
                     Some(self.ensure_segment_files(topic, partition, batch.base_offset)?);
@@ -291,7 +295,7 @@ impl RecordLog {
         Ok(())
     }
 
-    fn remove_segment_files(&self, segment: &SegmentPaths) -> Result<()> {
+    pub(super) fn remove_segment_files(&self, segment: &SegmentPaths) -> Result<()> {
         for path in [&segment.log, &segment.index, &segment.timeindex] {
             if path.exists() {
                 fs::remove_file(path)?;

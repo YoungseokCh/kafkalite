@@ -25,10 +25,11 @@ async fn main() {
     ensure_parent_dir(&config.storage.data_dir);
 
     let store = Arc::new(
-        FileStore::open(&config.storage.data_dir).unwrap_or_else(|err| {
-            eprintln!("Failed to open kafkalite storage: {err}");
-            std::process::exit(1);
-        }),
+        FileStore::open_with_policy(&config.storage.data_dir, config.storage.policy())
+            .unwrap_or_else(|err| {
+                eprintln!("Failed to open kafkalite storage: {err}");
+                std::process::exit(1);
+            }),
     );
 
     let broker = KafkaBroker::new(config.clone(), store).unwrap_or_else(|err| {

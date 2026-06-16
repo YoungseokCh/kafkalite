@@ -108,6 +108,7 @@ pub(super) fn append_commit(
         CONSUMER_OFFSETS_TOPIC,
         commit.offset_topic_partition,
         &StoredBatch::from_records(&[record]),
+        commit.now_ms,
     )
 }
 
@@ -137,6 +138,7 @@ pub(super) fn append_transaction_marker(
         CONSUMER_OFFSETS_TOPIC,
         offset_topic_partition,
         &StoredBatch::from_records(&[record]),
+        now_ms,
     )
 }
 
@@ -164,6 +166,7 @@ pub(super) fn append_group_state(
         CONSUMER_OFFSETS_TOPIC,
         group_state.offset_topic_partition,
         &StoredBatch::from_records(&[record]),
+        group_state.now_ms,
     )
 }
 

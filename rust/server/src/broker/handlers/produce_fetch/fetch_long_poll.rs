@@ -129,6 +129,11 @@ fn fetch_partition_data(
     let high_watermark = broker
         .partition_high_watermark(topic_name, partition.partition)
         .unwrap_or(fetched.high_watermark);
+    let log_start_offset = broker
+        .store()
+        .list_offsets(topic_name, partition.partition)
+        .map(|(earliest, _)| earliest.offset)
+        .unwrap_or(0);
     let transactional_view = visible_records(
         broker,
         topic_name,
@@ -148,6 +153,7 @@ fn fetch_partition_data(
                 partition.partition,
                 high_watermark,
                 transactional_view.last_stable_offset,
+                log_start_offset,
                 transactional_view.aborted_transactions.clone(),
                 bytes::Bytes::new(),
             ),
@@ -159,6 +165,7 @@ fn fetch_partition_data(
             partition.partition,
             high_watermark,
             transactional_view.last_stable_offset,
+            log_start_offset,
             transactional_view.aborted_transactions,
             records,
         ),
@@ -234,6 +241,7 @@ fn success_partition_data(
     partition: i32,
     high_watermark: i64,
     last_stable_offset: i64,
+    log_start_offset: i64,
     aborted_transactions: Option<Vec<AbortedTransaction>>,
     records: bytes::Bytes,
 ) -> PartitionData {
@@ -242,7 +250,7 @@ fn success_partition_data(
         .with_error_code(0)
         .with_high_watermark(high_watermark)
         .with_last_stable_offset(last_stable_offset)
-        .with_log_start_offset(0)
+        .with_log_start_offset(log_start_offset)
         .with_aborted_transactions(aborted_transactions)
         .with_preferred_read_replica(BrokerId(-1))
         .with_records(Some(records))

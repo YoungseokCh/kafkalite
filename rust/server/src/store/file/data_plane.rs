@@ -157,6 +157,22 @@ impl DataPlaneState {
         Ok(())
     }
 
+    pub fn set_log_start_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        log_start_offset: i64,
+    ) -> Result<()> {
+        let runtime = self.partition_state_mut(topic, partition).ok_or_else(|| {
+            StoreError::UnknownTopicOrPartition {
+                topic: topic.to_string(),
+                partition,
+            }
+        })?;
+        runtime.state.log_start_offset = log_start_offset;
+        Ok(())
+    }
+
     pub fn finish_replica_append(
         &mut self,
         prepared: Option<&PreparedAppend>,

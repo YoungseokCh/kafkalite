@@ -16,7 +16,7 @@ use super::super::{
 };
 use super::super::{
     MetadataSnapshot, MultiPartitionOffsetFetchSnapshot, MultiPartitionRoundtripSnapshot,
-    PartitionScopedResumeSnapshot, ProduceConsumeSnapshot, ResumeSnapshot,
+    PartitionScopedResumeSnapshot, ProduceConsumeSnapshot, ResumeSnapshot, RetentionSnapshot,
 };
 
 pub(super) async fn metadata_snapshot(bootstrap: &str, topic: &str) -> MetadataSnapshot {
@@ -159,12 +159,22 @@ pub(super) async fn produce_consume_snapshot(
 }
 
 async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
+    create_topic_with_configs(bootstrap, topic, partitions, &[]).await;
+}
+
+async fn create_topic_with_configs(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    configs: &[(&str, &str)],
+) {
     let admin = admin_client(bootstrap);
+    let spec = configs.iter().fold(
+        NewTopic::new(topic, partitions, TopicReplication::Fixed(1)),
+        |spec, (key, value)| spec.set(key, value),
+    );
     let result = admin
-        .create_topics(
-            &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
-            &AdminOptions::new(),
-        )
+        .create_topics(&[spec], &AdminOptions::new())
         .await
         .expect("CreateTopics should return a result");
     assert!(
@@ -172,6 +182,107 @@ async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
         "topic creation should succeed: {result:?}"
     );
     wait_for_topic(bootstrap, topic, partitions as usize);
+}
+
+pub(super) async fn retention_bytes_snapshot(
+    bootstrap: &str,
+    topic: &str,
+    segment_bytes: usize,
+    retention_bytes: usize,
+) -> RetentionSnapshot {
+    let segment_bytes_config = segment_bytes.to_string();
+    let retention_bytes_config = retention_bytes.to_string();
+    create_topic_with_configs(
+        bootstrap,
+        topic,
+        1,
+        &[
+            ("segment.bytes", segment_bytes_config.as_str()),
+            ("retention.bytes", retention_bytes_config.as_str()),
+            ("cleanup.policy", "delete"),
+        ],
+    )
+    .await;
+
+    let producer = producer(bootstrap);
+    let consumer = consumer(bootstrap, &format!("retention-{topic}"));
+    let large_payload = build_payload("A", segment_bytes.saturating_sub(256));
+    let started = std::time::Instant::now();
+    let mut last_offsets = (0_i64, 0_i64);
+    let (beginning_offset, end_offset) = loop {
+        let sequence = consumer
+            .fetch_watermarks(topic, 0, std::time::Duration::from_millis(250))
+            .ok()
+            .map(|(_, end_offset)| end_offset)
+            .unwrap_or(0);
+        let key = format!("retained-{sequence}");
+        producer
+            .send(
+                FutureRecord::to(topic)
+                    .payload(&large_payload)
+                    .key(&key)
+                    .partition(0),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut evicted_offsets = None;
+        for _ in 0..10 {
+            if let Ok(offsets) =
+                consumer.fetch_watermarks(topic, 0, std::time::Duration::from_millis(500))
+            {
+                last_offsets = offsets;
+                if offsets.0 > 0 {
+                    evicted_offsets = Some(offsets);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if let Some(offsets) = evicted_offsets {
+            break offsets;
+        }
+        if started.elapsed() >= std::time::Duration::from_secs(15) {
+            panic!(
+                "retention did not evict old segments for {topic}; last offsets were {:?}",
+                last_offsets
+            );
+        }
+    };
+    let fetch = protocol::fetch(
+        bootstrap,
+        FetchRequest::default().with_topics(vec![
+            FetchTopic::default()
+                .with_topic(TopicName(StrBytes::from(topic.to_string())))
+                .with_partitions(vec![
+                    FetchPartition::default()
+                        .with_partition(0)
+                        .with_fetch_offset(0)
+                        .with_partition_max_bytes(4096),
+                ]),
+        ]),
+    );
+    let partition = &fetch.responses[0].partitions[0];
+    RetentionSnapshot {
+        beginning_offset,
+        end_offset,
+        log_start_offset: partition.log_start_offset,
+        values: partition
+            .records
+            .as_ref()
+            .map_or_else(Vec::new, decode_fetch_values),
+    }
+}
+
+fn build_payload(seed: &str, len: usize) -> String {
+    let mut payload = String::with_capacity(len);
+    while payload.len() < len {
+        let remaining = len - payload.len();
+        let take = remaining.min(seed.len());
+        payload.push_str(&seed[..take]);
+    }
+    payload
 }
 
 fn snapshot_fetch_response(fetch: kafka_protocol::messages::FetchResponse) -> FetchSnapshot {

@@ -19,6 +19,7 @@ fn recovers_topic_metadata_from_cluster_metadata_partition() {
         CLUSTER_METADATA_TOPIC,
         CLUSTER_METADATA_PARTITION,
         &StoredBatch::from_records(&records),
+        0,
     )
     .unwrap();
 

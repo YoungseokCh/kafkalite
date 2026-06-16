@@ -62,13 +62,15 @@ impl Storage for FileStore {
                     topic,
                     partition,
                     &StoredBatch::from_records(&prepared.records),
+                    now_ms,
                 )?;
                 self.logs
                     .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
-                let active_segment_base_offset =
-                    self.logs.active_segment_base_offset(topic, partition)?;
+                let (log_start_offset, active_segment_base_offset) =
+                    self.partition_log_state(topic, partition)?;
                 let result = (prepared.base_offset, prepared.last_offset);
                 data.finish_append(&prepared, now_ms)?;
+                data.set_log_start_offset(topic, partition, log_start_offset)?;
                 data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
                 Ok(result)
             }
@@ -93,17 +95,18 @@ impl Storage for FileStore {
                     request.topic,
                     request.partition,
                     &StoredBatch::from_records(&prepared.records),
+                    request.now_ms,
                 )?;
                 self.logs.update_root_checkpoints(
                     request.topic,
                     request.partition,
                     prepared.last_offset + 1,
                 )?;
-                let active_segment_base_offset = self
-                    .logs
-                    .active_segment_base_offset(request.topic, request.partition)?;
+                let (log_start_offset, active_segment_base_offset) =
+                    self.partition_log_state(request.topic, request.partition)?;
                 let result = (prepared.base_offset, prepared.last_offset);
                 data.finish_append(&prepared, request.now_ms)?;
+                data.set_log_start_offset(request.topic, request.partition, log_start_offset)?;
                 data.set_active_segment_base_offset(
                     request.topic,
                     request.partition,
@@ -195,11 +198,14 @@ impl Storage for FileStore {
             topic,
             partition,
             &StoredBatch::from_records(&prepared.records),
+            now_ms,
         )?;
         self.logs
             .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
-        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
+        let (log_start_offset, active_segment_base_offset) =
+            self.partition_log_state(topic, partition)?;
         data.finish_append(&prepared, now_ms)?;
+        data.set_log_start_offset(topic, partition, log_start_offset)?;
         data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
         data.latest_offset(topic, partition)
     }
@@ -221,11 +227,14 @@ impl Storage for FileStore {
                 topic,
                 partition,
                 &StoredBatch::from_records(&prepared.records),
+                now_ms,
             )?;
             self.logs
                 .update_root_checkpoints(topic, partition, prepared.last_offset + 1)?;
         }
-        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
+        let (log_start_offset, active_segment_base_offset) =
+            self.partition_log_state(topic, partition)?;
+        data.set_log_start_offset(topic, partition, log_start_offset)?;
         data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)?;
         data.finish_replica_append(
             prepared.as_ref(),
@@ -243,7 +252,9 @@ impl Storage for FileStore {
             .update_root_checkpoints(topic, partition, next_offset)?;
         let mut data = self.data.lock().expect("file store mutex poisoned");
         data.reconcile_partition_offset(topic, partition, next_offset)?;
-        let active_segment_base_offset = self.logs.active_segment_base_offset(topic, partition)?;
+        let (log_start_offset, active_segment_base_offset) =
+            self.partition_log_state(topic, partition)?;
+        data.set_log_start_offset(topic, partition, log_start_offset)?;
         data.set_active_segment_base_offset(topic, partition, active_segment_base_offset)
     }
 
@@ -459,5 +470,14 @@ impl Storage for FileStore {
             .expect("file store mutex poisoned")
             .remove(transactional_id);
         Ok(())
+    }
+}
+
+impl FileStore {
+    fn partition_log_state(&self, topic: &str, partition: i32) -> Result<(i64, i64)> {
+        Ok((
+            self.logs.log_start_offset(topic, partition)?,
+            self.logs.active_segment_base_offset(topic, partition)?,
+        ))
     }
 }

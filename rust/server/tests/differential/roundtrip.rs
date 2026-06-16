@@ -8,6 +8,7 @@ use uuid::Uuid;
 use kafkalite_server::cluster::UpdatePartitionReplicationRequest;
 use kafkalite_server::{Config, FileStore, KafkaBroker};
 
+use super::DIFFERENTIAL_DEFAULT_PARTITIONS;
 use super::{bootstrap_available, consumer, free_port};
 
 #[path = "roundtrip_snapshots.rs"]
@@ -17,7 +18,7 @@ use snapshots::{
     commit_resume_snapshot, fetch_first_batch_exceeds_partition_budget_snapshot,
     fetch_request_max_bytes_across_partitions_snapshot, metadata_snapshot,
     multi_partition_offset_fetch_snapshot, multi_partition_roundtrip_snapshot,
-    partition_scoped_resume_snapshot, produce_consume_snapshot,
+    partition_scoped_resume_snapshot, produce_consume_snapshot, retention_bytes_snapshot,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -205,6 +206,57 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
 
     handle.abort();
     let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "diagnostic: Apache Kafka 3.9 KRaft test container does not deterministically enforce topic-level retention.bytes in this environment"]
+async fn real_kafka_and_local_broker_match_retention_bytes_eviction() {
+    let Some(real_bootstrap) = std::env::var_os("REAL_KAFKA_BOOTSTRAP") else {
+        eprintln!(
+            "skipping differential test: set REAL_KAFKA_BOOTSTRAP to a reachable Kafka bootstrap server"
+        );
+        return;
+    };
+    let real_bootstrap = real_bootstrap
+        .into_string()
+        .expect("bootstrap must be utf-8");
+    if !bootstrap_available(&real_bootstrap) {
+        eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
+        return;
+    }
+
+    let segment_bytes = 4096_u64;
+    let retention_bytes = 8192_u64;
+    let mut config = Config::single_node(
+        std::path::PathBuf::from("./unused"),
+        0,
+        DIFFERENTIAL_DEFAULT_PARTITIONS,
+    );
+    config.storage.segment_bytes = segment_bytes;
+    config.storage.retention_bytes = Some(retention_bytes);
+    let (local_bootstrap, handle, _tempdir) = super::start_local_broker_with_config(config).await;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let topic = format!("diff.retention.{suffix}");
+    let real_snapshot = retention_bytes_snapshot(
+        &real_bootstrap,
+        &topic,
+        segment_bytes as usize,
+        retention_bytes as usize,
+    )
+    .await;
+    let local_snapshot = retention_bytes_snapshot(
+        &local_bootstrap,
+        &topic,
+        segment_bytes as usize,
+        retention_bytes as usize,
+    )
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    assert_eq!(local_snapshot, real_snapshot);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::store::{BrokerRecord, Result};
 
 use super::internal_topics::is_internal_topic_name;
-use super::policy::DEFAULT_POLICY;
+use super::policy::{DEFAULT_POLICY, FileStorePolicy};
 pub(super) use batch::StoredBatch;
 use index::{
     IndexEntry, TimeIndexEntry, append_kafka_index_entries, last_time_index_entry, lookup_offset,
@@ -50,14 +50,21 @@ pub(super) struct SegmentPaths {
 #[derive(Debug)]
 pub struct RecordLog {
     root: PathBuf,
+    policy: FileStorePolicy,
     append_count: std::sync::atomic::AtomicU64,
     append_lock: std::sync::Mutex<()>,
 }
 
 impl RecordLog {
+    #[allow(dead_code)]
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with_policy(root, DEFAULT_POLICY)
+    }
+
+    pub fn open_with_policy(root: &Path, policy: FileStorePolicy) -> Result<Self> {
         let log = Self {
             root: root.to_path_buf(),
+            policy,
             append_count: std::sync::atomic::AtomicU64::new(0),
             append_lock: std::sync::Mutex::new(()),
         };
@@ -80,7 +87,13 @@ impl RecordLog {
         Ok(())
     }
 
-    pub fn append_batch(&self, topic: &str, partition: i32, batch: &StoredBatch) -> Result<()> {
+    pub fn append_batch(
+        &self,
+        topic: &str,
+        partition: i32,
+        batch: &StoredBatch,
+        _now_ms: i64,
+    ) -> Result<()> {
         let _append_guard = self.append_lock.lock().expect("record log mutex poisoned");
         self.ensure_partition(topic, partition)?;
         let payload = batch.encode_binary()?;
@@ -96,7 +109,7 @@ impl RecordLog {
             .append_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if append_number.is_multiple_of(DEFAULT_POLICY.log_sync_interval) {
+        if append_number.is_multiple_of(self.policy.log_sync_interval) {
             segment.sync_data()?;
         }
 
@@ -123,6 +136,7 @@ impl RecordLog {
             )?;
         }
         append_kafka_index_entries(&active, batch, position)?;
+        self.enforce_retention(topic, partition)?;
         Ok(())
     }
 
@@ -396,6 +410,13 @@ impl RecordLog {
             .unwrap_or(0))
     }
 
+    pub(super) fn log_start_offset(&self, topic: &str, partition: i32) -> Result<i64> {
+        Ok(self
+            .earliest_offset(topic, partition)?
+            .map(|(offset, _)| offset)
+            .unwrap_or(0))
+    }
+
     pub(super) fn segment_paths(&self, topic: &str, partition: i32) -> Result<Vec<SegmentPaths>> {
         let root = self.partition_dir(topic, partition);
         let mut segments = Vec::new();
@@ -486,10 +507,60 @@ impl RecordLog {
             return self.ensure_segment_files(topic, partition, 0);
         };
         let current_len = fs::metadata(&active.log)?.len();
-        if current_len > 0 && current_len + payload_len > DEFAULT_POLICY.segment_bytes {
+        if current_len > 0
+            && (current_len + payload_len > self.policy.segment_bytes
+                || self.should_roll_segment_by_time(active)?)
+        {
             return self.ensure_segment_files(topic, partition, batch_base_offset);
         }
         Ok(active.clone())
+    }
+
+    fn enforce_retention(&self, topic: &str, partition: i32) -> Result<()> {
+        if is_internal_topic_name(topic) {
+            return Ok(());
+        }
+        let mut segments = self.segment_paths(topic, partition)?;
+        if segments.len() <= 1 {
+            return Ok(());
+        }
+
+        if let Some(retention_ms) = self.policy.retention_ms {
+            while segments.len() > 1 {
+                let Some(age_ms) = self.segment_age_ms(&segments[0])? else {
+                    break;
+                };
+                if age_ms < retention_ms {
+                    break;
+                }
+                let removed = segments.remove(0);
+                self.remove_segment_files(&removed)?;
+            }
+        }
+
+        let Some(retention_bytes) = self.policy.retention_bytes else {
+            return Ok(());
+        };
+        if segments.len() <= 1 {
+            return Ok(());
+        }
+
+        let mut total_log_bytes = segments.iter().try_fold(0_u64, |sum, segment| {
+            Ok::<u64, crate::store::StoreError>(sum + fs::metadata(&segment.log)?.len())
+        })?;
+        while total_log_bytes > retention_bytes && segments.len() > 1 {
+            let removed = segments.remove(0);
+            total_log_bytes = total_log_bytes.saturating_sub(fs::metadata(&removed.log)?.len());
+            self.remove_segment_files(&removed)?;
+        }
+        Ok(())
+    }
+
+    fn should_roll_segment_by_time(&self, segment: &SegmentPaths) -> Result<bool> {
+        let Some(age_ms) = self.segment_age_ms(segment)? else {
+            return Ok(false);
+        };
+        Ok(age_ms >= self.policy.segment_ms)
     }
 
     fn segments_from_offset(
@@ -528,6 +599,15 @@ impl RecordLog {
 
     fn segment_max_timestamp(&self, segment: &SegmentPaths) -> Result<Option<i64>> {
         Ok(last_time_index_entry(segment)?.map(|entry| entry.max_timestamp_ms))
+    }
+
+    fn segment_age_ms(&self, segment: &SegmentPaths) -> Result<Option<u64>> {
+        if !segment.log.exists() {
+            return Ok(None);
+        }
+        let modified = fs::metadata(&segment.log)?.modified()?;
+        let elapsed = modified.elapsed().unwrap_or_default();
+        Ok(Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64))
     }
 
     pub(super) fn segment_has_native_indexes(&self, segment: &SegmentPaths) -> Result<bool> {

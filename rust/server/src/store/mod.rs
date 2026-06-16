@@ -3,7 +3,7 @@ mod file;
 mod models;
 
 pub use error::{Result, StoreError};
-pub use file::{FileStore, StorageSummary, TopicPartitionSummary, TopicSummary};
+pub use file::{FileStore, FileStorePolicy, StorageSummary, TopicPartitionSummary, TopicSummary};
 pub use models::{
     BrokerRecord, FetchResult, GroupJoinResult, GroupMember, ListOffsetResult, PartitionMetadata,
     ProducerSession, ReplicaApplyResult, ReplicaFetchResult, SyncGroupResult, TopicMetadata,

@@ -70,7 +70,7 @@ fn describe_storage_does_not_create_non_standard_state() {
 fn list_offset_for_timestamp_uses_timeindex_and_returns_first_matching_record() {
     let dir = tempdir().unwrap();
     let store = FileStore::open(dir.path()).unwrap();
-    let records = vec![
+    let records = [
         BrokerRecord {
             offset: 0,
             timestamp_ms: 10,
@@ -132,4 +132,138 @@ fn list_offset_for_timestamp_uses_timeindex_and_returns_first_matching_record() 
     assert_eq!(match_after_20.offset, 2);
     assert_eq!(match_after_20.timestamp_ms, 30);
     assert_eq!(missing, None);
+}
+
+#[test]
+fn retention_bytes_evicts_inactive_segments_and_updates_log_start_offset() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open_with_policy(
+        dir.path(),
+        FileStorePolicy {
+            segment_bytes: 1_024,
+            retention_bytes: Some(1_024),
+            ..FileStorePolicy::default()
+        },
+    )
+    .unwrap();
+    let first_payload = Bytes::from(vec![b'a'; 1_024]);
+    let records = [
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"k0")),
+            value: Some(first_payload),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+        BrokerRecord {
+            offset: 1,
+            timestamp_ms: 20,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"k1")),
+            value: Some(Bytes::from_static(b"v1")),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+    ];
+    store
+        .append_records("storage.retention", 0, &records[..1], 10)
+        .unwrap();
+    store
+        .append_records("storage.retention", 0, &records[1..], 20)
+        .unwrap();
+
+    let summary = store.describe_topic("storage.retention").unwrap();
+    let fetched = store.fetch_records("storage.retention", 0, 0, 10).unwrap();
+    let (earliest, latest) = store.list_offsets("storage.retention", 0).unwrap();
+
+    assert_eq!(summary.partitions[0].log_start_offset, 1);
+    assert_eq!(summary.partitions[0].active_segment_base_offset, 1);
+    assert_eq!(earliest.offset, 1);
+    assert_eq!(latest.offset, 2);
+    assert_eq!(
+        fetched
+            .records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
+fn retention_ms_evicts_expired_inactive_segments_and_updates_log_start_offset() {
+    let dir = tempdir().unwrap();
+    let store = FileStore::open_with_policy(
+        dir.path(),
+        FileStorePolicy {
+            segment_ms: 1,
+            retention_ms: Some(5),
+            ..FileStorePolicy::default()
+        },
+    )
+    .unwrap();
+    let records = [
+        BrokerRecord {
+            offset: 0,
+            timestamp_ms: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 0,
+            key: Some(Bytes::from_static(b"k0")),
+            value: Some(Bytes::from_static(b"v0")),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+        BrokerRecord {
+            offset: 1,
+            timestamp_ms: 20,
+            producer_id: -1,
+            producer_epoch: -1,
+            sequence: 1,
+            key: Some(Bytes::from_static(b"k1")),
+            value: Some(Bytes::from_static(b"v1")),
+            headers_json: b"[]".to_vec(),
+            partition_leader_epoch: 0,
+            transactional: false,
+            control: false,
+        },
+    ];
+    store
+        .append_records("storage.retention.ms", 0, &records[..1], 10)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    store
+        .append_records("storage.retention.ms", 0, &records[1..], 20)
+        .unwrap();
+
+    let summary = store.describe_topic("storage.retention.ms").unwrap();
+    let fetched = store
+        .fetch_records("storage.retention.ms", 0, 0, 10)
+        .unwrap();
+    let (earliest, latest) = store.list_offsets("storage.retention.ms", 0).unwrap();
+
+    assert_eq!(summary.partitions[0].log_start_offset, 1);
+    assert_eq!(summary.partitions[0].active_segment_base_offset, 1);
+    assert_eq!(earliest.offset, 1);
+    assert_eq!(latest.offset, 2);
+    assert_eq!(
+        fetched
+            .records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
 }

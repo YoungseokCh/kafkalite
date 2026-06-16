@@ -68,6 +68,8 @@ pub async fn handle_produce(
                 .flat_map(|set| set.records)
                 .map(to_broker_record)
                 .collect::<Vec<_>>();
+            let log_start_offset =
+                partition_log_start_offset(broker, &topic_name, partition_data.index);
             if let Some(error_code) = validate_transactional_produce(
                 broker,
                 &topic_name,
@@ -80,7 +82,7 @@ pub async fn handle_produce(
                         .with_error_code(error_code)
                         .with_base_offset(-1)
                         .with_log_append_time_ms(-1)
-                        .with_log_start_offset(0)
+                        .with_log_start_offset(log_start_offset)
                         .with_record_errors(vec![])
                         .with_error_message(None),
                 );
@@ -99,7 +101,7 @@ pub async fn handle_produce(
                         .with_error_code(NOT_LEADER_OR_FOLLOWER)
                         .with_base_offset(-1)
                         .with_log_append_time_ms(-1)
-                        .with_log_start_offset(0)
+                        .with_log_start_offset(log_start_offset)
                         .with_record_errors(vec![])
                         .with_error_message(None),
                 );
@@ -126,7 +128,7 @@ pub async fn handle_produce(
                         .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
                         .with_base_offset(-1)
                         .with_log_append_time_ms(-1)
-                        .with_log_start_offset(0)
+                        .with_log_start_offset(log_start_offset)
                         .with_record_errors(vec![])
                         .with_error_message(None),
                 );
@@ -190,7 +192,11 @@ pub async fn handle_produce(
                     .with_error_code(error_code)
                     .with_base_offset(base_offset)
                     .with_log_append_time_ms(-1)
-                    .with_log_start_offset(0)
+                    .with_log_start_offset(partition_log_start_offset(
+                        broker,
+                        &topic_name,
+                        partition_data.index,
+                    ))
                     .with_record_errors(vec![])
                     .with_error_message(None),
             );
@@ -213,6 +219,14 @@ fn should_notify_fetch_waiters(
     last_offset: i64,
 ) -> bool {
     !records.is_empty() && previous_log_end.is_some_and(|log_end| last_offset >= log_end)
+}
+
+fn partition_log_start_offset(broker: &KafkaBroker, topic: &str, partition: i32) -> i64 {
+    broker
+        .store()
+        .list_offsets(topic, partition)
+        .map(|(earliest, _)| earliest.offset)
+        .unwrap_or(0)
 }
 
 fn validate_transactional_produce(

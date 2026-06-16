@@ -70,8 +70,12 @@ pub struct FileStore {
 
 impl FileStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_policy(root, FileStorePolicy::default())
+    }
+
+    pub fn open_with_policy(root: impl AsRef<Path>, policy: FileStorePolicy) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let logs = Arc::new(RecordLog::open(&root)?);
+        let logs = Arc::new(RecordLog::open_with_policy(&root, policy)?);
         let mut snapshots = SnapshotSet::load();
         let replayed_control = consumer_offsets::replay(&logs)?;
         let replayed_transactions = transaction_state::replay(&logs)?;

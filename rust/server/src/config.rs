@@ -25,6 +25,10 @@ pub struct BrokerConfig {
 pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub default_partitions: i32,
+    pub segment_bytes: u64,
+    pub segment_ms: u64,
+    pub retention_bytes: Option<u64>,
+    pub retention_ms: Option<u64>,
 }
 
 impl Default for BrokerConfig {
@@ -45,6 +49,10 @@ impl Default for StorageConfig {
         Self {
             data_dir: default_data_dir(),
             default_partitions: default_partitions(),
+            segment_bytes: default_segment_bytes(),
+            segment_ms: default_segment_ms(),
+            retention_bytes: default_retention_bytes(),
+            retention_ms: default_retention_ms(),
         }
     }
 }
@@ -81,6 +89,34 @@ fn default_partitions() -> i32 {
     1
 }
 
+fn default_segment_bytes() -> u64 {
+    crate::store::FileStorePolicy::default().segment_bytes
+}
+
+fn default_segment_ms() -> u64 {
+    crate::store::FileStorePolicy::default().segment_ms
+}
+
+fn default_retention_bytes() -> Option<u64> {
+    crate::store::FileStorePolicy::default().retention_bytes
+}
+
+fn default_retention_ms() -> Option<u64> {
+    crate::store::FileStorePolicy::default().retention_ms
+}
+
+impl StorageConfig {
+    pub fn policy(&self) -> crate::store::FileStorePolicy {
+        crate::store::FileStorePolicy {
+            segment_bytes: self.segment_bytes,
+            segment_ms: self.segment_ms,
+            retention_bytes: self.retention_bytes,
+            retention_ms: self.retention_ms,
+            ..crate::store::FileStorePolicy::default()
+        }
+    }
+}
+
 impl Config {
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         load_properties_config(config_path)
@@ -104,6 +140,7 @@ impl Config {
             storage: StorageConfig {
                 data_dir,
                 default_partitions,
+                ..StorageConfig::default()
             },
             cluster: ClusterConfig {
                 node_id: default_broker_id(),
@@ -145,7 +182,7 @@ mod tests {
         let path = temp_config_path("server.properties");
         std::fs::write(
             &path,
-            "process.roles=broker,controller\nnode.id=7\nlisteners=PLAINTEXT://:19092,CONTROLLER://:19093\nadvertised.listeners=PLAINTEXT://broker.local:29092,CONTROLLER://broker.local:29093\ncontroller.listener.names=CONTROLLER\ncontroller.quorum.voters=7@node7:19093,8@node8:19093,9@node9:19093\nlog.dirs=/tmp/test-kafkalite-data\nnum.partitions=3\ncluster.id=cluster-a\n",
+            "process.roles=broker,controller\nnode.id=7\nlisteners=PLAINTEXT://:19092,CONTROLLER://:19093\nadvertised.listeners=PLAINTEXT://broker.local:29092,CONTROLLER://broker.local:29093\ncontroller.listener.names=CONTROLLER\ncontroller.quorum.voters=7@node7:19093,8@node8:19093,9@node9:19093\nlog.dirs=/tmp/test-kafkalite-data\nnum.partitions=3\nlog.segment.bytes=4096\nlog.roll.ms=5000\nlog.retention.bytes=8192\nlog.retention.ms=15000\ncluster.id=cluster-a\n",
         )
         .unwrap();
 
@@ -162,6 +199,10 @@ mod tests {
             PathBuf::from("/tmp/test-kafkalite-data")
         );
         assert_eq!(config.storage.default_partitions, 3);
+        assert_eq!(config.storage.segment_bytes, 4096);
+        assert_eq!(config.storage.segment_ms, 5000);
+        assert_eq!(config.storage.retention_bytes, Some(8192));
+        assert_eq!(config.storage.retention_ms, Some(15000));
         assert_eq!(config.cluster.node_id, 7);
         assert_eq!(
             config.cluster.process_roles,
@@ -188,6 +229,16 @@ mod tests {
         assert_eq!(config.broker.advertised_port, 19092);
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn storage_defaults_match_kafka_baseline() {
+        let storage = StorageConfig::default();
+
+        assert_eq!(storage.segment_bytes, 1024 * 1024 * 1024);
+        assert_eq!(storage.segment_ms, 24 * 7 * 60 * 60 * 1000);
+        assert_eq!(storage.retention_bytes, None);
+        assert_eq!(storage.retention_ms, Some(24 * 7 * 60 * 60 * 1000));
     }
 
     #[test]

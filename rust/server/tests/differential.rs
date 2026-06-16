@@ -76,6 +76,14 @@ struct PartitionScopedResumeSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct RetentionSnapshot {
+    beginning_offset: i64,
+    end_offset: i64,
+    log_start_offset: i64,
+    values: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ResumeSnapshot {
     first_payload: Vec<u8>,
     resumed_payload: Vec<u8>,
@@ -149,7 +157,7 @@ struct TransactionCoordinatorSnapshot {
     reinit_error: i16,
     reused_producer_id: bool,
     epoch_bumped: bool,
-    end_stale_epoch_error: i16,
+    end_stale_epoch_rejected: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -179,18 +187,42 @@ async fn start_local_broker() -> (
     tokio::task::JoinHandle<anyhow::Result<()>>,
     tempfile::TempDir,
 ) {
-    let tempdir = tempdir().unwrap();
-    let port = free_port();
-    let config = Config::single_node(
-        tempdir.path().join("kafkalite-data"),
-        port,
+    start_local_broker_with_config(Config::single_node(
+        std::path::PathBuf::from("./unused"),
+        0,
         DIFFERENTIAL_DEFAULT_PARTITIONS,
+    ))
+    .await
+}
+
+async fn start_local_broker_with_config(
+    mut config: Config,
+) -> (
+    String,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
+    let tempdir = tempdir().unwrap();
+    config.storage.data_dir = tempdir.path().join("kafkalite-data");
+    if config.broker.port == 0 {
+        let port = free_port();
+        config.broker.port = port;
+        config.broker.advertised_port = port;
+        if let Some(listener) = config.cluster.listeners.get_mut("PLAINTEXT") {
+            listener.port = port;
+        }
+        if let Some(listener) = config.cluster.advertised_listeners.get_mut("PLAINTEXT") {
+            listener.port = port;
+        }
+    }
+    let store = Arc::new(
+        FileStore::open_with_policy(&config.storage.data_dir, config.storage.policy()).unwrap(),
     );
-    let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
+    let bootstrap = format!("127.0.0.1:{}", config.broker.port);
     let broker = KafkaBroker::new(config, store).unwrap();
     let handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(150)).await;
-    (format!("127.0.0.1:{port}"), handle, tempdir)
+    (bootstrap, handle, tempdir)
 }
 
 fn producer(bootstrap: &str) -> FutureProducer {

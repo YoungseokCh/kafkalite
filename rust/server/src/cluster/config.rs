@@ -131,6 +131,30 @@ pub fn load_properties_config(config_path: Option<&str>) -> Result<Config> {
         config.storage.default_partitions = parse_positive_i32("num.partitions", value)?;
     }
 
+    if let Some(value) = properties.get("log.segment.bytes") {
+        config.storage.segment_bytes = parse_positive_u64("log.segment.bytes", value)?;
+    }
+
+    if let Some(value) = properties.get("log.roll.ms") {
+        config.storage.segment_ms = parse_positive_u64("log.roll.ms", value)?;
+    } else if let Some(value) = properties.get("log.roll.hours") {
+        config.storage.segment_ms = parse_positive_u64("log.roll.hours", value)? * 60 * 60 * 1000;
+    }
+
+    if let Some(value) = properties.get("log.retention.bytes") {
+        config.storage.retention_bytes = parse_retention_bytes(value)?;
+    }
+
+    if let Some(value) = properties.get("log.retention.ms") {
+        config.storage.retention_ms = parse_retention_ms(value)?;
+    } else if let Some(value) = properties.get("log.retention.minutes") {
+        config.storage.retention_ms = parse_positive_u64("log.retention.minutes", value)
+            .map(|minutes| Some(minutes * 60 * 1000))?;
+    } else if let Some(value) = properties.get("log.retention.hours") {
+        config.storage.retention_ms = parse_positive_u64("log.retention.hours", value)
+            .map(|hours| Some(hours * 60 * 60 * 1000))?;
+    }
+
     validate_cluster_config(&config, &properties)?;
     Ok(config)
 }
@@ -251,6 +275,38 @@ fn parse_controller_quorum_voters(value: &str) -> Result<Vec<ControllerQuorumVot
         });
     }
     Ok(voters)
+}
+
+fn parse_positive_u64(key: &str, value: &str) -> Result<u64> {
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("Invalid value for {key}: {value}"))?;
+    if parsed == 0 {
+        bail!("Invalid value for {key}: expected a positive integer");
+    }
+    Ok(parsed)
+}
+
+fn parse_retention_bytes(value: &str) -> Result<Option<u64>> {
+    let parsed = value
+        .parse::<i64>()
+        .with_context(|| format!("Invalid value for log.retention.bytes: {value}"))?;
+    match parsed {
+        -1 => Ok(None),
+        1.. => Ok(Some(parsed as u64)),
+        _ => bail!("Invalid value for log.retention.bytes: expected -1 or a positive integer"),
+    }
+}
+
+fn parse_retention_ms(value: &str) -> Result<Option<u64>> {
+    let parsed = value
+        .parse::<i64>()
+        .with_context(|| format!("Invalid value for log.retention.ms: {value}"))?;
+    match parsed {
+        -1 => Ok(None),
+        1.. => Ok(Some(parsed as u64)),
+        _ => bail!("Invalid value for log.retention.ms: expected -1 or a positive integer"),
+    }
 }
 
 fn parse_log_dirs(value: &str) -> Result<PathBuf> {
