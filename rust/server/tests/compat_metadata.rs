@@ -76,8 +76,9 @@ async fn metadata_reports_unknown_topic_until_first_produce() {
     assert_eq!(topic.partitions().len(), 1);
     assert_eq!(topic.partitions()[0].id(), 0);
 
-    handle.abort();
-    let _ = handle.await;
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -109,8 +110,9 @@ async fn admin_client_create_topics_materializes_topic() {
     let topic = find_topic(&metadata, "admin.compat.topic");
     assert_eq!(topic.partitions().len(), 1);
 
-    handle.abort();
-    let _ = handle.await;
+    drop(consumer);
+    drop(admin);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -147,8 +149,11 @@ async fn multi_partition_metadata_and_direct_fetch_work() {
     let message = poll_for_message(&direct, Duration::from_secs(5));
     assert_eq!(message.payload(), Some(&b"p2"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(direct);
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -174,8 +179,9 @@ async fn metadata_remains_available_after_broker_restart() {
     let topic_metadata = find_topic(&metadata, topic);
     assert_eq!(topic_metadata.partitions().len(), 3);
 
-    handle.abort();
-    let _ = handle.await;
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 
     let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
     let consumer = base_consumer(&bootstrap, "compat-meta-persist-2");
@@ -188,6 +194,6 @@ async fn metadata_remains_available_after_broker_restart() {
     assert_eq!(topic_metadata.partitions()[1].id(), 1);
     assert_eq!(topic_metadata.partitions()[2].id(), 2);
 
-    handle.abort();
-    let _ = handle.await;
+    drop(consumer);
+    handle.shutdown().await.unwrap();
 }

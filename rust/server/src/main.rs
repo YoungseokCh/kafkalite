@@ -36,7 +36,11 @@ async fn main() {
         eprintln!("Failed to initialize kafkalite broker: {err}");
         std::process::exit(1);
     });
-    if let Err(err) = broker.run().await {
+    let handle = broker.start().await.unwrap_or_else(|err| {
+        eprintln!("Failed to start kafkalite broker: {err}");
+        std::process::exit(1);
+    });
+    if let Err(err) = handle.wait().await {
         eprintln!("Kafka broker failed: {err}");
         std::process::exit(1);
     }

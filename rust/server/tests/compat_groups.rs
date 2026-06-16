@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kafkalite_server::{Config, FileStore, KafkaBroker};
+use kafkalite_server::{BrokerHandle, Config, FileStore, KafkaBroker};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -13,18 +13,14 @@ fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-async fn start_broker() -> (
-    String,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-    tempfile::TempDir,
-) {
+async fn start_broker() -> (String, BrokerHandle, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
     let port = free_port();
     let config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 1);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = broker.start().await.unwrap();
+    handle.ready().await.unwrap();
     (format!("127.0.0.1:{port}"), handle, tempdir)
 }
 
@@ -116,8 +112,10 @@ async fn rdkafka_group_consumer_commit_smoke() {
         .commit_message(&message, rdkafka::consumer::CommitMode::Sync)
         .unwrap();
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,8 +139,10 @@ async fn group_consumer_subscribed_before_produce_receives_after_topic_materiali
     let message = poll_for_message(&consumer, Duration::from_secs(10));
     assert_eq!(message.payload(), Some(&b"released"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -193,6 +193,6 @@ async fn partition_assignment_moves_to_remaining_group_member() {
 
     drop(second);
     drop(consumer_two);
-    handle.abort();
-    let _ = handle.await;
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }

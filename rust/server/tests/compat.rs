@@ -47,8 +47,10 @@ async fn rdkafka_producer_and_consumer_smoke() {
     assert_eq!(message.payload(), Some(&b"hello"[..]));
     assert_eq!(message.key(), Some(&b"key"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(consumer);
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }
 
 fn direct_consumer_at_beginning(
@@ -90,8 +92,10 @@ async fn multiple_topics_keep_independent_offsets() {
         let consumer = direct_consumer_at_beginning(&bootstrap, topic, topic, 0);
         let message = poll_for_message(&consumer, Duration::from_secs(5));
         assert_eq!(message.payload(), Some(expected));
+        drop(message);
+        drop(consumer);
     }
 
-    handle.abort();
-    let _ = handle.await;
+    drop(producer);
+    handle.shutdown().await.unwrap();
 }

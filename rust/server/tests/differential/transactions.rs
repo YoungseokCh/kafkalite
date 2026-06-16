@@ -67,8 +67,7 @@ async fn real_kafka_transaction_api_versions_cover_local_advertised_versions() {
         .expect("bootstrap must be utf-8");
     if !super::bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -103,8 +102,7 @@ async fn real_kafka_transaction_api_versions_cover_local_advertised_versions() {
         );
     }
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 pub(super) async fn transaction_coordinator_snapshot(
@@ -199,8 +197,7 @@ async fn real_kafka_and_local_broker_match_transaction_coordinator_basics() {
         .expect("bootstrap must be utf-8");
     if !super::bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -214,8 +211,7 @@ async fn real_kafka_and_local_broker_match_transaction_coordinator_basics() {
         transaction_coordinator_snapshot(&local_bootstrap, &topic, &transactional_id).await;
     assert_eq!(local_snapshot, real_snapshot);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 fn transactional_producer(bootstrap: &str, transactional_id: &str) -> FutureProducer {
@@ -548,8 +544,7 @@ async fn real_kafka_and_local_broker_match_transaction_visibility() {
         .expect("bootstrap must be utf-8");
     if !super::bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -574,8 +569,7 @@ async fn real_kafka_and_local_broker_match_transaction_visibility() {
     .await;
     assert_eq!(local_snapshot, real_snapshot);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[ignore = "diagnostic: Apache Kafka 3.9 KRaft does not expose transactional offset commits via OffsetFetch in this scenario"]
@@ -594,8 +588,7 @@ async fn real_kafka_and_local_broker_match_transactional_offset_commit_flow() {
         .expect("bootstrap must be utf-8");
     if !super::bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -617,8 +610,7 @@ async fn real_kafka_and_local_broker_match_transactional_offset_commit_flow() {
 
     assert_eq!(local_snapshot, real_snapshot);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[ignore = "diagnostic: Apache Kafka 3.9 KRaft does not expose multi-group transactional offset commits via OffsetFetch in this scenario"]
@@ -637,8 +629,7 @@ async fn real_kafka_and_local_broker_match_multi_group_transactional_offset_comm
         .expect("bootstrap must be utf-8");
     if !super::bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -667,6 +658,5 @@ async fn real_kafka_and_local_broker_match_multi_group_transactional_offset_comm
 
     assert_eq!(local_snapshot, real_snapshot);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }

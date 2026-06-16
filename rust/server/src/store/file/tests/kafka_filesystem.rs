@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::file::log::StoredBatch;
-use crate::{Config, KafkaBroker};
+use crate::{BrokerHandle, Config, KafkaBroker};
 use kafka_protocol::messages::offset_commit_request::{
     OffsetCommitRequestPartition, OffsetCommitRequestTopic,
 };
@@ -77,8 +77,7 @@ async fn real_kafka_log_dir_recovery_preserves_transaction_visibility() {
         0
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -116,8 +115,7 @@ async fn real_kafka_log_dir_recovery_preserves_committed_offsets() {
         1
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -159,8 +157,7 @@ async fn real_kafka_log_dir_recovery_preserves_transactional_offset_commits() {
         20
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -201,8 +198,7 @@ async fn real_kafka_log_dir_recovery_preserves_multi_partition_committed_offsets
         22
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -277,8 +273,7 @@ async fn real_kafka_log_dir_recovery_preserves_group_metadata_state() {
     );
     assert_eq!(heartbeat_after_leave.error_code, 25);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -329,8 +324,7 @@ async fn real_kafka_log_dir_recovery_allows_offset_commit_with_recovered_member(
         12
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[test]
@@ -703,27 +697,15 @@ fn find_topic_dir_with_prefix(root: &Path, prefix: &str) -> Option<String> {
         })
 }
 
-async fn start_broker_on_data_dir(
-    data_dir: &Path,
-) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+async fn start_broker_on_data_dir(data_dir: &Path) -> (String, BrokerHandle) {
     let port = free_port();
     let config = Config::single_node(PathBuf::from(data_dir), port, 3);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
+    let handle = broker.start().await.unwrap();
     let bootstrap = format!("127.0.0.1:{port}");
-    let started = std::time::Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
-        if handle.is_finished() {
-            let outcome = handle.await.unwrap();
-            panic!("broker exited before accepting connections: {outcome:?}");
-        }
-        if std::net::TcpStream::connect(&bootstrap).is_ok() {
-            return (bootstrap, handle);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("broker did not start listening on {bootstrap}");
+    handle.ready().await.unwrap();
+    (bootstrap, handle)
 }
 
 fn broker_for_data_dir(data_dir: &Path) -> KafkaBroker {

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use kafkalite_server::BrokerHandle;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -56,6 +57,9 @@ async fn broker_contract_covers_roundtrip_offsets_and_invalid_partition() {
         .expect_err("partition 1 should fail");
     assert!(format!("{:?}", invalid.0).contains("UnknownPartition"));
 
+    drop(message);
+    drop(consumer);
+    drop(producer);
     stop_broker(handle).await;
 }
 
@@ -86,6 +90,7 @@ async fn broker_contract_keeps_records_and_committed_offsets_across_restart() {
         .unwrap();
     drop(first);
     drop(consumer);
+    drop(producer);
     stop_broker(handle).await;
 
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
@@ -102,6 +107,10 @@ async fn broker_contract_keeps_records_and_committed_offsets_across_restart() {
     let next = poll_for_message(&resumed, Duration::from_secs(8));
     assert_eq!(next.payload(), Some(&b"second"[..]));
 
+    drop(persisted);
+    drop(direct);
+    drop(next);
+    drop(resumed);
     stop_broker(handle).await;
 }
 
@@ -147,12 +156,15 @@ async fn broker_contract_auto_creates_multi_partition_topic_for_valid_partition(
     let message = poll_for_message(&direct, Duration::from_secs(5));
     assert_eq!(message.payload(), Some(&b"p2"[..]));
 
+    drop(message);
+    drop(direct);
+    drop(metadata_consumer);
+    drop(producer);
     stop_broker(handle).await;
 }
 
-async fn stop_broker(handle: tokio::task::JoinHandle<anyhow::Result<()>>) {
-    handle.abort();
-    let _ = handle.await;
+async fn stop_broker(handle: BrokerHandle) {
+    handle.shutdown().await.unwrap();
 }
 
 fn group_consumer(bootstrap: &str, group_id: &str) -> BaseConsumer {

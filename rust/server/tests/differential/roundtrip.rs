@@ -36,8 +36,7 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
         .expect("bootstrap must be utf-8");
     if !bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -204,8 +203,7 @@ async fn real_kafka_and_local_broker_match_supported_roundtrips() {
     .await;
     assert_eq!(local_leave_group, real_leave_group);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -253,8 +251,7 @@ async fn real_kafka_and_local_broker_match_retention_bytes_eviction() {
     )
     .await;
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     assert_eq!(local_snapshot, real_snapshot);
 }
@@ -284,8 +281,8 @@ async fn metadata_reads_are_side_effect_free_for_existing_topics() {
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store).unwrap();
     let broker_handle = broker.clone();
-    let handle = tokio::spawn(async move { broker_handle.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = broker_handle.start().await.unwrap();
+    handle.ready().await.unwrap();
     let bootstrap = format!("127.0.0.1:{port}");
 
     broker
@@ -328,6 +325,5 @@ async fn metadata_reads_are_side_effect_free_for_existing_topics() {
         after.topics[0].partitions[0].leader_epoch
     );
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }

@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::net::TcpListener;
+use tokio::sync::{Notify, watch};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tracing::{debug, error, info};
 
 use crate::cluster::{
@@ -44,7 +47,34 @@ pub enum InitTransactionalProducerError {
     ConcurrentTransactions,
 }
 
+struct ReadyState {
+    ready: AtomicBool,
+    notify: Notify,
+}
+
+impl ReadyState {
+    fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        if self.ready.load(Ordering::Acquire) {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
 #[derive(Clone)]
+/// Configured broker instance before listener tasks are started.
 pub struct KafkaBroker {
     config: Config,
     cluster: ClusterRuntime,
@@ -53,7 +83,18 @@ pub struct KafkaBroker {
     transactions: Arc<Mutex<BTreeMap<String, TransactionSession>>>,
 }
 
+/// Running broker lifecycle handle returned by [`KafkaBroker::start`].
+pub struct BrokerHandle {
+    client_addr: std::net::SocketAddr,
+    controller_addr: Option<std::net::SocketAddr>,
+    ready: Arc<ReadyState>,
+    shutdown_tx: watch::Sender<bool>,
+    client_task: Option<JoinHandle<Result<()>>>,
+    controller_task: Option<JoinHandle<Result<()>>>,
+}
+
 impl KafkaBroker {
+    /// Builds a broker from a validated config and storage backend.
     pub fn new(config: Config, store: Arc<dyn Storage>) -> Result<Self> {
         let cluster = ClusterRuntime::from_config(&config)?;
         let persisted_transactions = store.transaction_sessions()?;
@@ -101,52 +142,56 @@ impl KafkaBroker {
         Ok(broker)
     }
 
-    pub async fn run(self) -> Result<()> {
-        if let Some(controller_listener) = self.config.cluster.controller_listener() {
-            let controller_addr = controller_listener.socket_addr()?;
-            let controller_runtime = self.cluster.clone();
-            let controller_store = self.store.clone();
-            let fetch_signals = self.fetch_signals.clone();
-            let listener = TcpListener::bind(controller_addr).await?;
+    /// Binds listeners and spawns broker tasks, returning a handle for lifecycle control.
+    pub async fn start(self) -> Result<BrokerHandle> {
+        let ready = Arc::new(ReadyState::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let controller_listener = if let Some(listener) = self.config.cluster.controller_listener()
+        {
+            let requested_addr = listener.socket_addr()?;
+            let listener = TcpListener::bind(requested_addr).await?;
+            let controller_addr = listener.local_addr()?;
             info!(
                 address = %controller_addr,
                 node_id = self.config.cluster.node_id,
                 "kafkalite cluster RPC listening"
             );
-            tokio::spawn(async move {
-                if let Err(err) = TcpClusterRpcTransport::serve_broker_forever(
-                    listener,
-                    controller_runtime,
-                    controller_store,
-                    fetch_signals,
-                )
-                .await
-                {
-                    error!(error = %err, "cluster rpc service failed");
-                }
-            });
-        }
-        let addr = self.config.socket_addr()?;
-        let listener = TcpListener::bind(addr).await?;
+            Some((controller_addr, listener))
+        } else {
+            None
+        };
+
+        let requested_client_addr = self.config.socket_addr()?;
+        let client_listener = TcpListener::bind(requested_client_addr).await?;
+        let client_addr = client_listener.local_addr()?;
         info!(
-            address = %addr,
+            address = %client_addr,
             broker_id = self.config.broker.broker_id,
             "kafkalite Kafka broker listening"
         );
 
-        loop {
-            let (stream, peer) = listener.accept().await?;
+        let controller_addr = controller_listener.as_ref().map(|(addr, _)| *addr);
+        let controller_task = controller_listener.map(|(_, listener)| {
             let broker = self.clone();
-            tokio::spawn(async move {
-                if let Err(err) = dispatcher::serve_connection(stream, peer, broker).await {
-                    if is_expected_disconnect(&err) {
-                        debug!(error = %err, remote = %peer, "connection closed");
-                    } else {
-                        error!(error = %err, remote = %peer, "connection failed");
-                    }
-                }
-            });
-        }
+            let shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move { broker.serve_controller(listener, shutdown_rx).await })
+        });
+        let client_task = {
+            let broker = self;
+            tokio::spawn(async move { broker.serve_clients(client_listener, shutdown_rx).await })
+        };
+
+        ready.mark_ready();
+
+        Ok(BrokerHandle {
+            client_addr,
+            controller_addr,
+            ready,
+            shutdown_tx,
+            client_task: Some(client_task),
+            controller_task,
+        })
     }
 
     pub fn config(&self) -> &Config {
@@ -874,6 +919,156 @@ impl KafkaBroker {
             chrono::Utc::now().timestamp_millis(),
         )?;
         Ok(())
+    }
+
+    async fn serve_clients(
+        self,
+        listener: TcpListener,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
+        let mut connections = JoinSet::new();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    break;
+                }
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(err) = joined {
+                        if !err.is_cancelled() {
+                            return Err(err.into());
+                        }
+                    }
+                }
+                accept_result = listener.accept() => {
+                    let (stream, peer) = accept_result?;
+                    let broker = self.clone();
+                    connections.spawn(async move {
+                        if let Err(err) = dispatcher::serve_connection(stream, peer, broker).await {
+                            if is_expected_disconnect(&err) {
+                                debug!(error = %err, remote = %peer, "connection closed");
+                            } else {
+                                error!(error = %err, remote = %peer, "connection failed");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        connections.abort_all();
+        while let Some(joined) = connections.join_next().await {
+            if let Err(err) = joined {
+                if !err.is_cancelled() {
+                    return Err(err.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn serve_controller(
+        self,
+        listener: TcpListener,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    return Ok(());
+                }
+                result = TcpClusterRpcTransport::serve_broker_once(
+                    &listener,
+                    self.cluster.clone(),
+                    self.store.clone(),
+                    self.fetch_signals.clone(),
+                ) => {
+                    result?;
+                }
+            }
+        }
+    }
+}
+
+impl BrokerHandle {
+    /// Returns the bound Kafka client listener address.
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.client_addr
+    }
+
+    /// Returns the bound controller RPC address, if controller RPC is enabled.
+    pub fn controller_addr(&self) -> Option<std::net::SocketAddr> {
+        self.controller_addr
+    }
+
+    /// Waits until the broker has finished binding its listeners.
+    pub async fn ready(&self) -> Result<()> {
+        self.ready.wait().await;
+        Ok(())
+    }
+
+    /// Waits for the broker tasks to exit, signalling shutdown if one side exits first.
+    pub async fn wait(mut self) -> Result<()> {
+        match self.controller_task.take() {
+            Some(mut controller_task) => {
+                tokio::select! {
+                    client = self.client_task.as_mut().expect("client task missing") => {
+                        self.signal_shutdown();
+                        flatten_join_result(client)?;
+                        flatten_join_result(controller_task.await)?;
+                        Ok(())
+                    }
+                    controller = &mut controller_task => {
+                        self.signal_shutdown();
+                        flatten_join_result(controller)?;
+                        let client_task = self.client_task.take().expect("client task missing");
+                        flatten_join_result(client_task.await)?;
+                        Ok(())
+                    }
+                }
+            }
+            None => {
+                let client_task = self.client_task.take().expect("client task missing");
+                flatten_join_result(client_task.await)
+            }
+        }
+    }
+
+    /// Requests graceful shutdown and waits for all broker tasks to stop.
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.signal_shutdown();
+        let client_task = self.client_task.take().expect("client task missing");
+        flatten_join_result(client_task.await)?;
+        if let Some(controller_task) = self.controller_task.take() {
+            flatten_join_result(controller_task.await)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn signal_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+impl Drop for BrokerHandle {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        if let Some(client_task) = &self.client_task {
+            client_task.abort();
+        }
+        if let Some(controller_task) = &self.controller_task {
+            controller_task.abort();
+        }
+    }
+}
+
+fn flatten_join_result(result: std::result::Result<Result<()>, JoinError>) -> Result<()> {
+    match result {
+        Ok(inner) => inner,
+        Err(err) => Err(err.into()),
     }
 }
 

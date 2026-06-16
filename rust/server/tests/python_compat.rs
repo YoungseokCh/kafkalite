@@ -6,7 +6,6 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 
 use kafkalite_server::{Config, FileStore, KafkaBroker};
 use tempfile::tempdir;
@@ -35,14 +34,13 @@ async fn aiokafka_compatibility_matrix() {
     let config = Config::single_node(tempdir.path().join("kafkalite-data"), port, 3);
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = broker.start().await.unwrap();
+    handle.ready().await.unwrap();
 
     let bootstrap = format!("127.0.0.1:{port}");
     run_aiokafka_matrix_str(&python, &bootstrap);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }
 
 fn run_aiokafka_matrix(python: &OsStr, bootstrap: &OsStr) {

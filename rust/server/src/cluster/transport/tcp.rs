@@ -80,6 +80,85 @@ impl TcpClusterRpcTransport {
         }
     }
 
+    pub(crate) async fn serve_broker_once(
+        listener: &TcpListener,
+        runtime: ClusterRuntime,
+        store: Arc<dyn Storage>,
+        fetch_signals: Arc<FetchSignals>,
+    ) -> Result<()> {
+        Self::serve_once(listener, move |request| match request {
+            ClusterRpcRequest::ReplicaFetch(request) => match store.fetch_records(
+                &request.topic_name,
+                request.partition_index,
+                request.start_offset,
+                request.max_records,
+            ) {
+                Ok(fetched) => {
+                    let (_, latest) =
+                        store.list_offsets(&request.topic_name, request.partition_index)?;
+                    let image = runtime.metadata_image();
+                    let (leader_id, leader_epoch, _, _) = image
+                        .partition_state_view(&request.topic_name, request.partition_index)
+                        .unwrap_or((-1, -1, fetched.high_watermark, latest.offset));
+                    Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                        found: true,
+                        leader_id,
+                        leader_epoch,
+                        high_watermark: replica_fetch_high_watermark(
+                            &image,
+                            &request.topic_name,
+                            request.partition_index,
+                            fetched.high_watermark,
+                            runtime.config().controller_quorum_voters.len(),
+                        ),
+                        leader_log_end_offset: latest.offset,
+                        records: fetched.records,
+                    }))
+                }
+                Err(StoreError::UnknownTopicOrPartition { .. }) => {
+                    Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
+                        found: false,
+                        leader_id: -1,
+                        leader_epoch: -1,
+                        high_watermark: -1,
+                        leader_log_end_offset: -1,
+                        records: Vec::new(),
+                    }))
+                }
+                Err(err) => Err(err.into()),
+            },
+            ClusterRpcRequest::ApplyReplicaRecords(request) => {
+                let next_offset = store.append_replica_records(
+                    &request.topic_name,
+                    request.partition_index,
+                    &request.records,
+                    request.now_ms,
+                )?;
+                Ok(ClusterRpcResponse::ApplyReplicaRecords(
+                    ApplyReplicaRecordsResponse {
+                        accepted: true,
+                        next_offset,
+                    },
+                ))
+            }
+            ClusterRpcRequest::UpdateReplicaProgress(request) => {
+                let previous_high_watermark = runtime
+                    .metadata_image()
+                    .partition_high_watermark(&request.topic_name, request.partition_index);
+                let response = runtime.handle_update_replica_progress(request.clone())?;
+                if response.accepted
+                    && response.high_watermark > previous_high_watermark.unwrap_or(-1)
+                {
+                    fetch_signals.notify(&request.topic_name, request.partition_index);
+                }
+                Ok(ClusterRpcResponse::UpdateReplicaProgress(response))
+            }
+            other => runtime.dispatch(other),
+        })
+        .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn serve_broker_forever(
         listener: TcpListener,
         runtime: ClusterRuntime,
@@ -87,78 +166,12 @@ impl TcpClusterRpcTransport {
         fetch_signals: Arc<FetchSignals>,
     ) -> Result<()> {
         loop {
-            let runtime = runtime.clone();
-            let store = store.clone();
-            let fetch_signals = fetch_signals.clone();
-            Self::serve_once(&listener, move |request| match request {
-                ClusterRpcRequest::ReplicaFetch(request) => match store.fetch_records(
-                    &request.topic_name,
-                    request.partition_index,
-                    request.start_offset,
-                    request.max_records,
-                ) {
-                    Ok(fetched) => {
-                        let (_, latest) =
-                            store.list_offsets(&request.topic_name, request.partition_index)?;
-                        let image = runtime.metadata_image();
-                        let (leader_id, leader_epoch, _, _) = image
-                            .partition_state_view(&request.topic_name, request.partition_index)
-                            .unwrap_or((-1, -1, fetched.high_watermark, latest.offset));
-                        Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
-                            found: true,
-                            leader_id,
-                            leader_epoch,
-                            high_watermark: replica_fetch_high_watermark(
-                                &image,
-                                &request.topic_name,
-                                request.partition_index,
-                                fetched.high_watermark,
-                                runtime.config().controller_quorum_voters.len(),
-                            ),
-                            leader_log_end_offset: latest.offset,
-                            records: fetched.records,
-                        }))
-                    }
-                    Err(StoreError::UnknownTopicOrPartition { .. }) => {
-                        Ok(ClusterRpcResponse::ReplicaFetch(ReplicaFetchResponse {
-                            found: false,
-                            leader_id: -1,
-                            leader_epoch: -1,
-                            high_watermark: -1,
-                            leader_log_end_offset: -1,
-                            records: Vec::new(),
-                        }))
-                    }
-                    Err(err) => Err(err.into()),
-                },
-                ClusterRpcRequest::ApplyReplicaRecords(request) => {
-                    let next_offset = store.append_replica_records(
-                        &request.topic_name,
-                        request.partition_index,
-                        &request.records,
-                        request.now_ms,
-                    )?;
-                    Ok(ClusterRpcResponse::ApplyReplicaRecords(
-                        ApplyReplicaRecordsResponse {
-                            accepted: true,
-                            next_offset,
-                        },
-                    ))
-                }
-                ClusterRpcRequest::UpdateReplicaProgress(request) => {
-                    let previous_high_watermark = runtime
-                        .metadata_image()
-                        .partition_high_watermark(&request.topic_name, request.partition_index);
-                    let response = runtime.handle_update_replica_progress(request.clone())?;
-                    if response.accepted
-                        && response.high_watermark > previous_high_watermark.unwrap_or(-1)
-                    {
-                        fetch_signals.notify(&request.topic_name, request.partition_index);
-                    }
-                    Ok(ClusterRpcResponse::UpdateReplicaProgress(response))
-                }
-                other => runtime.dispatch(other),
-            })
+            Self::serve_broker_once(
+                &listener,
+                runtime.clone(),
+                store.clone(),
+                fetch_signals.clone(),
+            )
             .await?;
         }
     }

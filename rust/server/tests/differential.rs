@@ -22,7 +22,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::metadata::Metadata;
 use rdkafka::producer::FutureProducer;
 
-use kafkalite_server::{Config, FileStore, KafkaBroker};
+use kafkalite_server::{BrokerHandle, Config, FileStore, KafkaBroker};
 use tempfile::tempdir;
 
 const DIFFERENTIAL_DEFAULT_PARTITIONS: i32 = 3;
@@ -182,11 +182,7 @@ struct MultiGroupTransactionalOffsetCommitSnapshot {
     group_b_aborted_offset: i64,
 }
 
-async fn start_local_broker() -> (
-    String,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-    tempfile::TempDir,
-) {
+async fn start_local_broker() -> (String, BrokerHandle, tempfile::TempDir) {
     start_local_broker_with_config(Config::single_node(
         std::path::PathBuf::from("./unused"),
         0,
@@ -197,11 +193,7 @@ async fn start_local_broker() -> (
 
 async fn start_local_broker_with_config(
     mut config: Config,
-) -> (
-    String,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-    tempfile::TempDir,
-) {
+) -> (String, BrokerHandle, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
     config.storage.data_dir = tempdir.path().join("kafkalite-data");
     if config.broker.port == 0 {
@@ -220,8 +212,8 @@ async fn start_local_broker_with_config(
     );
     let bootstrap = format!("127.0.0.1:{}", config.broker.port);
     let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = broker.start().await.unwrap();
+    handle.ready().await.unwrap();
     (bootstrap, handle, tempdir)
 }
 
@@ -346,6 +338,5 @@ async fn local_broker_supports_librdkafka_create_topics_admin_api() {
     );
     wait_for_topic(&local_bootstrap, &topic, 1);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 }

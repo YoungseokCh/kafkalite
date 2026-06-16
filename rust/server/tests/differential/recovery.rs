@@ -24,8 +24,7 @@ async fn real_kafka_and_local_broker_match_subscribe_before_produce_recovery() {
         .expect("bootstrap must be utf-8");
     if !bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -37,8 +36,7 @@ async fn real_kafka_and_local_broker_match_subscribe_before_produce_recovery() {
     let local_snapshot =
         subscribe_before_produce_snapshot(&local_bootstrap, &topic, &group_id).await;
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     assert_eq!(local_snapshot, real_snapshot);
 }

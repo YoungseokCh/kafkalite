@@ -23,8 +23,7 @@ async fn real_kafka_and_local_broker_match_empty_assignment_sync() {
         .expect("bootstrap must be utf-8");
     if !bootstrap_available(&real_bootstrap) {
         eprintln!("skipping differential test: bootstrap {real_bootstrap} is unreachable");
-        handle.abort();
-        let _ = handle.await;
+        handle.shutdown().await.unwrap();
         return;
     }
 
@@ -35,8 +34,7 @@ async fn real_kafka_and_local_broker_match_empty_assignment_sync() {
     let real_snapshot = empty_assignment_sync_snapshot(&real_bootstrap, &topic, &group_id).await;
     let local_snapshot = empty_assignment_sync_snapshot(&local_bootstrap, &topic, &group_id).await;
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     assert_eq!(local_snapshot, real_snapshot);
 }

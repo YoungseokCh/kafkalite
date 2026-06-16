@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kafkalite_server::{Config, FileStore, KafkaBroker};
+use kafkalite_server::{BrokerHandle, Config, FileStore, KafkaBroker};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -15,16 +15,14 @@ fn init_test_logging() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-async fn start_broker_in_dir(
-    tempdir: &tempfile::TempDir,
-) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+async fn start_broker_in_dir(tempdir: &tempfile::TempDir) -> (String, BrokerHandle) {
     start_broker_in_dir_with_partitions(tempdir, 1).await
 }
 
 async fn start_broker_in_dir_with_partitions(
     tempdir: &tempfile::TempDir,
     default_partitions: i32,
-) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+) -> (String, BrokerHandle) {
     let port = free_port();
     let config = Config::single_node(
         tempdir.path().join("kafkalite-data"),
@@ -33,8 +31,8 @@ async fn start_broker_in_dir_with_partitions(
     );
     let store = Arc::new(FileStore::open(&config.storage.data_dir).unwrap());
     let broker = KafkaBroker::new(config, store).unwrap();
-    let handle = tokio::spawn(async move { broker.run().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = broker.start().await.unwrap();
+    handle.ready().await.unwrap();
     (format!("127.0.0.1:{port}"), handle)
 }
 
@@ -130,8 +128,8 @@ async fn records_survive_broker_restart() {
         )
         .await
         .unwrap();
-    handle.abort();
-    let _ = handle.await;
+    drop(producer);
+    handle.shutdown().await.unwrap();
 
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
     let consumer = direct_consumer_at_beginning(&bootstrap, "restart-direct", "restart.events", 0);
@@ -139,8 +137,9 @@ async fn records_survive_broker_restart() {
     let message = poll_for_message(&consumer, Duration::from_secs(5));
     assert_eq!(message.payload(), Some(&b"persisted"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(consumer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -171,9 +170,9 @@ async fn committed_offsets_survive_broker_restart() {
         .unwrap();
     drop(message);
     drop(consumer);
+    drop(producer);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
     let consumer = group_consumer(&bootstrap, "resume-group");
@@ -181,8 +180,9 @@ async fn committed_offsets_survive_broker_restart() {
     let message = poll_for_message(&consumer, Duration::from_secs(8));
     assert_eq!(message.payload(), Some(&b"second"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(message);
+    drop(consumer);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,9 +234,9 @@ async fn committed_offsets_are_partition_scoped() {
         )
         .await
         .unwrap();
+    drop(producer);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     let (bootstrap, handle) = start_broker_in_dir_with_partitions(&tempdir, 3).await;
     let resumed = group_consumer(&bootstrap, "compat-multi-group");
@@ -254,8 +254,10 @@ async fn committed_offsets_are_partition_scoped() {
     assert_eq!(seen[1].0, 2);
     assert_eq!(seen[1].1, b"p2-only".to_vec());
 
-    handle.abort();
-    let _ = handle.await;
+    drop(first);
+    drop(second);
+    drop(resumed);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -312,9 +314,12 @@ async fn transactional_offsets_survive_broker_restart() {
         .unwrap();
     drop(first);
     drop(consumer);
+    drop(group_metadata);
+    drop(offsets);
+    drop(transactional);
+    drop(producer);
 
-    handle.abort();
-    let _ = handle.await;
+    handle.shutdown().await.unwrap();
 
     let (bootstrap, handle) = start_broker_in_dir(&tempdir).await;
     let resumed = group_consumer(&bootstrap, "txn-resume-group");
@@ -322,6 +327,7 @@ async fn transactional_offsets_survive_broker_restart() {
     let next = poll_for_message(&resumed, Duration::from_secs(8));
     assert_eq!(next.payload(), Some(&b"third"[..]));
 
-    handle.abort();
-    let _ = handle.await;
+    drop(next);
+    drop(resumed);
+    handle.shutdown().await.unwrap();
 }

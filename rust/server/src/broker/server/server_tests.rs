@@ -9,6 +9,7 @@ use kafka_protocol::records::{
     Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
 use tempfile::tempdir;
+use tokio::net::TcpStream;
 
 use super::*;
 use crate::cluster::{ControllerQuorumVoter, ProcessRole};
@@ -223,4 +224,31 @@ fn produce_request(
                         .with_records(Some(encoded.freeze())),
                 ]),
         ])
+}
+
+#[tokio::test]
+async fn start_exposes_bound_listener_and_ready_handle() {
+    let handle = test_broker(1, 0).start().await.unwrap();
+    handle.ready().await.unwrap();
+
+    let addr = handle.local_addr();
+    assert_ne!(addr.port(), 0);
+    TcpStream::connect(addr).await.unwrap();
+
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_stops_accepting_new_connections() {
+    let handle = test_broker(1, 0).start().await.unwrap();
+    handle.ready().await.unwrap();
+    let addr = handle.local_addr();
+
+    handle.shutdown().await.unwrap();
+
+    let err = TcpStream::connect(addr).await.unwrap_err();
+    assert!(
+        err.kind() == std::io::ErrorKind::ConnectionRefused
+            || err.kind() == std::io::ErrorKind::AddrNotAvailable
+    );
 }

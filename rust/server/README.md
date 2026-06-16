@@ -13,6 +13,13 @@ Installed binaries:
 - `kafkalite` — run the broker
 - `store_tool` — inspect and repair on-disk storage
 
+Library exports:
+
+- `Config`
+- `FileStore`
+- `KafkaBroker`
+- `BrokerHandle`
+
 ## Current scope
 
 - single broker
@@ -20,6 +27,42 @@ Installed binaries:
 - configurable partition count per topic via `default_partitions` (default: `1`)
 - file-log persistence
 - narrow Kafka API surface
+
+## Library mode
+
+Embed the broker in a Tokio process with `start()` and shut it down through the returned handle.
+
+```rust
+use std::sync::Arc;
+
+use kafkalite_server::{Config, FileStore, KafkaBroker};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let config = Config::load(Some("rust/server/server.properties.example"))?;
+    let store = Arc::new(FileStore::open(&config.storage.data_dir)?);
+    let broker = KafkaBroker::new(config, store)?;
+    let handle = broker.start().await?;
+
+    handle.ready().await?;
+    println!("broker listening on {}", handle.local_addr());
+
+    handle.shutdown().await?;
+    Ok(())
+}
+```
+
+Lifecycle API:
+
+- `KafkaBroker::new(config, store)` validates config, opens cluster runtime state, and reloads persisted transaction/session metadata
+- `KafkaBroker::start().await` binds listeners and returns a `BrokerHandle`
+- `BrokerHandle::ready().await` waits until client and controller listeners are bound
+- `BrokerHandle::local_addr()` returns the bound Kafka client address, including ephemeral ports
+- `BrokerHandle::controller_addr()` returns the bound controller RPC address when controller RPC is enabled
+- `BrokerHandle::wait().await` blocks until the broker tasks exit and is the process-mode equivalent of the old `run()` path
+- `BrokerHandle::shutdown().await` requests graceful shutdown and waits for the broker tasks to stop
+
+`KafkaBroker::run()` is no longer part of the public lifecycle. Process-mode entrypoints should call `start()` and then `wait()`.
 
 ## Supported Kafka APIs
 
